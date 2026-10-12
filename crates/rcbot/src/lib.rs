@@ -2,9 +2,13 @@
 //! Specialists 3.0 only.
 //!
 //! This crate is the bot itself and has no FFI: everything it needs from the engine and the game
-//! comes in through traits (such as [`Random`]) that `crates/host` implements on top of the
+//! comes in through traits ([`nav::World`], [`Random`]) that `crates/host` implements on top of the
 //! port's plugin API. Upstream file and function names are cited in doc comments
 //! (``/// `WaypointFindPath` ``) so each piece can be checked against the C++.
+//!
+//! Ported so far (see `docs/design.md` for the full C++ → Rust map and the planned modules):
+//! * [`nav`]: `.rcw` waypoints (byte-compatible), flags, paths, the location buckets, the
+//!   visibility table and its `.rcv` file, A* (`waypoint.cpp`, `bot_navigate.cpp`).
 //!
 //! RCBot's licence: GPL-2.0-or-later with a linking exception for the HL engine and MODs; this port
 //! is GPL-3.0-or-later and keeps that exception (`LICENSE-EXCEPTION.txt`).
@@ -12,6 +16,7 @@
 #![warn(missing_docs)]
 
 pub mod math;
+pub mod nav;
 
 mod random;
 
