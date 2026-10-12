@@ -13,8 +13,9 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | Workspace, licences, xtask | done |
 | Navigation: `.rcw` waypoints (byte-compatible), flags, paths, visibility table (`.rcv`), A* | done; checked against RCBot's own code (docs/design.md §6) |
 | `bot_weapons.ini` (TS section) and the TS weapon table | done |
+| Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Plugin entry point and host interface | waiting for the plugin API for bots (#104) |
-| Combat, TS behaviour (loadouts, stunts, kung fu, pickups, teams), learning, squads, menus, profiles, commands, MegaHAL, botcam, waypoint editing and autowaypointing | to do |
+| Combat, TS behaviour (loadouts, stunts, kung fu, pickups, teams), squads, menus, profiles, commands, MegaHAL, botcam, waypoint editing and autowaypointing | to do |
 
 Only The Specialists 3.0 is supported. Code for RCBot's other mods, its copies of metamod, its
 engine hooks and its user-message parsing are not ported (the port supplies structured state
@@ -26,9 +27,10 @@ instead). See [docs/design.md](docs/design.md) for the C++ → Rust map.
 crates/rcbot     the bot (no unsafe, no FFI)
   src/nav/       waypoints, .rcw/.rcv files, location buckets, visibility, A*
   src/weapons/   bot_weapons.ini presets, weapon info, the TS weapon table
+  src/learn/     GA, perceptrons, NN, SOM, .rld learned-data files
 crates/host      the tsmod_rcbot library (the only crate allowed unsafe; a stub for now)
 data/rcbot       bot_weapons.ini (TS), waypoints/ts/ (44 maps)
-tools/reference  C++ harness that records RCBot's own results for the tests
+tools/reference  C++ harnesses that record RCBot's own results for the tests
 xtask            cargo xtask build | dist | test | lint | all
 ```
 

@@ -19,7 +19,7 @@ crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe. A stub u
                  state and events into calls on the bot.
 xtask            build | dist | test | lint | all
 data/rcbot       what the plugin ships: bot_weapons.ini (TS section), waypoints/ts/*.rcw
-tools/reference  the C++ reference harness: upstream code compiled with stubs (§6)
+tools/reference  the C++ reference harnesses: upstream code compiled with stubs (§6)
 ```
 
 Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `WaypointLocations`,
@@ -50,6 +50,15 @@ redesigned for bots without backward compatibility (#104).
 | `bot_weapons.h` `TSWeapon`; `bot_weapons.cpp` `pszTSWeaponModels`; the kung fu remap (`bot_client.cpp`) | `weapons/ts.rs` | |
 | `vector.h` `Vector` (`Length` as `pow(…, 0.5)`), `AngleVectors` forward | `math.rs` | |
 | `bot_weapons.ini` `[mod_id=8]` | `data/rcbot/bot_weapons.ini` | Upstream's current TS section (newer than the 2cwldys pack's copy) |
+| `gannconst.h` `CGenericHeader`, `LEARNTYPE_*`; `bot.h`/`bot.cpp` `CLearnedHeader`, `LEARNED_FILE_VER`; `bot_const.h` `BOT_VER` | `learn/header.rs` | |
+| The `fread`/`feof` behaviour the loaders rely on | `learn/io.rs` `Reader` | Short reads copy what is there and set end-of-file, as glibc's `fread` does |
+| `bits.{h,cpp}` `CBits` | `learn/bits.rs` | |
+| `ga.{h,cpp}` `IIndividual`, `CPopulation`, `CRouletteSelection`, `CTournamentSelection`, `CGA` (incl. adaptive mutation), `RCBOpenFile`'s names | `learn/ga.rs` | `m_iPopType` is the type parameter; `loadTeam`/`saveTeam` (unused, "not functional") are only the file name |
+| `bot_ga.{h,cpp}` `CBotGAValues`, `CIntGAValues`, `CBitsGAValues`, `CCombatFitnessMetrics` | `learn/values.rs` | |
+| `perceptron.{h,cpp}` `CPerceptron`, `CSigmoidTransfer` | `learn/perceptron.rs` | The file-path `load`/`save` overloads (unused) are dropped |
+| `nn.h`/`bot_nn.cpp` `NNLayer`, `NN`, `NNGATrained`, `CNNTrainSet`, `CCombatNNInputs`, `CCombatNNOutputs` | `learn/nn.rs` | `NN::train` is empty upstream and not ported |
+| `som.{h,cpp}` `CSom`, `CSomNeuron` | `learn/som.rs` | Unused upstream ("experimental") |
+| `bot.cpp` `setupDataStructures`, `SeedFlyGAValues`, `SeedTSWeaponSelectValues`, `loadLearnedData`, `saveLearnedData`; the learning parts of `SpawnInit` (personal and survival picks), of the death handling (fitness, breeding) and of the TS loadout choice; `globals.cpp` `CBotGlobals::loadLearnedData`/`saveLearnedData` | `learn/data.rs` `BotLearnedData`, `GlobalLearnedData` | NS's `combat0/1.rld` dropped; `bot_enemy_cost_ga.h` is empty upstream |
 
 ### Planned: every RCBot feature a TS server uses
 
@@ -63,7 +72,7 @@ redesigned for bots without backward compatibility (#104).
 | What the bot sees (`bot_visibles.{h,cpp}`), `bot_combat.cpp`, enemy choice, aiming and skill (`bot.cpp`), hearing | `combat/` | 5 |
 | `CBotWeapon(s)`, `GetBestWeaponId`, `NeedToReload`, `CanShootPrimary` (`bot_weapons`) | `weapons/bot_weapons.rs` | 5 |
 | TS: the loadout GA, the stunt perceptron, kung fu and power-ups, pickups, teamplay and CTB (`bot.cpp` `MOD_TS` branches; `UTIL_makeTSweapon` becomes buying through the host) | `ts/` | 6 |
-| Learning: `ga.{h,cpp}`, `bot_ga.{h,cpp}`, `perceptron.{h,cpp}`, `nn.h`/`bot_nn.cpp`, `som.{h,cpp}`, `bits.{h,cpp}`, `gannconst.h`, learned-data files (RCZ) | `learn/` | 6, 7 |
+| Using the learning in decisions: `dec_stunt` and the jump/duck/strafe, cover, hurt-origin and follow-enemy perceptrons' inputs (`bot.cpp`), enemy costs from `m_GASurvival` | `bot/`, `ts/` (on `learn/`) | 5, 6 |
 | `rcbot` commands (`bot_commands.cpp`), `CBotGlobals` and its ini files (`globals.cpp`: `bot_config.ini`, `bot_users.ini`, ...), bot profiles (`dll.cpp`), menus (`bot_menu.cpp`), `CClient` (`client.cpp`) | `config/` | 4, 7 |
 | MegaHAL (`megahal.cpp`), bot chat (`bot_chat.ini`, `bot_rep_chat.ini`) | `chat/` | 7 |
 | `util.cpp` helpers | next to their callers | |
@@ -103,6 +112,30 @@ bytes alone) still load. See §5.1.
 
 **`bot_weapons.ini`** (`weapons/presets.rs`): documented on the module.
 
+**Learned data** (`learn/`), little-endian, no padding. Every learning object starts with a
+32-byte `CGenericHeader`, the string `"t-<LEARNTYPE>-s-<size>"`; loaders compare the string
+(`strcmp`) with the one they expect, and a mismatch consumes the header and nothing else.
+
+* `CBotGAValues`: header (3, values), `u32` count, `f32` values, `f32` fitness.
+* `CIntGAValues`: `i32` 4, `i32` value, `f32` fitness (no header).
+* `CBitsGAValues`: header (3, bits), a `CBits` (header (6, bits), `u32` bits, the bytes), `f32` fitness.
+* `CPopulation`: header (2, the GA's *maximum* size), `u32` count, the individuals. A `CGA` is its
+  population then its new population.
+* `CPerceptron`: header (1, inputs), `i32` inputs, `f32` bias, `f32` learn rate, `u32` + `f32`s
+  last inputs, `u32` + `f32`s weights (bias weight first), `f32` output, 1-byte `trained`.
+* `NN`: `u32` layers, header (4, layers), layers; `NNLayer`: `u32` neurons, header (5, neurons),
+  perceptrons.
+* `<profile>.rld` (profiles folder): a 40-byte `CLearnedHeader` (`char[32]` `"1.51b14"`
+  zero-padded, `i32` profile id, `i32` 1), then `m_GASurvival` (16), `dec_attackElectrified`,
+  `dec_flapWings`, `dec_runForCover`, `dec_faceHurtOrigin`, `dec_jump`, `dec_duck`, `dec_strafe`,
+  `m_pPersonalGAVals` (22), `m_personalGA` (`CGA(5)`, 22), `m_pFlyGA` (`CGA(6)`, 6),
+  `m_pFlyGAVals` (6), `dec_followEnemy`, `m_pTSWeaponSelect` (8), `dec_stunt`, `m_pCombatBits`;
+  saved in an RCZ container, uncompressed files still load. The header's version must match
+  exactly: files from the metamod build (`"1.51b14_mm"`) don't load, as upstream.
+* `team<n>.rld` (bot folder, teams 0-3): `CLearnedHeader` with the team number, the team's
+  enemy-cost `CGA()` (16 genes). `tsweaps.rld`: the TS loadout `CGA()` (8 genes), no header.
+  Both uncompressed.
+
 ## 4. Deviations
 
 Where the port behaves differently from upstream on purpose. Everything else, quirks included, is
@@ -123,6 +156,19 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **`WeaponInfo::prim_max_range`/`prim_min_range`** return what their names say (upstream's are
   swapped, §5.11). Nothing calls them yet; the combat port decides where the old behaviour must
   stay.
+* **Learned data**: the bytes after a `CGenericHeader`'s terminator are zero (upstream writes
+  uninitialised stack, like §5.8; loaders ignore them). Counts in a damaged file larger than what
+  is left are short reads instead of allocations of that size. Out-of-range gene reads
+  (`CBotGAValues::get`, asserts upstream) give 0; the GA breeds nothing from an empty population
+  (undefined upstream); crossover of individuals of different sizes swaps what both have.
+* **`tsweaps.rld` loads with 8 genes**, what the loadouts have (upstream asks for 16, so nothing
+  loads, §5.18). Every other load keeps upstream's sizes, including the ones that never match
+  (`m_pCombatBits`, §5.20).
+* **A perceptron read on its own** (`CPerceptron(FILE*)`, used by `NN::load`) accepts the
+  perceptron header for the input count stored after it, so `NN::load` reads what `NN::save`
+  wrote (§5.21).
+* **`CSom::m_fLearnRate`** is per map instead of a static shared by all maps (no map exists
+  upstream, so nothing changes).
 * **Additions**: `VisibilityTable::rows_in_file` and `work_out_rows`, so the host can rebuild only
   the rows an upstream `.rcv` doesn't hold (§5.1); the file format is unchanged.
 
@@ -175,6 +221,42 @@ Found while porting; not filed upstream.
 15. **`BotNavigate_FindPathFromTo`'s `iFrom = iIndex`** (`bot_navigate.cpp:1711`) is dead code:
     `WaypointFindPath` only reads the index on its first call.
 16. **More than 1024 waypoints in a file** overrun `waypoints[]` on load.
+17. **The GA's two elite slots hold the same individual** (`CGA::epoch`, `ga.cpp:342-349`): the
+    loop asks `getBestIndividual()` twice instead of taking the top two. Kept.
+18. **`tsweaps.rld` never loads** (`CBotGlobals::loadLearnedData`, `globals.cpp:1672`): it loads
+    with 16 genes per individual, but loadouts have 8 (`SeedTSWeaponSelectValues`,
+    `bot.cpp:1378`). Each individual's header mismatches, the rest of the file is misread, and the
+    GA fills with empty individuals; a bot that picks one reads genes 0-2 past the end of an empty
+    vector (`bot.cpp:3208`, `:3224`). Fixed (§4).
+19. **One mismatched object misaligns the rest of a `.rld`** (`CBotGAValues::load`,
+    `CPerceptron::load`, `CPopulation::load`): a header mismatch consumes only the header, so
+    every later object reads from the wrong place. A bot saved before its first spawn has no
+    survival genes (header `t-3-s-0`, loaded with 16), so nothing after them loads. Kept.
+20. **`m_pCombatBits` never loads** (`bot.cpp:927`, `:984`): `CIntGAValues::save` writes the check
+    `sizeof(int)` (4, `bot_ga.h:259`) and the bot loads with 1. NS only, last in the file; kept.
+21. **`NN::load` can't read `NN::save`'s output** (`CPerceptron(FILE*)`, `perceptron.h:85`): the
+    empty perceptron checks the header against 0 inputs. Unused upstream; fixed (§4).
+22. **`NN::trainOutputs` trains the first layer** (`bot_nn.cpp:122`): the wanted outputs go to the
+    neurons in layer order, not to the output layer. Unused; kept.
+23. **`CBitsGAValues::crossOver` swaps both sides of the point** (`bot_ga.cpp:330`): the bytes
+    after the crossover byte are swapped too, so the children are the parents swapped except for
+    the top bits of one byte. Unused; kept.
+24. **Uninitialised `CGenericHeader` bytes** (`gannconst.h:63`): only the string is written into
+    the 32-byte array; the rest is stack garbage in every learned-data file. Zero in the port.
+25. **`CGA(ISelection*)`** (`ga.cpp:237`) never calls `setGA` on its populations (so saving
+    dereferences null) and leaves the maximum size at 0. Unused.
+26. **`CIntGAValues::crossOver`'s mask is `RANDOM_LONG(0, 32)`** (`bot_ga.h:268`), so only the low
+    six bits ever cross. NS only; kept.
+27. **`CSom::m_fLearnRate` is a static** (`som.cpp:48`, `:106`) that every map's training shrinks
+    and nothing resets. Unused.
+28. **`dec_jump`, `dec_duck`, `dec_strafe` are built for 4 inputs** (`bot.cpp:1459-1476`) but get 5
+    weights and 5 inputs (`decideJumpDuckStrafe`, `bot.cpp:16892-16909`): running works (sizes
+    agree), training would refuse, and their saved headers say 4. Kept (the file format depends
+    on it).
+
+Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
+(`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
+bias weight.
 
 Data: `ts_hammertime_d1.rcw` names its map `ts_hammertime2_d1`, so it never loads on
 `ts_hammertime_d1`.
@@ -189,7 +271,10 @@ those by going through the port's own code when that code is ported.
 
 * **Unit tests** in each module: path slots and the cursor, the searches, buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,
-  `stoi`, the ini parser's quirks, weapon info, the TS table.
+  `stoi`, the ini parser's quirks, weapon info, the TS table; the learning code (headers and
+  `fread`/`feof` behaviour, each object's file layout and round trip, mismatched and truncated
+  loads, crossover/mutation/selection by scripted draws, the GA's epoch and adaptive rate, the
+  delta rule, the NN, the SOM, `.rld` round trips including upstream's misalignment).
 * **`tests/ts_waypoints.rs`**, on all 44 shipped TS files: every file loads and saves back **byte
   for byte**; map names are checked as upstream does; the graphs are sane; and A* on 40 random
   pairs per map agrees with a Dijkstra reference built on the same rules (same reachability;
@@ -203,3 +288,11 @@ those by going through the port's own code when that code is ported.
   searches on 6 maps (bot elsewhere on the map, teams -1/0/1, 150 or 7 expansions per frame) and
   matches upstream's return value, frame count and whole path on every one; the port's `.rcv`
   files for 154 and 791 waypoints are byte-identical to upstream's.
+* **`tests/upstream_learn.rs`**, the learning code against RCBot's: `build.sh` also compiles
+  `ga.cpp`, `bot_ga.cpp`, `perceptron.cpp`, `bot_nn.cpp`, `som.cpp` and `bits.cpp` unchanged
+  against stub headers (`tools/reference/learn_stubs/`), with `RANDOM_LONG`/`RANDOM_FLOAT`
+  replaced by the port's `XorShiftRandom`, and `learn_harness.cpp` records 7 seeded scenarios: GA
+  breeding with picks (`CBotGAValues`, `CIntGAValues`), bit-string crossover and mutation,
+  perceptron training, a GA-trained network, SOM training, and `tsweaps.rld` saved and reloaded
+  upstream's way. The port reproduces every file byte for byte (same draws in the same order,
+  same float arithmetic).
