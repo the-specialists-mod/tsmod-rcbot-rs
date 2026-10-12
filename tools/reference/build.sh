@@ -44,4 +44,21 @@ for map in ts_dojo ts_lobby mecklenburg_b5 tm_avana crossfire ahl_museum; do
 done
 "$WORK/harness" rcz 154 "$OUT/vis154.rcz"
 "$WORK/harness" rcz 791 "$OUT/vis791.rcz"
+
+# ---- learning (learn_harness.cpp) ----
+# The learning sources compile unchanged, next to stub headers that replace the engine and the bot
+# (quoted includes look next to the including file first, so the copies must share a directory).
+# -ftrivial-auto-var-init=zero makes the bytes after CGenericHeader's terminator zero, as the port
+# writes them (upstream leaves them uninitialised, design §4); -ffp-contract=off keeps float
+# arithmetic as the port does it.
+L=$WORK/learn
+mkdir -p "$L"
+cp "$HERE"/learn_stubs/*.h "$L/"
+for f in gannconst.h ga.h ga.cpp bot_ga.h bot_ga.cpp perceptron.h perceptron.cpp nn.h bot_nn.cpp som.h som.cpp bits.h bits.cpp; do
+    cp "$D/$f" "$L/"
+done
+LFLAGS="-std=c++17 -O1 -ffp-contract=off -ftrivial-auto-var-init=zero -include extdll.h"
+for f in ga bot_ga perceptron bot_nn som bits; do $CXX $LFLAGS -I"$L" -c "$L/$f.cpp" -o "$L/$f.o"; done
+$CXX $LFLAGS -I"$L" "$HERE/learn_harness.cpp" "$L"/*.o -o "$WORK/learn_harness"
+"$WORK/learn_harness" "$OUT"
 echo "recorded into $OUT"
