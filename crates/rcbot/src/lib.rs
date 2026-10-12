@@ -9,6 +9,7 @@
 //! Ported so far (see `docs/design.md` for the full C++ → Rust map and the planned modules):
 //! * [`nav`]: `.rcw` waypoints (byte-compatible), flags, paths, the location buckets, the
 //!   visibility table and its `.rcv` file, A* (`waypoint.cpp`, `bot_navigate.cpp`).
+//! * [`weapons`]: `bot_weapons.ini` presets and the TS weapon table (`bot_weapons.{h,cpp}`).
 //!
 //! RCBot's licence: GPL-2.0-or-later with a linking exception for the HL engine and MODs; this port
 //! is GPL-3.0-or-later and keeps that exception (`LICENSE-EXCEPTION.txt`).
@@ -17,8 +18,10 @@
 
 pub mod math;
 pub mod nav;
+pub mod weapons;
 
 mod random;
+mod stoi;
 
 pub use math::Vector;
 pub use random::{Random, XorShiftRandom};
