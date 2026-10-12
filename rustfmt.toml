@@ -1,0 +1,5 @@
+# Matches the code's existing style: long single-line expressions and early returns stay on one
+# line up to 140 columns.
+edition = "2024"
+max_width = 140
+use_small_heuristics = "Max"

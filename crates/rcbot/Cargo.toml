@@ -1,0 +1,11 @@
+[package]
+name = "rcbot"
+description = "RCBot1 (Cheeseh's HL bot) ported to Rust for The Specialists 3.0: the bot AI, without any FFI"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+miniz_oxide.workspace = true

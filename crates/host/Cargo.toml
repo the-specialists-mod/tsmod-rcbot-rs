@@ -1,0 +1,18 @@
+[package]
+name = "tsmod-rcbot"
+description = "The tsmod_rcbot plugin library: RCBot for the TS Rust port, loaded through the port's plugin API"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The port loads every `tsmod_*` library in its dlls/ directory (the-specialistsmod-rs#104).
+# `cargo xtask dist` renames the output to the port's platform names: tsmod_rcbot.dll (win32),
+# tsmod_rcbot_amd64.dll, tsmod_rcbot_i386.so, tsmod_rcbot_amd64.so.
+[lib]
+name = "tsmod_rcbot"
+crate-type = ["cdylib"]
+
+[dependencies]
+rcbot.workspace = true

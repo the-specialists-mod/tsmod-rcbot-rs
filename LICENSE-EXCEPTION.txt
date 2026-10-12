@@ -1,0 +1,25 @@
+tsmod-rcbot-rs is a port of RCBot (rcbotold, by Paul "Cheeseh" Murphy, based on botman's HPB bot
+template, maintained by [APG]RoboCop) to Rust. RCBot is licensed under the GNU General Public
+License, version 2, or (at your option) any later version; this port is licensed under the GNU
+General Public License, version 3, or (at your option) any later version (the full text is in
+LICENSE), and, as a work based on RCBot, it keeps the special exception from RCBot's file headers
+(dlls/bot.cpp and every other RCBot source file), quoted here unchanged:
+
+----------------------------------------------------------------------------------------------
+
+    In addition, as a special exception, the author gives permission to
+    link the code of this program with the Half-Life Game Engine ("HL
+    Engine") and Modified Game Libraries ("MODs") developed by Valve,
+    L.L.C ("Valve").  You must obey the GNU General Public License in all
+    respects for all of the code used other than the HL Engine and MODs
+    from Valve.  If you modify this file, you may extend this exception
+    to your version of the file, but you are not obligated to do so.  If
+    you do not wish to do so, delete this exception statement from your
+    version.
+
+----------------------------------------------------------------------------------------------
+
+The contributors to tsmod-rcbot-rs extend the same exception to this port.
+
+Upstream: https://github.com/APGRoboCop/rcbotold (ported from commit
+b9c86c2cbb4115d950ae24c8cd344a4216522888, "V 1.51-beta13").

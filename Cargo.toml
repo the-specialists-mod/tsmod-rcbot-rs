@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/*", "xtask"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/the-specialists-mod/tsmod-rcbot-rs"
+
+# No dependency on the port's crates yet: the plugin API the host will use is being redesigned
+# for bots (the-specialists-mod/the-specialistsmod-rs#104). When it lands, add `goldsrc-sys` and
+# `ts-plugin-api` here as git dependencies pinned to one rev, as tsmod-amxx-rs does.
+[workspace.dependencies]
+rcbot = { path = "crates/rcbot" }
+# The visibility table's RCZ container is miniz's zlib stream (rc_compress.cpp); miniz_oxide is
+# the Rust port of the same deflate code.
+miniz_oxide = "0.8"
+
+[profile.dev]
+panic = "abort" # unwinding across the C ABI is UB; be explicit
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
