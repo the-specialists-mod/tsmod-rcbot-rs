@@ -1,0 +1,1026 @@
+//! The bot's frame (`globals.cpp`'s per-bot part of `CBotGlobals::StartFrame`; `bot.cpp`
+//! `CBot::Think`, `SpawnInit`, `DoTasks`, `LookForNewTasks`, `WantToFindEnemy`;
+//! `util.cpp` `UTIL_UpdateSounds`, `UTIL_IsFacingEntity`; `CBot::CanPickup`).
+//!
+//! TS only. Tasks no TS bot creates are not ported (design §2). Upstream's death-time `buy` /
+//! `menuselect 7` (marked "doesn't work") is replaced by the loadout the gun choice buys.
+
+use super::look::make_vectors;
+use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, LookTask, TS_STATE_STUNT, Task, TaskKind, buttons, cond};
+use crate::config::flags as cfg;
+use crate::learn::BotLearnedData;
+use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl};
+use crate::weapons::TsWeapon;
+use crate::{Random, Vector};
+
+impl Bot {
+    /// One server frame for this bot: the `StartFrame` loop's kick / kill / think, then
+    /// `RunPlayerMove`. `world` must report the bot's own entity, else nothing happens.
+    pub fn frame(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) -> Frame {
+        let mut out = Frame::default();
+        let Some(me) = w.entity(self.index) else { return out };
+        self.state = me.player.unwrap_or_default();
+        // The engine sets `v_angle` from our usercmd; it differs when the game turned the
+        // player (spawn, teleport: `fixangle`).
+        self.v_angle = me.v_angle;
+        self.me = me;
+        self.base_turn_speed = g.config.turn_speed;
+
+        // `BotClient_TS_WeaponInfo`: the port reports the weapon in hand.
+        if self.state.alive {
+            let info = (self.state.weapon, self.state.clip, self.state.ammo);
+            if self.last_weapon_info != Some(info) {
+                self.last_weapon_info = Some(info);
+                let r = self.weapons.weapon_info(info.0, info.1, info.2, g.weapons, g.presets);
+                self.current_weapon = Some(r.current);
+                if r.drop {
+                    self.add_priority_task(Task::simple(TaskKind::DropWeapon));
+                }
+            }
+        }
+        // `StartFrame`: TS bots always have kung fu. Upstream adds weapon 36, which is TS 3.0's
+        // Contender; kung fu is 38 (design §5).
+        if !self.weapons.has(TsWeapon::KungFu.id()) {
+            self.weapons.add(TsWeapon::KungFu.id(), g.weapons);
+        }
+
+        if self.kick {
+            self.kick = false;
+            out.actions.push(Action::Kick);
+            return out;
+        }
+        if self.is_alive() && self.kill {
+            self.kill = false;
+            out.actions.push(Action::Kill);
+            return out;
+        }
+        self.think(g, w, rng);
+        out.actions.append(&mut self.actions);
+        out.cmd = self.run_player_move(w.time());
+        out
+    }
+
+    /// `CBot::SpawnInit(false)`: forget this life (tasks, path, enemy, waypoints) and pick new
+    /// genes.
+    pub(crate) fn spawn_init(&mut self, g: &mut BotGlobals<'_>, rng: &mut dyn Random) {
+        self.respawn_time = 0.0;
+        self.tasks.flush();
+        self.paths.bot_paths.clear();
+        let team = usize::try_from(self.team).ok().filter(|&t| t < crate::learn::data::MAX_TEAMS).unwrap_or(0);
+        self.learned.on_spawn(&mut g.learned.enemy_costs[team], rng);
+        self.zoom = false;
+        self.used_melee = false;
+        self.next_get_enemy_time = 0.0;
+        self.avoid_move_to = Vector::ZERO;
+        self.avoid_time = 0.0;
+        self.hold_attack_time = 0.0;
+        self.not_following_waypoint = false;
+        self.last_no_move = 0.0;
+        self.vis_update_revs = 0;
+        self.up_time = 0.0;
+        self.paths.next_clear_failed_goals = 0.0;
+        self.current_weapon = None;
+        self.last_weapon_info = None;
+        self.last_enemy = None;
+        self.last_failed_waypoint = -1;
+        self.listen_to_sound_time = 0.0;
+        self.last_call_run_player_move = 0.0;
+        self.pickup_entity = None;
+        self.last_update_conditions = 0.0;
+        self.last_think_time = 0.0;
+        self.update_waypoint_time = 0.0;
+        self.kill = false;
+        self.last_look_time = 0.0;
+        self.move_to_valid = false;
+        self.goal_waypoint = -1;
+        self.current_waypoint = -1;
+        self.prev_waypoint = -1;
+        self.current_waypoint_flags = 0;
+        self.prev_waypoint_dist = 4096.0;
+        self.last_see_waypoint = 0.0;
+        self.stuck_time = 0.0;
+        self.move_speed = 0.0;
+        self.up_speed = 0.0;
+        self.strafe_speed = 0.0;
+        self.strafe_time = 0.0;
+        self.start_jump_time = 0.0;
+        self.end_jump_time = 0.0;
+        self.start_duck_time = 0.0;
+        self.end_duck_time = 0.0;
+        self.update_visibles_time = 0.0;
+        self.enemy = None;
+        self.first_see_enemy_time = 0.0;
+        self.get_aim_vector_time = 0.0;
+        self.enemy_rep = None;
+        self.conditions = 0;
+        self.find_path_time = 0.0;
+        self.avoid_entity = None;
+        self.need_to_init = false;
+        self.move_to = Vector::ZERO;
+        self.look_task = LookTask::NextWaypoint;
+        self.hurt_origin = Vector::ZERO;
+        self.hurt_time = 0.0;
+        self.ideal_move_speed = self.max_speed;
+        self.touched_waypoints = 0;
+    }
+
+    /// `CBot::Think`.
+    pub(crate) fn think(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+        let now = w.time();
+        let v = self.me.velocity + self.me.basevelocity;
+        self.velocity_3d = v.length();
+        self.velocity_2d = v.length_2d();
+        self.look_for_new_tasks = true;
+        self.move_speed = 0.0;
+        if self.up_time < now {
+            self.up_speed = 0.0;
+        }
+        let last_buttons = self.button;
+        // `NotStartedGame` is false in TS; the port's rules team (from 1) is RCBot's team from 0.
+        self.team = if w.teamplay() && self.state.team > 0 { self.state.team - 1 } else { -1 };
+
+        if !self.paths.failed_goals.is_empty() && self.paths.next_clear_failed_goals < now {
+            self.paths.failed_goals.clear();
+        }
+
+        if !self.is_alive() {
+            if self.need_to_init {
+                self.num_deaths += 1;
+                let survival = now - self.spawn_time;
+                let frags_since = self.me.frags as i32 - self.frags_since_death;
+                let team = usize::try_from(self.team).ok().filter(|&t| t < 4).unwrap_or(0);
+                let team_score_since = g.team_scores[team] - self.prev_team_score;
+                self.prev_team_score = g.team_scores[team];
+                let fitness = BotLearnedData::death_fitness(survival, frags_since, team_score_since);
+                let used_melee = self.used_melee;
+                self.learned.on_death(fitness, used_melee, &mut g.learned.ts_weapon_choices, &mut g.learned.enemy_costs[team], rng);
+                self.spawn_init(g, rng);
+                self.spawn_time = 0.0;
+            }
+            if self.respawn_time < now {
+                self.actions.push(Action::Command("respawn".into()));
+                self.respawn_time = now + 5.0;
+            }
+            self.button = if rng.random_long(0, 1) != 0 { buttons::ATTACK } else { 0 };
+            return;
+        }
+
+        if self.spawn_time == 0.0 {
+            self.spawn_time = now;
+            self.frags_since_death = self.me.frags as i32;
+            self.prev_health = self.me.health;
+            self.spawn_position = self.me.origin;
+        }
+        self.need_to_init = true;
+
+        self.work_view_angles(w, rng);
+        self.work_move_direction(w, g);
+        self.check_stuck(w, g, rng);
+
+        if self.last_think_time >= now {
+            return;
+        }
+        self.last_think_time = now + self.think_time;
+
+        if !self.has(cond::SELECTED_GUN) {
+            let picks = self.learned.select_ts_weapons(&mut g.learned.ts_weapon_choices, g.config.is_on(cfg::DISABLE_WEAPON_LEARN), rng);
+            if !g.config.is_on(cfg::TS_KUNGFU) {
+                self.actions.push(Action::Loadout(picks.to_vec()));
+            }
+            self.set(cond::SELECTED_GUN);
+        }
+
+        self.ideal_move_speed = self.max_speed;
+        self.want_to_find_enemy = !g.config.is_on(cfg::DONT_SHOOT);
+        self.update_conditions(w);
+
+        if self.update_visibles_time < now {
+            self.update_visibles_time = now + self.profile.vision_time;
+            if !self.update_visibles(g, w, rng) && self.next_work_range_costs < now {
+                self.next_work_range_costs = now + 1.0;
+            }
+        }
+
+        if last_buttons == self.button {
+            self.button = 0;
+        }
+
+        // TS: reload or switch an empty gun.
+        if let Some(cur) = self.current_weapon.and_then(|id| self.weapons.get(id)).cloned()
+            && !cur.is_melee()
+        {
+            if cur.clip_is_empty() {
+                if let Some(enemy) = self.resolve(w, self.enemy) {
+                    let best = self.best_weapon(w, Some(&enemy)).0;
+                    if best != 0 && best != cur.id {
+                        self.switch_weapon(best);
+                    } else if cur.can_reload() && !cur.out_of_ammo() {
+                        self.reload();
+                    }
+                } else if cur.can_reload() && !cur.out_of_ammo() {
+                    self.reload();
+                }
+            } else if self.enemy.is_none() && cur.low_on_ammo() && cur.can_reload() {
+                self.reload();
+            }
+        }
+
+        // Can the bot see where it is going?
+        if self.current_waypoint == -1 || self.current_waypoint_flags & fl::LADDER == 0 {
+            let tr = w.trace_line(self.me.origin, self.move_to, Monsters::Ignore, Glass::Ignore, Some(self.index));
+            let mut see = tr.fraction >= 1.0;
+            if !see
+                && let Some(hit) = tr.hit.filter(|&h| h != 0).and_then(|h| w.entity(h))
+                && hit.classname != "worldspawn"
+                && (hit.velocity != Vector::ZERO || hit.classname.starts_with("func_door"))
+            {
+                // A door or something moving: walk through.
+                see = true;
+            }
+            if see {
+                self.set(cond::SEE_NEXT_WAYPOINT);
+                self.last_see_waypoint = 0.0;
+            } else {
+                if self.has(cond::SEE_NEXT_WAYPOINT) {
+                    self.last_see_waypoint = now;
+                }
+                self.clear(cond::SEE_NEXT_WAYPOINT);
+            }
+        } else if self.move_to_valid {
+            self.last_see_waypoint = 0.0;
+        }
+
+        if let Some(t) = self.tasks.current().and_then(|t| t.edict).and_then(|e| self.resolve(w, Some(e))) {
+            let tr = w.trace_line(self.me.origin, t.entity_origin(), Monsters::Ignore, Glass::Ignore, Some(self.index));
+            if tr.fraction >= 1.0 {
+                self.set(cond::SEE_TASK_EDICT);
+            } else {
+                self.clear(cond::SEE_TASK_EDICT);
+            }
+        }
+
+        if self.update_waypoint_time < now && !self.update_waypoint(g, w, rng) {
+            self.update_waypoint_time = now + 0.5;
+        }
+
+        if self.enemy.is_none() {
+            if self.climb_type() == super::Climb::None && self.listen_to_sound_time < now {
+                self.listen_to_sound_time = now + self.reaction_time + rng.random_float(0.3, 0.75);
+                if let Some(p) = self.update_sounds(w)
+                    && !self.tasks.has_task(TaskKind::ListenToSound)
+                {
+                    let f = rng.random_float(2.0, 3.0);
+                    self.add_priority_task(Task::new(TaskKind::ListenToSound, 0, Some(p.handle()), 0, f, Vector::ZERO));
+                }
+            } else if self.chat_message_time < now {
+                // Idle chat comes with step 7 (`BotChat(BOT_CHAT_IDLE)`).
+                self.chat_message_time = now + rng.random_float(10.0, 20.0);
+            } else if self.last_see_enemy_time > 0.0 && self.last_see_enemy_time + 5.0 < now {
+                if self.current_weapon.and_then(|id| self.weapons.get(id)).is_some_and(|w| w.can_reload() && w.out_of_ammo()) {
+                    self.add_priority_task(Task::simple(TaskKind::Reload));
+                }
+                self.last_see_enemy_time = 0.0;
+            }
+        } else {
+            self.chat_message_time = now + 5.0;
+            self.last_see_enemy_time = now;
+        }
+
+        self.clear(cond::CANT_SHOOT);
+        self.enemy = None;
+        self.do_tasks(g, w, rng);
+        self.clear(cond::TASK_EDICT_PAIN);
+        if self.look_for_new_tasks {
+            self.look_for_new_tasks(g, w, rng);
+        }
+        // `WantToFindEnemy`, TS: unless `dont_shoot` is on.
+        self.enemy = if self.want_to_find_enemy { self.find_enemy(w, rng) } else { None };
+    }
+
+    /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0).
+    pub(crate) fn switch_weapon(&mut self, id: i32) -> bool {
+        if self.current_weapon == Some(id) {
+            return true;
+        }
+        let game_id = if id == TsWeapon::KungFu.id() { 0 } else { id };
+        self.actions.push(Action::SelectWeapon(game_id));
+        self.current_weapon = Some(id);
+        self.zoom = false;
+        true
+    }
+
+    /// `UTIL_UpdateSounds`: the nearest other living player within 750 units firing (`IN_ATTACK`;
+    /// TS doesn't listen for footsteps), more than 128 units away for a teammate, 64 for others.
+    fn update_sounds(&self, w: &dyn BotWorld) -> Option<Entity> {
+        let mut nearest = 750.0;
+        let mut found = None;
+        for i in 1..=w.max_clients() {
+            if i == self.index {
+                continue;
+            }
+            let Some(p) = w.entity(i) else { continue };
+            if !p.is_alive() || p.netname.is_empty() || p.button & buttons::ATTACK == 0 {
+                continue;
+            }
+            let same_team = p.player.map(|s| s.team) == Some(self.state.team);
+            let d = (self.me.origin - p.origin).length();
+            if d < nearest && ((same_team && d > 128.0) || (!same_team && d > 64.0)) {
+                nearest = d;
+                found = Some(p);
+            }
+        }
+        found
+    }
+
+    /// `CBot::CanPickup`, TS: power-ups and ground weapons in reach.
+    fn can_pickup(&self, now: f32, e: &Entity) -> bool {
+        if self.pickup_item_time > now || e.effects & EF_NODRAW != 0 || e.origin.z > self.me.origin.z + MAX_JUMP_HEIGHT {
+            return false;
+        }
+        e.classname.starts_with("ts_powerup") || e.classname == "ts_groundweapon"
+    }
+
+    /// `UTIL_IsFacingEntity`: the view line at the entity's distance ends inside its box.
+    fn facing(&self, e: &Entity) -> bool {
+        let (forward, _) = make_vectors(self.v_angle);
+        let src = self.gun_position();
+        let dst = src + forward * (e.entity_origin() - src).length();
+        dst.x <= e.absmax.x
+            && dst.y <= e.absmax.y
+            && dst.z <= e.absmax.z
+            && dst.x >= e.absmin.x
+            && dst.y >= e.absmin.y
+            && dst.z >= e.absmin.z
+    }
+
+    /// `CBot::LookForNewTasks`, TS: pick up the nearest visible weapon or power-up; in teamplay
+    /// go to a random end-level waypoint; else roam (a remembered enemy position half the time,
+    /// otherwise a random goal).
+    fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+        let now = w.time();
+        self.stop_moving();
+        self.look_task = if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) {
+            LookTask::SearchForLastEnemy
+        } else {
+            LookTask::LookAround
+        };
+        let mut nearest_pickup: Option<(Entity, f32)> = None;
+        for i in self.visibles.clone() {
+            if i == self.index {
+                continue;
+            }
+            let Some(e) = w.entity(i) else { continue };
+            let d = self.distance_from(e.entity_origin(), false);
+            if nearest_pickup.as_ref().is_none_or(|(_, nd)| d < *nd) && self.can_pickup(now, &e) {
+                nearest_pickup = Some((e, d));
+            }
+        }
+        let id = self.tasks.new_schedule_id();
+        let mut roam = true;
+        if !g.config.is_on(cfg::TS_DONT_PICKUP_WEAPONS)
+            && let Some((p, _)) = nearest_pickup
+        {
+            let h = Some(p.handle());
+            self.add_task(Task::new(TaskKind::FindPath, id, h, 0, 0.0, Vector::ZERO));
+            self.add_task(Task::new(TaskKind::PickupItem, id, h, 0, 0.0, Vector::ZERO));
+            self.add_task(Task::new(TaskKind::Use, id, h, 0, 0.0, Vector::ZERO));
+            roam = false;
+        } else if w.teamplay() {
+            // The TS objectives (`TSObjective` messages) aren't reported by the port yet.
+            let wpt = g
+                .waypoints
+                .find_random_goal_near(self.me.origin, 4096.0, -1, fl::ENDLEVEL, &self.paths.failed_goals, rng)
+                .map_or(-1, |i| i as i32);
+            if self.current_waypoint != wpt && wpt != -1 {
+                self.add_task(Task::new(TaskKind::FindPath, 0, None, wpt, -1.0, Vector::ZERO));
+                roam = false;
+            }
+        }
+        if !roam {
+            return;
+        }
+        self.looking_for_enemy = false;
+        let check_enemy = rng.random_long(0, 1) != 0 && self.remembered.any();
+        if !check_enemy {
+            if self.tasks.is_empty() {
+                // TS bots never assemble squads.
+                self.add_priority_task(Task::new(TaskKind::FindPath, id, None, -1, -1.0, Vector::ZERO));
+            }
+        } else if let Some(pos) = self.remembered.newest().copied() {
+            let spotted = pos.origin;
+            let mut v = pos.origin;
+            let mut wpt = self.nearest_waypoint(g, w, v, REACHABLE_RANGE, -1, true, false, false);
+            if wpt == -1 {
+                v = pos.visible_origin;
+                wpt = self.nearest_waypoint(g, w, v, REACHABLE_RANGE, -1, true, false, false);
+            }
+            if wpt != -1 && !self.paths.failed_goals.contains(&(wpt as usize)) {
+                if spotted != v {
+                    self.add_priority_task(Task::new(TaskKind::WaitAndFaceVector, id, None, 0, 1.0, spotted));
+                }
+                self.add_priority_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO));
+                self.looking_for_enemy = true;
+            }
+        }
+        if self.tasks.is_empty() {
+            self.add_priority_task(Task::new(TaskKind::FindPath, id, None, -1, -1.0, Vector::ZERO));
+        }
+        if self.looking_for_enemy {
+            self.add_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, 0.0, Vector::ZERO));
+        }
+    }
+
+    /// `CBot::DoTasks`: runs the current task, then finishes or fails it.
+    fn do_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+        let now = w.time();
+        if let Some(t) = self.tasks.current() {
+            if t.timed_out(now) {
+                let id = t.schedule_id;
+                self.tasks.finish_schedule(id);
+            } else {
+                self.tasks.remove_timed_out_schedules(now);
+            }
+        }
+        let Some(task) = self.tasks.current().copied() else { return };
+        let mut done = false;
+        let mut path_found = false;
+        let mut failed = false;
+        let mut to_add: Option<Task> = None;
+        self.look_for_new_tasks = false;
+
+        match task.kind {
+            TaskKind::None => {}
+            TaskKind::FindPath => self.task_find_path(g, w, rng, task, &mut done, &mut failed, &mut path_found),
+            TaskKind::NormalAttack => self.task_normal_attack(g, w, rng, task, &mut done, &mut failed, &mut to_add),
+            TaskKind::SearchForEnemy => {
+                if self.enemy.is_some() || self.has(cond::SEE_ENEMY) {
+                    failed = true;
+                } else {
+                    self.look_task = LookTask::SearchForEnemy;
+                    self.stop_moving();
+                    if task.int == 0 {
+                        let t = self.tasks.current_mut().expect("current task");
+                        t.float += now;
+                        t.int = 1;
+                        self.search_enemy_time = t.float;
+                    } else if task.float <= now {
+                        done = true;
+                    }
+                }
+            }
+            TaskKind::Reload => {
+                self.set(cond::CANT_SHOOT);
+                match self.current_weapon {
+                    None => failed = true,
+                    Some(id) if !self.weapons.has(id) => {
+                        failed = true;
+                        self.current_weapon = None;
+                    }
+                    Some(_) => {
+                        if self.last_enemy.is_some() {
+                            self.look_task = LookTask::SearchForLastEnemy;
+                            self.search_enemy_time = now + 0.5;
+                        }
+                        if rng.random_long(0, 100) > 0 {
+                            self.reload();
+                        }
+                        if task.int == 0 {
+                            let f = now + rng.random_float(0.5, 1.5);
+                            let t = self.tasks.current_mut().expect("current task");
+                            t.float = f;
+                            t.int = 1;
+                        } else if task.float < now {
+                            done = true;
+                        }
+                    }
+                }
+            }
+            TaskKind::WaitAndFaceVector | TaskKind::FaceVector => {
+                if task.kind == TaskKind::WaitAndFaceVector && (self.enemy.is_some() || self.has(cond::SEE_ENEMY)) {
+                    failed = true;
+                } else {
+                    self.look_task = LookTask::FaceTaskVector;
+                    if task.kind == TaskKind::WaitAndFaceVector {
+                        self.stop_moving();
+                    }
+                    if task.int == 1 {
+                        if task.float < now {
+                            done = true;
+                        }
+                    } else {
+                        let t = self.tasks.current_mut().expect("current task");
+                        t.float += now;
+                        t.int = 1;
+                    }
+                }
+            }
+            TaskKind::MoveToVector => {
+                self.look_task = LookTask::FaceTaskVector;
+                let target = self.resolve(w, task.edict);
+                let origin = match &target {
+                    Some(e) => {
+                        let o = e.entity_origin();
+                        let d = (o - self.me.origin).length_2d();
+                        if d <= e.size.length_2d() || d < self.distance_from(task.vector, false) {
+                            done = true;
+                        }
+                        o
+                    }
+                    None => {
+                        if self.distance_from(task.vector, false) < task.float {
+                            done = true;
+                        }
+                        task.vector
+                    }
+                };
+                if !done {
+                    if (origin - self.me.origin).length_2d() <= 100.0 {
+                        self.stop_moving();
+                        done = true;
+                    } else if self.has(cond::SEE_NEXT_WAYPOINT) {
+                        if origin.z > self.me.origin.z + MAX_JUMP_HEIGHT {
+                            failed = true;
+                        }
+                        self.set_move_vector(origin);
+                    } else {
+                        failed = true;
+                    }
+                }
+            }
+            TaskKind::PickupItem => {
+                if task.int == 0 {
+                    self.pickup_entity = task.edict;
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.int = 1;
+                    t.set_time_to_complete(now, 10.0);
+                }
+                match self.resolve(w, self.pickup_entity) {
+                    Some(p) if self.can_pickup(now, &p) => {
+                        self.set_move_vector(p.entity_origin());
+                        if self.distance_from(p.entity_origin(), false) < 64.0 {
+                            self.use_button();
+                        }
+                    }
+                    _ => failed = true,
+                }
+            }
+            TaskKind::Use => self.task_use(w, rng, task, &mut done, &mut failed),
+            TaskKind::Wait => {
+                if task.int == 0 {
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.float += now;
+                    t.int = 1;
+                }
+                if self.tasks.current().is_some_and(|t| t.float < now) {
+                    done = true;
+                } else {
+                    self.stop_moving();
+                }
+            }
+            TaskKind::Defend => {
+                if task.float == 0.0 {
+                    let f = now + rng.random_float(20.0, 80.0);
+                    self.tasks.current_mut().expect("current task").float = f;
+                }
+                if self.tasks.current().is_some_and(|t| t.float < now) {
+                    done = true;
+                }
+                if self.state.stunt_state != TS_STATE_STUNT {
+                    self.alt_button();
+                } else {
+                    self.stop_moving();
+                }
+            }
+            TaskKind::ListenToSound => self.task_listen(w, rng, task, &mut done, &mut failed, &mut to_add),
+            TaskKind::ChangeWeapon => {
+                self.set(cond::CANT_SHOOT);
+                if !self.switch_weapon(task.int) {
+                    failed = true;
+                }
+                done = true;
+            }
+            TaskKind::DropWeapon => {
+                self.actions.push(Action::Command("drop".into()));
+                done = true;
+            }
+            TaskKind::Crouch => {
+                self.duck();
+                if task.int == 0 {
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.float += now;
+                    t.int = 1;
+                } else if task.float < now {
+                    done = true;
+                }
+            }
+        }
+
+        if let Some(cur) = self.tasks.current().copied() {
+            if failed {
+                if cur.kind == TaskKind::FindPath {
+                    self.last_failed_waypoint = -1;
+                }
+                done = true;
+            }
+            if cur.kind == TaskKind::FindPath && !self.tasks.is_empty() && !cur.found_path {
+                if path_found {
+                    self.move_to_valid = true;
+                }
+                if let Some(t) = self.tasks.current_mut() {
+                    t.found_path = path_found;
+                }
+            }
+            if done {
+                self.tasks.finished_current(failed);
+                if cur.kind == TaskKind::NormalAttack {
+                    self.enemy = None;
+                }
+            }
+        }
+        if let Some(t) = to_add {
+            self.add_priority_task(t);
+        }
+    }
+
+    /// `BOT_TASK_FIND_PATH`.
+    #[allow(clippy::too_many_arguments)] // DoTasks' locals
+    fn task_find_path(
+        &mut self,
+        g: &mut BotGlobals<'_>,
+        w: &dyn BotWorld,
+        rng: &mut dyn Random,
+        task: Task,
+        done: &mut bool,
+        failed: &mut bool,
+        path_found: &mut bool,
+    ) {
+        let now = w.time();
+        let target = self.resolve(w, task.edict);
+        self.ideal_move_speed = self.max_speed;
+        if !task.found_path {
+            if self.paths.bot_paths.is_empty() && !self.not_following_waypoint {
+                self.stop_moving();
+            }
+            let query = |b: &Bot, from: i32, to: i32| crate::nav::AStarQuery {
+                from: usize::try_from(from).ok(),
+                to: usize::try_from(to).ok(),
+                gun_position: b.gun_position(),
+                team: b.team,
+                max_loops: b.profile.path_revs.max(1),
+                time: now,
+            };
+            if task.float == -3.0 {
+                if self.current_waypoint == -1 {
+                    self.current_waypoint =
+                        self.nearest_waypoint(g, w, self.me.origin, REACHABLE_RANGE, self.last_failed_waypoint, true, false, true);
+                }
+                let q = query(self, self.current_waypoint, self.goal_waypoint);
+                match self.astar.search(&mut self.paths, &q, true, g.waypoints, w, rng) {
+                    crate::nav::AStarResult::NoPath => {
+                        *failed = true;
+                        return;
+                    }
+                    crate::nav::AStarResult::Continue => return,
+                    crate::nav::AStarResult::Next(_) => {}
+                }
+                self.push_current_on_path();
+                self.move_to_valid = true;
+                *path_found = true;
+                let t = self.tasks.current_mut().expect("current task");
+                t.found_path = true;
+                self.paths.failed_goals.clear();
+                if t.float == -2.0 {
+                    *done = true;
+                }
+                t.float = 1.0;
+            } else if task.float == -2.0 || self.find_path_time < now {
+                self.find_path_time = now + 0.5;
+                if task.float == -1.0 && task.int == -1 {
+                    let goal = g.waypoints.find_random_goal(self.team, 0, &self.paths.failed_goals, rng).map_or(-1, |i| i as i32);
+                    self.goal_waypoint = goal;
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.int = goal;
+                    if goal == -1 {
+                        *failed = true;
+                        return;
+                    }
+                    t.vector = g.waypoints.origin(goal);
+                } else if let Some(e) = &target {
+                    let o = e.entity_origin();
+                    self.tasks.current_mut().expect("current task").vector = o;
+                    self.goal_waypoint = self.nearest_to_origin(g, w, o);
+                } else if task.float == 0.0 {
+                    self.tasks.current_mut().expect("current task").float = 1.0;
+                    self.goal_waypoint = self.nearest_to_origin(g, w, task.vector);
+                } else {
+                    self.goal_waypoint = task.int;
+                }
+                if self.goal_waypoint == -1 {
+                    *failed = true;
+                    return;
+                }
+                self.current_waypoint =
+                    self.nearest_waypoint(g, w, self.me.origin, REACHABLE_RANGE, self.last_failed_waypoint, true, false, false);
+                let goal = self.goal_waypoint;
+                {
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.int = goal;
+                    if t.vector == Vector::ZERO {
+                        t.vector = g.waypoints.origin(goal);
+                    }
+                }
+                if self.current_waypoint == -1 {
+                    *failed = true;
+                    return;
+                }
+                self.goal_origin = self.tasks.current().map(|t| t.vector);
+                if self.goal_waypoint == self.current_waypoint {
+                    self.paths.bot_paths.push(self.current_waypoint as usize);
+                    self.move_to_valid = true;
+                    *path_found = true;
+                    return;
+                }
+                let q = query(self, self.current_waypoint, self.goal_waypoint);
+                match self.astar.search(&mut self.paths, &q, false, g.waypoints, w, rng) {
+                    crate::nav::AStarResult::NoPath => {
+                        *failed = true;
+                        return;
+                    }
+                    crate::nav::AStarResult::Continue => {
+                        self.tasks.current_mut().expect("current task").float = -3.0;
+                        return;
+                    }
+                    crate::nav::AStarResult::Next(_) => {}
+                }
+                self.push_current_on_path();
+                self.move_to_valid = true;
+                *path_found = true;
+                if task.float == -2.0 {
+                    *done = true;
+                }
+            }
+        } else {
+            if self.nearest_remember_point_visible && self.enemy.is_none() && self.looking_for_enemy {
+                self.look_task = LookTask::FaceNearestRememberPos;
+            } else if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) && self.last_see_enemy_time + 6.0 > now {
+                self.look_task = LookTask::SearchForLastEnemy;
+                self.search_enemy_time = now + 0.5;
+            } else {
+                self.look_task = LookTask::NextWaypoint;
+            }
+            if self.current_waypoint == -1 || self.goal_waypoint != task.int || task.int == -1 {
+                self.tasks.current_mut().expect("current task").found_path = false;
+                return;
+            }
+            if let Some(e) = &target
+                && self.goal_waypoint == self.current_waypoint
+                && self.distance_from(e.entity_origin(), false) < g.waypoints.distance(self.gun_position(), self.goal_waypoint)
+            {
+                *done = true;
+            }
+            self.move_to_valid = true;
+        }
+    }
+
+    /// `if (m_stBotPaths.IsEmpty() || top != current) push(current)`.
+    fn push_current_on_path(&mut self) {
+        let cur = self.current_waypoint as usize;
+        if self.paths.bot_paths.last() != Some(&cur) {
+            self.paths.bot_paths.push(cur);
+        }
+    }
+
+    /// `NearestWaypointToOrigin(v, m_iLastFailedWaypoint, &m_FailedGoals)`.
+    fn nearest_to_origin(&self, g: &BotGlobals<'_>, w: &dyn BotWorld, v: Vector) -> i32 {
+        g.waypoints
+            .nearest_to_origin(v, usize::try_from(self.last_failed_waypoint).ok(), &self.paths.failed_goals, w)
+            .map_or(-1, |i| i as i32)
+    }
+
+    /// `BOT_TASK_NORMAL_ATTACK`, TS.
+    #[allow(clippy::too_many_arguments)] // DoTasks' locals
+    fn task_normal_attack(
+        &mut self,
+        g: &mut BotGlobals<'_>,
+        w: &dyn BotWorld,
+        rng: &mut dyn Random,
+        task: Task,
+        done: &mut bool,
+        failed: &mut bool,
+        to_add: &mut Option<Task>,
+    ) {
+        let now = w.time();
+        self.enemy = task.edict;
+        let Some(enemy) = self.resolve(w, task.edict) else {
+            self.last_enemy = None;
+            *done = true;
+            return;
+        };
+        if !self.is_enemy(w, &enemy) {
+            self.last_enemy = None;
+            self.enemy = None;
+            *done = true;
+            return;
+        }
+        if task.float != 0.0 {
+            self.stop_moving();
+            if task.float < now {
+                *done = true;
+                return;
+            }
+        }
+        let _ = to_add;
+        if self.has(cond::SEE_ENEMY) {
+            let enemy_origin = enemy.entity_origin();
+            self.look_task = LookTask::FaceEnemy;
+            let dist = (enemy_origin - self.gun_position()).length();
+            self.last_enemy = self.enemy;
+            self.last_see_enemy_position = enemy_origin;
+            let cur = self.current_weapon.and_then(|id| self.weapons.get(id)).cloned();
+            if cur.as_ref().is_some_and(|c| c.is_melee()) && self.me.movetype == super::MOVETYPE_FLY && rng.random_long(0, 1) != 0 {
+                self.jump();
+            }
+            let weap_id = cur.as_ref().map_or(0, |c| c.id);
+            // TS's melee weapons: combat knife (25), katana (34), seal knife (35) and kung fu.
+            // Upstream lists 36, the Contender in TS 3.0, for kung fu (design §5).
+            let melee = cur.is_none() || matches!(weap_id, 25 | 34 | 35) || weap_id == TsWeapon::KungFu.id();
+            if melee {
+                if !self.reachable(w, enemy_origin) {
+                    self.set_move_vector(self.lowest_enemy_cost_vec);
+                } else {
+                    self.set_move_vector(enemy_origin);
+                }
+                self.set_move_vector(enemy_origin);
+                if dist < 256.0 {
+                    self.decide_jump_duck_strafe(w, dist, enemy_origin);
+                }
+                if dist < 72.0 {
+                    if rng.random_long(0, 100) > 90 {
+                        self.primary_attack();
+                    } else {
+                        self.secondary_attack();
+                        if !g.config.is_on(cfg::TS_DONT_STEAL_WEAPONS) {
+                            self.use_button();
+                        }
+                    }
+                }
+            } else {
+                let l = &mut self.learned;
+                l.stunt.set_weights_from_values(&l.ts_weapon_select, 3, 5);
+                let inputs = [
+                    self.state.stunt_state as f32 / 2.0,
+                    self.me.velocity.length() / self.max_speed,
+                    enemy.velocity.length() / enemy.maxspeed,
+                    self.yaw_angle_to(enemy_origin) / 180.0,
+                    weap_id as f32 / crate::weapons::MAX_WEAPONS as f32,
+                ];
+                let l = &mut self.learned;
+                l.stunt.input(&inputs);
+                l.stunt.execute();
+                if l.stunt.fired() {
+                    self.alt_button();
+                }
+                if cur.as_ref().is_some_and(|c| c.need_to_reload()) {
+                    self.run_for_cover(g, w, enemy_origin, false, rng);
+                    self.reload();
+                } else if self.hold_attack_time > now || rng.random_long(0, 100) < 90 {
+                    self.primary_attack();
+                }
+                if dist < 256.0 {
+                    self.set_move_vector(self.lowest_enemy_cost_vec);
+                }
+            }
+        } else if self.last_enemy == self.enemy {
+            // `HasSeenEnemy`.
+            let last = self.last_see_enemy_position;
+            self.last_enemy = self.enemy;
+            self.search_enemy_time = now + rng.random_float(5.0, 10.0);
+            self.remember_lost_enemy(last, self.enemy);
+            if self.fvisible_point(w, last) {
+                self.set(cond::SEE_ENEMY);
+                self.look_task = LookTask::FaceEnemy;
+            } else if !self.want_to_follow_enemy() {
+                *failed = true;
+            } else if self.distance_from(last, false) > 100.0 {
+                self.tasks.finished_current(false);
+                let id = self.tasks.new_schedule_id();
+                if !self.tasks.has_task(TaskKind::SearchForEnemy) {
+                    let f = rng.random_float(3.0, 6.0);
+                    self.add_priority_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, f, Vector::ZERO));
+                    let secs = rng.random_float(10.0, 20.0);
+                    self.add_priority_task(Task::new(TaskKind::FindPath, id, None, 0, 0.0, last).with_timeout(now, secs));
+                }
+            } else {
+                self.look_task = LookTask::SearchForEnemy;
+                *failed = true;
+            }
+        } else {
+            self.look_task = LookTask::SearchForLastEnemy;
+            self.enemy = None;
+            self.last_enemy = None;
+            *done = true;
+        }
+    }
+
+    /// `BOT_TASK_USE`.
+    fn task_use(&mut self, w: &dyn BotWorld, _rng: &mut dyn Random, task: Task, done: &mut bool, failed: &mut bool) {
+        let now = w.time();
+        if task.int != -2 && task.int != -1 && !task.found_path {
+            *failed = true;
+            return;
+        }
+        let Some(e) = self.resolve(w, task.edict) else {
+            *failed = true;
+            return;
+        };
+        self.look_task = LookTask::FaceTaskEdict;
+        self.stop_moving();
+        if task.int == 1 {
+            let mut until = task.vector.x;
+            if until == 0.0 {
+                until = now + task.float;
+                self.tasks.current_mut().expect("current task").vector = Vector::new(until, 0.0, 0.0);
+            }
+            self.use_button();
+            // Momentary buttons and doors that are still moving aren't followed (no TS map
+            // uses them for objectives).
+            *done = until <= now;
+            return;
+        }
+        let o = e.entity_origin();
+        if (o - self.me.origin).length_2d() < 24.0 && (o.z - self.me.origin.z).abs() > MAX_JUMP_HEIGHT {
+            *failed = true;
+            return;
+        }
+        if task.int == -1 || self.distance_from(o, false) < 72.0 {
+            if self.facing(&e) {
+                if task.int == -1 {
+                    if _rng.random_long(0, 1) != 0 {
+                        self.use_button();
+                        *done = true;
+                    }
+                    return;
+                }
+                self.tasks.current_mut().expect("current task").int = 1;
+                self.use_button();
+            }
+        } else {
+            self.set_move_vector(o);
+        }
+    }
+
+    /// `BOT_TASK_LISTEN_TO_SOUND`.
+    fn task_listen(
+        &mut self,
+        w: &dyn BotWorld,
+        rng: &mut dyn Random,
+        task: Task,
+        done: &mut bool,
+        failed: &mut bool,
+        to_add: &mut Option<Task>,
+    ) {
+        let now = w.time();
+        if (self.enemy.is_some() && self.has(cond::SEE_ENEMY)) || self.is_on_ladder() {
+            *failed = true;
+            return;
+        }
+        let Some(sound) = self.resolve(w, task.edict) else {
+            *failed = true;
+            return;
+        };
+        let mut state = task.int;
+        let mut until = task.float;
+        let mut v = task.vector;
+        if state == 0 {
+            until = now + task.float;
+            state = 1;
+            v = sound.origin;
+        } else if state == 1 {
+            v = sound.origin;
+            if sound.button & buttons::ATTACK != 0 {
+                if self.is_visible(sound.index) {
+                    if !self.is_enemy(w, &sound) {
+                        state = 2;
+                    }
+                } else if self.investigate_sound_time < now {
+                    self.investigate_sound_time = now + rng.random_float(8.0, 16.0);
+                    *to_add = Some(Task::new(TaskKind::FindPath, task.schedule_id, Some(sound.handle()), -1, -2.0, Vector::ZERO));
+                }
+            }
+        } else if state == 2 {
+            let (forward, _) = make_vectors(sound.v_angle);
+            v = sound.origin + sound.view_ofs + forward * 8192.0;
+            state = 3;
+        }
+        let t = self.tasks.current_mut().expect("current task");
+        t.float = until;
+        t.int = state;
+        t.vector = v;
+        self.look_task = LookTask::FaceTaskVector;
+        if until <= now {
+            *done = true;
+            self.listen_to_sound_time =
+                if !self.tasks.has_task(TaskKind::Use) { now + self.reaction_time * 4.0 } else { now + rng.random_float(4.5, 10.0) };
+        }
+    }
+}

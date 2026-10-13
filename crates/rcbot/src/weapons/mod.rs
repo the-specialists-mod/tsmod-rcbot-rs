@@ -14,7 +14,7 @@ pub const MAX_WEAPONS: usize = 39;
 pub const MOD_TS: i32 = 8;
 
 /// `BOT_VIEW_DISTANCE` (`bot_const.h`): a weapon's max range when it has no preset.
-pub const BOT_VIEW_DISTANCE: f32 = 4096.0;
+pub const BOT_VIEW_DISTANCE: f32 = 2048.0;
 
 /// `CWeapon` and `CWeaponPreset`: a weapon the game registered (its `WeaponList` data, which the
 /// port will supply), with the ini preset for its id if there is one. Without a preset upstream's

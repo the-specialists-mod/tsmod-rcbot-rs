@@ -53,11 +53,22 @@ pub enum Glass {
     DontIgnore,
 }
 
-/// The part of `TraceResult` navigation reads.
+/// The part of `TraceResult` the bot reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Trace {
     /// `flFraction`: 1.0 when nothing was hit.
     pub fraction: f32,
+    /// `vecEndPos`.
+    pub end_pos: Vector,
+    /// `pHit`: the entity index hit (0 is the world), `None` when nothing was.
+    pub hit: Option<u32>,
+}
+
+impl Trace {
+    /// A trace that hit nothing on its way to `end`.
+    pub fn clear(end: Vector) -> Trace {
+        Trace { fraction: 1.0, end_pos: end, hit: None }
+    }
 }
 
 /// What navigation asks the engine. `crates/host` implements it with `pfnTraceLine` and
@@ -75,8 +86,8 @@ pub trait World {
 pub struct EmptyWorld;
 
 impl World for EmptyWorld {
-    fn trace_line(&self, _: Vector, _: Vector, _: Monsters, _: Glass, _: Option<u32>) -> Trace {
-        Trace { fraction: 1.0 }
+    fn trace_line(&self, _: Vector, end: Vector, _: Monsters, _: Glass, _: Option<u32>) -> Trace {
+        Trace::clear(end)
     }
     fn point_contents(&self, _: Vector) -> i32 {
         -1 // CONTENTS_EMPTY

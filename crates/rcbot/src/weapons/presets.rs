@@ -243,7 +243,7 @@ unknown=3\n\
             ammo_index2: -1,
             preset: None,
         };
-        assert!(!bare.is_melee() && bare.primary_in_range(1e9) && bare.priority() == 0 && bare.prim_max_range() == 4096.0);
+        assert!(!bare.is_melee() && bare.primary_in_range(1e9) && bare.priority() == 0 && bare.prim_max_range() == 2048.0);
         w.clear();
         assert!(w.get(25).is_none());
     }

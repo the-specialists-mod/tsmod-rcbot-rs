@@ -22,6 +22,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bot;
 pub mod chat;
 pub mod config;
 pub mod learn;
