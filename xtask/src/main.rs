@@ -3,8 +3,11 @@
 //! ```text
 //! build [--release]   the tsmod_rcbot library for the port's four platforms
 //! dist [--debug-info] release build -> dist/<platform>/dlls/<port file name> (stripped unless
-//!                     --debug-info) + dist/<platform>/rcbot/ (bot_weapons.ini, waypoints);
-//!                     checks the DLLs import no MinGW runtime
+//!                     --debug-info) + dist/<platform>/tsmod/rcbot/ (the plugin's data directory:
+//!                     bot_weapons.ini, waypoints); checks the DLLs import no MinGW runtime.
+//!                     Copy dist/<platform>/ over a port install's ts/ directory.
+//! e2e [root...]       end to end on the port's engine roots (e2e.rs): installs the port, then
+//!                     tsmod_rcbot, and checks rcbot bots join, move and use waypoints
 //! test                unit tests on the host and on i686 Linux
 //! lint                cargo fmt --check; clippy -D warnings on every target; the unsafe rule
 //!                     (only crates/host may use unsafe)
@@ -13,21 +16,23 @@
 
 #![deny(unsafe_code)]
 
+mod e2e;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// A build target and the file name the port's loader looks for (the-specialistsmod-rs#104).
-struct Target {
-    triple: &'static str,
-    platform: &'static str,
+pub(crate) struct Target {
+    pub(crate) triple: &'static str,
+    pub(crate) platform: &'static str,
     /// Cargo's output file name.
     built: &'static str,
     /// The name in the port's dlls/ directory.
-    file: &'static str,
+    pub(crate) file: &'static str,
     strip: &'static str,
 }
 
-const TARGETS: [Target; 4] = [
+pub(crate) const TARGETS: [Target; 4] = [
     Target {
         triple: "i686-unknown-linux-gnu",
         platform: "linux-i686",
@@ -61,11 +66,11 @@ const TARGETS: [Target; 4] = [
 /// The only crate allowed `unsafe`.
 const UNSAFE_CRATE: &str = "crates/host";
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-fn run(cmd: &mut Command) -> Result<(), String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<(), String> {
     eprintln!("$ {cmd:?}");
     let st = cmd.status().map_err(|e| format!("{cmd:?}: {e}"))?;
     if st.success() { Ok(()) } else { Err(format!("{cmd:?} failed: {st}")) }
@@ -101,7 +106,7 @@ fn check_windows_dll(dll: &Path, objdump: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -132,8 +137,9 @@ fn dist(debug_info: bool) -> Result<(), String> {
             check_windows_dll(&dest, &objdump)?;
         }
         eprintln!("  {}", dest.display());
-        // TODO(the-specialistsmod-rs#104): the data goes wherever the API's data_dir points.
-        copy_dir(&root().join("data/rcbot"), &base.join("rcbot"))?;
+        // The port's `data_dir` for the plugin: <gamedir>/tsmod/rcbot/.
+        let _ = std::fs::remove_dir_all(base.join("rcbot"));
+        copy_dir(&root().join("data/rcbot"), &base.join("tsmod").join("rcbot"))?;
     }
     Ok(())
 }
@@ -202,7 +208,8 @@ fn main() -> ExitCode {
         Some("test") => test(),
         Some("lint") => lint(),
         Some("all") => lint().and_then(|()| test()).and_then(|()| build(false)),
-        _ => Err("usage: cargo xtask build [--release] | dist [--debug-info] | test | lint | all".into()),
+        Some("e2e") => dist(false).and_then(|()| e2e::run(&root(), &args[1..])),
+        _ => Err("usage: cargo xtask build [--release] | dist [--debug-info] | test | lint | all | e2e [root...]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
