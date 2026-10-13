@@ -66,6 +66,14 @@ redesigned for bots without backward compatibility (#104).
 | `megahal.h` `HAL_bot_t`; `megahal.cpp` `BotHALGenerateReply`, `BotHALMakeKeywords`, `BotHALAddKeyword`, `BotHALAddAuxiliaryKeyword`, `BotHALBuildReplyDictionary`, `BotHALBabble`, `BotHALSeedReply` | `chat/reply.rs` `HalBot` | |
 | `megahal.cpp` `HumanizeString`, `RemoveNameTags`; `bot.cpp` `BotFunc_FillString`; `util.cpp` `strlow` | `chat/text.rs` | |
 | `bot.h` `SBotChatMessages`; `globals.cpp` `CBotGlobals::SetupBotChat` (`bot_chat.ini`); `bot.cpp` `CBot::BotChat`, `BotFunc_GetRandomPlayerName`, `BotFunc_GetRepArrayNum`; `megahal.cpp` `BotChatReply` and `CBot::ReplyToMessage`'s use of it | `chat/bot_chat.rs` | Players, names and the map come through `ChatContext`; config flags as plain values |
+| `bot_const.h` `BOT_CONFIG_*`, `BOT_DEBUG_*`; the configurable part of `CBotGlobals` (`ChangeConfigSetting`, `IsConfigSettingOn`, defaults of the constructor/`setDefaults`); `util.cpp` `UTIL_BuildFileName` | `config/mod.rs` `Config` | NS-only values left out |
+| `globals.cpp` `ReadBotFolder` (`rcbot_folder.ini`), `ReadConfig`'s tokenizer (`bot_config.ini`) | `config/file.rs` | Running the lines: `commands::run_config` |
+| `bot.h` `CAllowedPlayer(s)`; `dll.cpp` `ReadBotUsersConfig` (`bot_users.ini`) | `config/users.rs` | |
+| `bot.h`/`client.cpp` the access, menu, waypoint-display, debug and teleport state of `CClient`/`CClients` (`ClientConnected`'s authentication, `m_bRecheckAuth`) | `config/client.rs` | The rest of `CClient` comes with its users |
+| `bot.h` `bot_profile_t`; `dll.cpp` `BotFunc_InitProfile`, `BotFunc_ReadProfile`, `BotFunc_WriteProfile`; `bot_profiles.ini` and `BotFunc_AddBot`'s profile choice | `config/profile.rs` | |
+| `bot_rep.cpp` (`CBotReputations` load/save, `GetPlayerRepId`, `GetClientRep`), `bot.h` `CBotReputation(s)`; `bot.cpp` `BotFunc_GetRepArrayNum`, `BotFunc_IncreaseRep`/`DecreaseRep`, `printRep(s)` | `config/rep.rs` | Mod-independent upstream, so TS keeps it |
+| `bot_menu.{h,cpp}` `SetupMenus` (TS menus), `CBotMenu`, `CBotMenuItem` (`Render`, `Activate`) | `config/menu.rs` | NS's add/kick-to-team menus dropped |
+| `bot_commands.{h,cpp}` `CBotCvar`, `CBotCvarList`, `SetupCommands`, every command class and help text, `BotFunc_AddBot`'s arguments and TS team (`mp_teamlist`) choice, `RCBot_ServerCommand`; `dll.cpp` `ClientCommand`'s `rcbot`/`menuselect` dispatch; `globals.cpp` `ReadConfig`'s dispatch; `bot_menu.cpp` `BotMenu_Func_*` | `config/commands.rs` | Side effects through `CommandHost` (`Effect`, `Print`). NS `config` settings, `util buildres/buildcomm`, the WhichBot/GraveBot `waypoint save` converters dropped; `+rcbot_force_grip` left to the host |
 
 ### Planned: every RCBot feature a TS server uses
 
@@ -80,7 +88,7 @@ redesigned for bots without backward compatibility (#104).
 | `CBotWeapon(s)`, `GetBestWeaponId`, `NeedToReload`, `CanShootPrimary` (`bot_weapons`) | `weapons/bot_weapons.rs` | 5 |
 | TS: the loadout GA, the stunt perceptron, kung fu and power-ups, pickups, teamplay and CTB (`bot.cpp` `MOD_TS` branches; `UTIL_makeTSweapon` becomes buying through the host) | `ts/` | 6 |
 | Using the learning in decisions: `dec_stunt` and the jump/duck/strafe, cover, hurt-origin and follow-enemy perceptrons' inputs (`bot.cpp`), enemy costs from `m_GASurvival` | `bot/`, `ts/` (on `learn/`) | 5, 6 |
-| `rcbot` commands (`bot_commands.cpp`), `CBotGlobals` and its ini files (`globals.cpp`: `bot_config.ini`, `bot_users.ini`, ...), bot profiles (`dll.cpp`), menus (`bot_menu.cpp`), `CClient` (`client.cpp`) | `config/` | 4, 7 |
+| What the commands ask of the host (`CommandHost`): the bot manager (adding/kicking bots, `m_Bots`), waypoint editing, squads, the bot cam, entities; the rest of `CClient` (`client.cpp`: auto-waypoint recording, tooltips, debug HUD) | `bot/`, `nav/editor.rs`, `host` | 4, 7 |
 | When bots chat (the chat tasks and timers in `bot.cpp`), loading/saving brains when bots join and leave (`dll.cpp`) | `bot/`, `host` | 4, 7 |
 | `util.cpp` helpers | next to their callers | |
 
@@ -154,6 +162,13 @@ read with `fgets`. **`bot_chat.ini`**: `[section]` lines (`thanks`, `greetings`,
 matched exactly) followed by chat lines with `%n`, `%r`, `%g`, `%b`, `%e`, `%m`; `#` comments in
 the first column.
 
+**Config files** (`config/`), parsed as upstream parses them (each module documents its quirks):
+`rcbot_folder.ini` (one word: the bot folder), `bot_config.ini` (`rcbot` commands, one per line:
+command and up to four space-separated arguments), `bot_users.ini` (`"name" password level
+[steamid]`), `bot_profiles.ini` (profile ids), `botprofiles/<id>.ini` (`key=value`, strings
+quoted), `bot_playerids.ini` (`"name"` per line; the line number is the reputation id) and
+`botprofiles/<id>.rcr` (8-byte records `i32 player rep id, i32 rep`, little-endian).
+
 ## 4. Deviations
 
 Where the port behaves differently from upstream on purpose. Everything else, quirks included, is
@@ -196,6 +211,13 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   every count is 0 (a damaged brain; upstream spins); `m_Laugh[-1]` (outside the struct upstream,
   §5.35) has no lines; symbols past a damaged dictionary read as empty words; a truncated brain
   is an error and leaves the model as it was; trees are loaded and saved without recursion.
+* **Config files** read `"\r\n"` as `"\n"` too (`bot_config.ini`, `bot_users.ini`, profiles), and
+  fields that overrun their fixed buffers upstream (config tokens, `bot_users.ini` fields,
+  profile strings, 64-byte player names) are cut to them.
+* **Commands that crash upstream without a client** (§5.39-41) do nothing or name the caller
+  "Server" instead; `debug` from `bot_config.ini` on a listen server counts as the server.
+* **Missing data**: an empty `mp_teamlist` gives no TS team (upstream picks from an empty array);
+  `showreps` skips reputations of players who left (upstream dereferences `NULL`).
 * **Additions**: `VisibilityTable::rows_in_file` and `work_out_rows`, so the host can rebuild only
   the rows an upstream `.rcv` doesn't hold (§5.1); the file format is unchanged.
 
@@ -310,6 +332,26 @@ Found while porting; not filed upstream.
 38. **A loaded brain keeps the context array of the model's creation order**
     (`megahal.cpp:835`): a brain of another order would overrun it. Kept for order 5.
 
+39. **`debug_ent off` and `debug_bot` without a client** (`bot_commands.cpp:742`, `:778`): the
+    server console (or `bot_config.ini`) dereferences a `NULL` `pClient`. Fixed (§4).
+40. **`debug` from `bot_config.ini` on a listen server** (`bot_commands.cpp:829`):
+    `pClient->GetPlayer()` on a `NULL` client. Fixed (§4).
+41. **`util notarget_mode/noclip_mode/godmode <player>` from a dedicated server's console**
+    (`bot_commands.cpp:499`, `:532`, `:558`) print the caller's name through a `NULL` edict.
+    Fixed (§4).
+42. **`squad form vee` sets the wedge** (`bot_commands.cpp:1251`). Kept.
+43. **`bot_config.ini` tokens and `bot_users.ini` fields overrun their buffers**
+    (`globals.cpp:1520-1545`, `ReadBotUsersConfig`): unbounded copies into 64-byte buffers, and
+    a NUL one past each full user field. Fixed (§4).
+44. **A `.rcr` file of the wrong size leaks its `FILE*`** (`bot_rep.cpp:204`, `:276`: `return`
+    before `fclose`), and that profile never gets reputations again until it is deleted. Kept,
+    without the leak.
+45. **A trailing `;` in `mp_teamlist` stays in the last team's name** and an empty list picks from
+    an empty array (`BotFunc_AddBot`, `bot_commands.cpp:2040`, `:2061`). The first is kept, the
+    second fixed (§4).
+46. **`BotFunc_WriteProfile` writes a `NULL` string as its bare tag without a newline**
+    (`dll.cpp:1636`), so the next key is lost on reading. Kept (nothing calls it).
+
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
 bias weight.
@@ -360,3 +402,10 @@ those by going through the port's own code when that code is ported.
   every reply before and after `HumanizeString`, and `RemoveNameTags`; the port matches all of it
   byte for byte. Unit tests cover the dictionary order, learning, keywords, lists, `bot_chat.ini`
   parsing and substitutions, and the bugs kept.
+* **Config unit tests**: the tokenizers' quirks (`fgets` chunks, `#`, spaces vs tabs, `atoi`/`atof`),
+  user, profile and player-id files, `.rcr` records byte for byte, every menu's text and key
+  mask and menu navigation, and the commands on a fake `CommandHost`: access checks and their
+  messages, the listen-server/dedicated paths, `bot_config.ini` without a client, `config`
+  get/set for flags, ints and floats, `addbot` arguments, waypoint flags by name and by menu
+  (TS's "Stunt"), team waypoints, `util`, `users`, squads, `botcam`, `autowaypoint`, `debug`,
+  and the TS team choice from `mp_teamlist`.

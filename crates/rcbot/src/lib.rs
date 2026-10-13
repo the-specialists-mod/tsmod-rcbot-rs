@@ -12,6 +12,8 @@
 //! * [`weapons`]: `bot_weapons.ini` presets and the TS weapon table (`bot_weapons.{h,cpp}`).
 //! * [`chat`]: MegaHAL with byte-compatible brain files, `bot_chat.ini` and how bots pick, fill
 //!   and reply with chat lines (`megahal.{h,cpp}`, `CBot::BotChat`, `CBotGlobals::SetupBotChat`).
+//! * [`config`]: `bot_config.ini`, users, profiles, reputation, menus and the `rcbot` command set
+//!   (`globals.cpp`, `dll.cpp`, `bot_commands.cpp`, `bot_menu.cpp`, `bot_rep.cpp`).
 //! * [`learn`]: the GA, perceptrons, the NN, the SOM and the `.rld` learned-data files (`ga.cpp`,
 //!   `bot_ga.cpp`, `perceptron.cpp`, `bot_nn.cpp`, `som.cpp`, `bits.cpp`).
 //!
@@ -21,6 +23,7 @@
 #![warn(missing_docs)]
 
 pub mod chat;
+pub mod config;
 pub mod learn;
 pub mod math;
 pub mod nav;

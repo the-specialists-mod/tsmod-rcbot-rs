@@ -15,8 +15,9 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | `bot_weapons.ini` (TS section) and the TS weapon table | done |
 | Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Chat: MegaHAL (byte-compatible brains), `bot_chat.ini`, replies | done; checked against RCBot's own code |
+| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set (side effects through a host trait) | done (the host side waits for #104) |
 | Plugin entry point and host interface | waiting for the plugin API for bots (#104) |
-| Combat, TS behaviour (loadouts, stunts, kung fu, pickups, teams), squads, menus, profiles, commands, botcam, waypoint editing and autowaypointing | to do |
+| Combat, TS behaviour (loadouts, stunts, kung fu, pickups, teams), squads, botcam, waypoint editing and autowaypointing | to do |
 
 Only The Specialists 3.0 is supported. Code for RCBot's other mods, its copies of metamod, its
 engine hooks and its user-message parsing are not ported (the port supplies structured state
@@ -30,6 +31,7 @@ crates/rcbot     the bot (no unsafe, no FFI)
   src/weapons/   bot_weapons.ini presets, weapon info, the TS weapon table
   src/learn/     GA, perceptrons, NN, SOM, .rld learned-data files
   src/chat/      MegaHAL and its brain files, bot_chat.ini, replies
+  src/config/    bot_config.ini, users, profiles, reputation, menus, rcbot commands
 crates/host      the tsmod_rcbot library (the only crate allowed unsafe; a stub for now)
 data/rcbot       bot_weapons.ini (TS), waypoints/ts/ (44 maps)
 tools/reference  C++ harnesses that record RCBot's own results for the tests
