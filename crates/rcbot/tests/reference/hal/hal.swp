@@ -1,0 +1,6 @@
+# swapped keywords (upstream crashes on a line without a tab)
+you	me
+me	you
+your	my
+my	your
+		i'm	you're#comment

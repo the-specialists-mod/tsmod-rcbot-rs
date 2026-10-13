@@ -59,6 +59,13 @@ redesigned for bots without backward compatibility (#104).
 | `nn.h`/`bot_nn.cpp` `NNLayer`, `NN`, `NNGATrained`, `CNNTrainSet`, `CCombatNNInputs`, `CCombatNNOutputs` | `learn/nn.rs` | `NN::train` is empty upstream and not ported |
 | `som.{h,cpp}` `CSom`, `CSomNeuron` | `learn/som.rs` | Unused upstream ("experimental") |
 | `bot.cpp` `setupDataStructures`, `SeedFlyGAValues`, `SeedTSWeaponSelectValues`, `loadLearnedData`, `saveLearnedData`; the learning parts of `SpawnInit` (personal and survival picks), of the death handling (fitness, breeding) and of the TS loadout choice; `globals.cpp` `CBotGlobals::loadLearnedData`/`saveLearnedData` | `learn/data.rs` `BotLearnedData`, `GlobalLearnedData` | NS's `combat0/1.rld` dropped; `bot_enemy_cost_ga.h` is empty upstream |
+| `megahal.{h,cpp}` `HAL_STRING`, `HAL_DICTIONARY` (`HAL_AddWord`, `HAL_SearchDictionary`, `HAL_FindWord`, `HAL_CompareWords`, `HAL_InitializeDictionary`, `HAL_EmptyDictionary`, `HAL_WordExists`, `HAL_DictionariesDiffer`) | `chat/dictionary.rs` | Words are bytes; ordering compares signed `char`s as upstream |
+| `megahal.cpp` `HAL_MODEL`, `HAL_TREE` (`HAL_NewModel`, `HAL_UpdateModel`, `HAL_UpdateContext`, `HAL_AddSymbol`, `HAL_FindSymbol(Add)`, `HAL_AddNode`, `HAL_SearchNode`, `HAL_InitializeContext`, `HAL_Learn`), `HAL_MakeWords`, `HAL_BoundaryExists` | `chat/model.rs` | Nodes in an arena (`NodeId`) instead of pointers |
+| `megahal.cpp` `HAL_SaveTree`/`LoadTree`, `HAL_SaveDictionary`/`LoadDictionary`, the brain parts of `PrepareHALBrainForPersonality`, `LoadHALBrainForPersonality`, `SaveHALBrainForPersonality`; the file names | `chat/brain.rs` | Byte-compatible with the 32-bit builds; no recursion on load/save |
+| `megahal.cpp` `HAL_InitializeList`, `HAL_InitializeSwap`, `HAL_SWAP`, the pretraining loop | `chat/lists.rs` | |
+| `megahal.h` `HAL_bot_t`; `megahal.cpp` `BotHALGenerateReply`, `BotHALMakeKeywords`, `BotHALAddKeyword`, `BotHALAddAuxiliaryKeyword`, `BotHALBuildReplyDictionary`, `BotHALBabble`, `BotHALSeedReply` | `chat/reply.rs` `HalBot` | |
+| `megahal.cpp` `HumanizeString`, `RemoveNameTags`; `bot.cpp` `BotFunc_FillString`; `util.cpp` `strlow` | `chat/text.rs` | |
+| `bot.h` `SBotChatMessages`; `globals.cpp` `CBotGlobals::SetupBotChat` (`bot_chat.ini`); `bot.cpp` `CBot::BotChat`, `BotFunc_GetRandomPlayerName`, `BotFunc_GetRepArrayNum`; `megahal.cpp` `BotChatReply` and `CBot::ReplyToMessage`'s use of it | `chat/bot_chat.rs` | Players, names and the map come through `ChatContext`; config flags as plain values |
 
 ### Planned: every RCBot feature a TS server uses
 
@@ -74,7 +81,7 @@ redesigned for bots without backward compatibility (#104).
 | TS: the loadout GA, the stunt perceptron, kung fu and power-ups, pickups, teamplay and CTB (`bot.cpp` `MOD_TS` branches; `UTIL_makeTSweapon` becomes buying through the host) | `ts/` | 6 |
 | Using the learning in decisions: `dec_stunt` and the jump/duck/strafe, cover, hurt-origin and follow-enemy perceptrons' inputs (`bot.cpp`), enemy costs from `m_GASurvival` | `bot/`, `ts/` (on `learn/`) | 5, 6 |
 | `rcbot` commands (`bot_commands.cpp`), `CBotGlobals` and its ini files (`globals.cpp`: `bot_config.ini`, `bot_users.ini`, ...), bot profiles (`dll.cpp`), menus (`bot_menu.cpp`), `CClient` (`client.cpp`) | `config/` | 4, 7 |
-| MegaHAL (`megahal.cpp`), bot chat (`bot_chat.ini`, `bot_rep_chat.ini`) | `chat/` | 7 |
+| When bots chat (the chat tasks and timers in `bot.cpp`), loading/saving brains when bots join and leave (`dll.cpp`) | `bot/`, `host` | 4, 7 |
 | `util.cpp` helpers | next to their callers | |
 
 ### Dropped
@@ -136,6 +143,17 @@ bytes alone) still load. See §5.1.
   enemy-cost `CGA()` (16 genes). `tsweaps.rld`: the TS loadout `CGA()` (8 genes), no header.
   Both uncompressed.
 
+**HAL brain** (`chat/brain.rs`), `botprofiles/<id>_hal.brn`, as the 32-bit builds write it
+(`unsigned long` is 4 bytes): `"RCBOTHAL\0"`, `u8` order (5), the forward then the backward tree
+depth first (each node `u16` symbol, `u32` usage, `u16` count, `u16` children, then the children),
+the dictionary (`u32` size, then per word `u8` length and the bytes). A file without the cookie is
+replaced by an empty brain that is then pretrained from `<id>_hal.trn`. The keyword lists
+(`.ban`, `.aux`: one word per line; `.swp`: `from<TAB>to`) and the training text are text files
+read with `fgets`. **`bot_chat.ini`**: `[section]` lines (`thanks`, `greetings`, `kills`,
+`killed`, `laugh`, `leave` each `-friendly`/`-neutral`/`-unfriendly`, plus `[idle]`, `[help]`,
+matched exactly) followed by chat lines with `%n`, `%r`, `%g`, `%b`, `%e`, `%m`; `#` comments in
+the first column.
+
 ## 4. Deviations
 
 Where the port behaves differently from upstream on purpose. Everything else, quirks included, is
@@ -169,6 +187,15 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   wrote (§5.21).
 * **`CSom::m_fLearnRate`** is per map instead of a static shared by all maps (no map exists
   upstream, so nothing changes).
+* **Chat text files** (`bot_chat.ini`, the HAL lists and training text) read `"\r\n"` as `"\n"` on
+  every platform, as the Windows build does (the Linux build keeps the `'\r'` in section names and
+  words, so Windows-saved files don't work there).
+* **MegaHAL crashes and hangs avoided**: a `.swp` line without a second field is skipped (upstream
+  passes `NULL` to `strlen`, §5.33); `BotFunc_FillString` with a replacement that contains what it
+  replaces searches on after it (upstream loops forever); `BotHALBabble` stops after one round when
+  every count is 0 (a damaged brain; upstream spins); `m_Laugh[-1]` (outside the struct upstream,
+  §5.35) has no lines; symbols past a damaged dictionary read as empty words; a truncated brain
+  is an error and leaves the model as it was; trees are loaded and saved without recursion.
 * **Additions**: `VisibilityTable::rows_in_file` and `work_out_rows`, so the host can rebuild only
   the rows an upstream `.rcv` doesn't hold (§5.1); the file format is unchanged.
 
@@ -254,6 +281,35 @@ Found while porting; not filed upstream.
     agree), training would refuse, and their saved headers say 4. Kept (the file format depends
     on it).
 
+29. **The first word of a keyword list can't be found** (`HAL_FindWord`, `megahal.cpp:671`):
+    symbol 0 means "not found", which is right for a model's dictionary (`<ERROR>`) but not for
+    the banned/auxiliary lists. Kept.
+30. **HAL file names lack a separator** (`PrepareHALBrainForPersonality`,
+    `megahal.cpp:2085-2105`; `LoadHALBrainForPersonality` `:2225`): the default `.ban`, `.aux`,
+    `.swp` and `.trn` files are looked for as `botprofiles<id>_hal.ban` in the bot folder, next to
+    `botprofiles/`, not in it. Kept (the names are upstream's).
+31. **`RemoveNameTags` reads `in_string[i + i]`** for the second character of `-=` / `=-`
+    (`megahal.cpp:270`, `:311`), so those tags only work at the start of a name (and read past
+    the name further on). Kept.
+32. **`HumanizeString`'s second drop test is never true** (`megahal.cpp:209`):
+    `c < '0' && c > '9'`. Kept.
+33. **A `.swp` line without a target crashes** (`HAL_InitializeSwap`, `megahal.cpp:1849`):
+    `strtok` returns `NULL` and it goes to `strlen`. Fixed (§4).
+34. **An empty line in the training text relearns the previous line** (pretraining,
+    `megahal.cpp:2236`): `HAL_MakeWords` returns early and `HAL_Learn` learns the old words, read
+    from the shared buffer the empty line overwrote. Kept.
+35. **`CBot::BotChat` indexes chat lists with -1** (`bot.cpp:1959-2020`) when the bot talks to
+    nobody: leaving says a `[kills-friendly]` line, cursing a `[greetings-friendly]` one, and
+    laughing reads before `m_BotChat`. Kept, except the laugh (§4).
+36. **`BotChatReply` cuts the message by one byte** when the bot's name is in it
+    (`megahal.cpp:139`, `BotFunc_FillString(…, strlen(szMsg))`), and every bot gets the same
+    buffer, so each sees what the bots before it did. Kept.
+37. **Question replies overrun the reply buffer** (`BotHALGenerateReply`, `megahal.cpp:463`):
+    they are cut to 128 characters plus the terminator in a 128-byte buffer. The port cuts to
+    128 and the caller to 127.
+38. **A loaded brain keeps the context array of the model's creation order**
+    (`megahal.cpp:835`): a brain of another order would overrun it. Kept for order 5.
+
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
 bias weight.
@@ -296,3 +352,11 @@ those by going through the port's own code when that code is ported.
   perceptron training, a GA-trained network, SOM training, and `tsweaps.rld` saved and reloaded
   upstream's way. The port reproduces every file byte for byte (same draws in the same order,
   same float arithmetic).
+* **`tests/upstream_hal.rs`**, MegaHAL against RCBot's: `build.sh` pastes the whole of
+  `megahal.cpp` (with `strlow`, `UTIL_BuildFileName`, `BotFunc_FillString`) into
+  `hal_harness.cpp`, built 32-bit, with `XorShiftRandom` as `RANDOM_LONG`. On the fixture in
+  `tests/reference/hal/` (keyword lists, a training text, chat from humans and bots with
+  reputations, clan-tagged names) it records the empty, pretrained, after-chat and reloaded brains,
+  every reply before and after `HumanizeString`, and `RemoveNameTags`; the port matches all of it
+  byte for byte. Unit tests cover the dictionary order, learning, keywords, lists, `bot_chat.ini`
+  parsing and substitutions, and the bugs kept.

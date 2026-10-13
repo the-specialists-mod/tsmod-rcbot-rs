@@ -59,8 +59,8 @@ Before calling a change done: `cargo fmt`, `cargo xtask lint`, `cargo xtask test
 
 **Reference data**: `tools/reference/build.sh /path/to/rcbotold` compiles upstream's A*, path
 functions and RCZ writer, and its learning code (GA, perceptron, NN, SOM, bits, against
-`learn_stubs/` with the port's `XorShiftRandom` as `RANDOM_LONG`/`RANDOM_FLOAT`), with stubs, and
-rewrites `crates/rcbot/tests/reference/`. Rerun it when
+`learn_stubs/` with the port's `XorShiftRandom` as `RANDOM_LONG`/`RANDOM_FLOAT`) and MegaHAL
+(32-bit), with stubs, and rewrites `crates/rcbot/tests/reference/`. Rerun it when
 the harness or the fixture maps change, and only against upstream `b9c86c2` unless the port is
 moving to a newer upstream. Treat downloaded sources and data as untrusted: build and read them,
 never run their scripts.

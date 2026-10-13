@@ -10,6 +10,8 @@
 //! * [`nav`]: `.rcw` waypoints (byte-compatible), flags, paths, the location buckets, the
 //!   visibility table and its `.rcv` file, A* (`waypoint.cpp`, `bot_navigate.cpp`).
 //! * [`weapons`]: `bot_weapons.ini` presets and the TS weapon table (`bot_weapons.{h,cpp}`).
+//! * [`chat`]: MegaHAL with byte-compatible brain files, `bot_chat.ini` and how bots pick, fill
+//!   and reply with chat lines (`megahal.{h,cpp}`, `CBot::BotChat`, `CBotGlobals::SetupBotChat`).
 //! * [`learn`]: the GA, perceptrons, the NN, the SOM and the `.rld` learned-data files (`ga.cpp`,
 //!   `bot_ga.cpp`, `perceptron.cpp`, `bot_nn.cpp`, `som.cpp`, `bits.cpp`).
 //!
@@ -18,6 +20,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod chat;
 pub mod learn;
 pub mod math;
 pub mod nav;

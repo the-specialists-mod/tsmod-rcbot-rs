@@ -1,0 +1,28 @@
+{TS}Trinity	0	5	hello everybody, who wants to play some kung fu?
+Morpheus	0	8	Neo, do you know where the katana is?
+Agent_Smith	0	1	mr anderson, the matrix has you
+Bot2	1	5	i like the mp5k because it is fine for close fights
+{TS}Trinity	0	5	what is your favourite weapon?
+Morpheus	0	8	the slow motion powerup is the best thing in this mod
+Agent_Smith	0	1	NEO you can not dive forever, i will get you on ts_dojo
+Tank	0	6	anyone want to play on the dojo map tonight?
+{TS}Trinity	0	5	neo is the best player on this server
+Morpheus	0	8	two berettas at the same time is the best way to shoot
+Tank	0	6	where are the grenades?
+Bot2	1	5	nobody can beat me at stunts
+Agent_Smith	0	1	i think the m4a1 is too strong, what do you think neo?
+{TS}Trinity	0	5	get ready everybody, the next round starts soon
+Morpheus	0	8	Neo, the kitchen has health and some ammo for your katana
+Tank	0	6	is kung fu better than a gun when you are close?
+{TS}Trinity	0	5	i jump off every wall in the dojo, can you do that neo?
+Agent_Smith	0	1	you are going to lose this round, neo
+Morpheus	0	8	what is the best mod for half-life?
+Tank	0	6	neo
+{TS}Trinity	0	5	who has the most stunts on this map?
+Morpheus	0	8	the matrix is everywhere, it is all around us, even in this server
+Agent_Smith	0	1	never send a human to do a machine's job
+Tank	0	6	my favourite weapon is the m4a1 with a laser sight
+{TS}Trinity	0	5	do you like the specialists, neo?
+Morpheus	0	8	free your mind and dive
+Tank	0	6	what do you think about the katana?
+{TS}Trinity	0	5	see you next round everybody

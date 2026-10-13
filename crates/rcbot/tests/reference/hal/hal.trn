@@ -1,0 +1,17 @@
+# HAL training text for the reference harness: one sentence per line
+the specialists is the best mod for half-life, isn't it?
+i like to dive and shoot with two berettas at the same time
+who wants to play on ts_dojo with me tonight?
+kung fu is better than any gun when you are close to the enemy
+the slow motion powerup makes you feel like neo in the matrix
+
+the empty line above makes upstream learn the previous line again, from its damaged buffer
+do you know where the grenades are on this map?
+i think the m4a1 is too strong but the mp5k is fine
+my favourite weapon is the katana because it never needs any ammo at all
+nobody can beat me at stunts, i jump off every wall in the dojo
+%n is the best player on this server and everybody knows it
+this line is longer than the training buffer so upstream reads it in two pieces: blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah blah end of the long line
+i'm going to get some health from the kitchen before the next round
+the next round starts in 30 seconds so get ready everybody
+what is your favourite weapon in the specialists?
