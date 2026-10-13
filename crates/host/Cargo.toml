@@ -16,3 +16,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rcbot.workspace = true
+goldsrc-sys.workspace = true
+ts-plugin-api.workspace = true

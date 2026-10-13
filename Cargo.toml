@@ -8,11 +8,13 @@ version = "0.1.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/the-specialists-mod/tsmod-rcbot-rs"
 
-# No dependency on the port's crates yet: the plugin API the host will use is being redesigned
-# for bots (the-specialists-mod/the-specialistsmod-rs#104). When it lands, add `goldsrc-sys` and
-# `ts-plugin-api` here as git dependencies pinned to one rev, as tsmod-amxx-rs does.
 [workspace.dependencies]
 rcbot = { path = "crates/rcbot" }
+# The port's plugin API v3 (the-specialists-mod/the-specialistsmod-rs#104) and the engine's
+# tables, pinned to one rev of the port. goldsrc-sys generates its bindings from the FWGS headers
+# (`FWGS_DIR`, see .cargo/config.toml).
+goldsrc-sys = { git = "https://github.com/the-specialists-mod/the-specialistsmod-rs", rev = "5a8ec9465ae0c6f79e3b270b75549ce4f2a545ad" }
+ts-plugin-api = { git = "https://github.com/the-specialists-mod/the-specialistsmod-rs", rev = "5a8ec9465ae0c6f79e3b270b75549ce4f2a545ad" }
 # The visibility table's RCZ container is miniz's zlib stream (rc_compress.cpp); miniz_oxide is
 # the Rust port of the same deflate code.
 miniz_oxide = "0.8"

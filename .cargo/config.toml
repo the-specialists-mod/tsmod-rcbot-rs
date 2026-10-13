@@ -1,2 +1,8 @@
+# goldsrc-sys (a git dependency, so not next to this checkout) generates its bindings from the
+# FWGS headers. Default to the checkout next to this repository; an FWGS_DIR set in the
+# environment wins.
+[env]
+FWGS_DIR = { value = "../xash3d-fwgs", relative = true }
+
 [alias]
 xtask = "run --quiet --package xtask --"
