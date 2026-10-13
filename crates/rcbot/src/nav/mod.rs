@@ -6,6 +6,7 @@
 //! queries (traces, point contents) go through [`World`].
 
 pub mod astar;
+pub mod editor;
 pub mod file;
 pub mod flags;
 pub mod locations;

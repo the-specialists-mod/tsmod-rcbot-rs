@@ -514,6 +514,14 @@ impl Waypoints {
         self.locations.delete(index, old);
     }
 
+    /// Moves a waypoint, as the auto-waypointer's `waypoints[i].origin = ...` does: the location
+    /// buckets keep the old place, as upstream (design §5).
+    pub fn set_origin(&mut self, index: usize, origin: Vector) {
+        if index < self.num {
+            self.wpts[index].origin = origin;
+        }
+    }
+
     /// The paths of every waypoint, as `(from, to)` pairs of used slots in list order.
     pub fn all_paths(&self) -> impl Iterator<Item = (usize, i16)> + '_ {
         (0..self.num).flat_map(move |i| self.paths_from(i).map(move |p| (i, p)))

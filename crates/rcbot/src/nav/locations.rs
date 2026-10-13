@@ -166,6 +166,11 @@ impl Waypoints {
         nearest
     }
 
+    /// Every waypoint in the buckets around `origin`, in bucket order (`DrawWaypoints`' loop).
+    pub fn in_buckets_around(&self, origin: Vector) -> Vec<usize> {
+        self.locations.around(origin).filter(|&i| i < MAX_WAYPOINTS).collect()
+    }
+
     /// `CWaypointLocations::FillNearbyWaypoints`: every reachable waypoint in the buckets around
     /// `origin` (upstream ignores its failed list here).
     pub fn nearby_waypoints(&self, origin: Vector) -> Vec<usize> {

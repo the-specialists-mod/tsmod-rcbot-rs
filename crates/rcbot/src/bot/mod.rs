@@ -24,6 +24,7 @@ pub mod weapons;
 #[cfg(test)]
 mod tests;
 
+pub use look::make_vectors;
 pub use manager::{BotManager, BotSlot};
 pub use remember::RememberPositions;
 pub use tasks::{EntRef, ScheduleDesc, Task, TaskKind, Tasks};
@@ -188,6 +189,8 @@ pub struct Entity {
     pub button: i32,
     /// `frags`.
     pub frags: f32,
+    /// `owner`, as an index.
+    pub owner: Option<u32>,
     /// `groundentity`, as an index.
     pub groundentity: Option<u32>,
     /// A connected player's TS state.
