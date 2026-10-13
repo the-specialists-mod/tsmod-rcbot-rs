@@ -14,7 +14,7 @@ Start with [README.md](README.md), then [docs/design.md](docs/design.md).
 | What RCBot does | Upstream source, [APGRoboCop/rcbotold](https://github.com/APGRoboCop/rcbotold) at `b9c86c2` (`dlls/`): `bot.cpp`/`bot.h` (the bot), `waypoint.cpp`, `bot_navigate.cpp`, `bot_weapons.*`, `ga.cpp`/`bot_ga.cpp`/`perceptron.cpp`/`bot_nn.cpp`/`som.cpp`, `bot_commands.cpp`, `bot_menu.cpp`, `globals.cpp`, `megahal.cpp` |
 | What it means for TS | `MOD_TS` branches upstream; the research comment on the-specialistsmod-rs#104 (TS-specific bugs, which messages it used) |
 | How TS 3.0 behaves | The port (`crates/server`, `crates/shared/src/protocol`), the TS decomp at `../ts30-decomp` |
-| The interface to the port | the-specialistsmod-rs#104 and, once it lands, the port's `crates/plugin-api` and `docs/implementation/plugin-api.md`. Nothing is designed around the current table layout: the API is being redesigned for bots |
+| The interface to the port | the port's `crates/plugin-api` and `docs/implementation/plugin-api.md`, `bot-plugins.md` (API v3, the-specialistsmod-rs#104); the stub plugin `crates/tsmod-test` |
 | Real data | `data/rcbot/waypoints/ts/` (credited in its README), `data/rcbot/bot_weapons.ini` |
 
 Port behaviour from upstream's source, not from memory. When this port deliberately differs, add
@@ -24,9 +24,9 @@ it to `docs/design.md` §4; upstream bugs you find go in §5.
 
 ```
 crates/rcbot     the bot: #![deny(unsafe_code)], no FFI, engine access through traits
-                 (nav::World, Random). Planned modules: docs/design.md §2
-crates/host      the tsmod_rcbot cdylib: the ONLY crate allowed unsafe
-xtask            cargo xtask build | dist | test | lint | all
+                 (nav::World, bot::BotWorld, Random, config::CommandHost). Map: docs/design.md §2
+crates/host      the tsmod_rcbot cdylib: the ONLY crate allowed unsafe (plugin API v3)
+xtask            cargo xtask build | dist | test | lint | all | e2e
 data/rcbot       shipped data
 tools/reference  the C++ reference harness (build.sh <rcbotold checkout>)
 ```
@@ -51,8 +51,12 @@ cargo xtask lint     # cargo fmt --check, the unsafe rule, clippy --all-targets 
 cargo xtask build    # the library for all four targets; must build without warnings
 cargo xtask dist     # release build -> dist/<platform>/dlls/ with the port's file names
                      # (tsmod_rcbot.dll, tsmod_rcbot_amd64.dll, tsmod_rcbot_i386.so,
-                     # tsmod_rcbot_amd64.so), checks the DLLs import no MinGW runtime, copies data/
+                     # tsmod_rcbot_amd64.so), checks the DLLs import no MinGW runtime, copies data/rcbot to
+                     # dist/<platform>/tsmod/rcbot/ (the plugin's data_dir)
 cargo xtask all      # lint, test, build
+cargo xtask e2e [root...]  # dist, then the port's engine roots (~/games): installs the port
+                     # (../rust-hlmod-the-specialists, or TS_PORT_DIR) and tsmod_rcbot, runs ts_dojo
+                     # with ts_bot_backend rcbot and checks bots join, move and use waypoints
 ```
 
 Before calling a change done: `cargo fmt`, `cargo xtask lint`, `cargo xtask test`.
@@ -89,6 +93,14 @@ never run their scripts.
 - **The visibility table's row stride is 1024**, not the waypoint count; `.rcv` files hold only
   the leading rows (design §5.1).
 - **Map names in `.rcw` headers** must match exactly; one shipped file doesn't (its README).
+- **Re-entrancy in the host**: the server calls back into the plugin from inside API calls
+  (`create_bot`, `run_cmd`, `bot_command`) while the host holds its state lock. Callbacks only
+  `try_lock` it and queue an event when it is held; never `lock()` it in a callback and never use a
+  `RefCell` for it (a re-entrant borrow aborts the server).
+- **Engine roots are shared**: check no other `xtask` runs before `cargo xtask e2e` (it refuses),
+  never `pkill -f`, and never write into a root's `maps/` (a link to the content).
+- **`server.cfg` ends without a newline**: the line after `exec server.cfg` in a test config is
+  swallowed (e2e puts a comment there).
 - **Vector length** is `pow(x²+y²+z², 0.5)` computed as upstream does (`math.rs`); A* results are
   compared bit for bit with upstream, so don't swap in a different formula.
 
@@ -96,5 +108,5 @@ never run their scripts.
 
 - Work on `main`. Commit in logical steps; commit or push only when asked. Commit messages
   reference the issue they are part of ("Part of #1").
-- When the plugin API lands, the port crates (`goldsrc-sys`, `ts-plugin-api`) become git
-  dependencies pinned to one rev in the root `Cargo.toml`.
+- The port crates (`goldsrc-sys`, `ts-plugin-api`) are git dependencies pinned to one rev in the
+  root `Cargo.toml`; `goldsrc-sys` needs `../xash3d-fwgs` (`.cargo/config.toml`, or `FWGS_DIR`).

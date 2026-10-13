@@ -12,12 +12,13 @@ Upstream paths below are relative to `rcbotold/dlls/`, line numbers at `b9c86c2`
 
 ```
 crates/rcbot     the bot, #![deny(unsafe_code)], no FFI. Engine queries go through traits:
-                 nav::World (traces, point contents) and Random (RANDOM_LONG / RANDOM_FLOAT).
-crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe. A stub until the plugin
-                 API for bots lands (#104): then it holds the entry point, wraps the API in safe
-                 types, implements World/Random on the engine, and turns the port's structured
-                 state and events into calls on the bot.
-xtask            build | dist | test | lint | all
+                 nav::World (traces, point contents), bot::BotWorld (entities, PVS, time),
+                 Random (RANDOM_LONG / RANDOM_FLOAT) and config::CommandHost (commands' effects).
+crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe: TSRS_PluginLoad, safe
+                 wrappers over the plugin API v3 and the engine table (api.rs), the traits on
+                 them (world.rs, commands.rs), RCBot's globals in one State, the per-frame bot
+                 loop and the editors' display (lib.rs, editor.rs)
+xtask            build | dist | test | lint | all | e2e
 data/rcbot       what the plugin ships: bot_weapons.ini (TS section), waypoints/ts/*.rcw
 tools/reference  the C++ reference harnesses: upstream code compiled with stubs (§6)
 ```
@@ -28,8 +29,19 @@ Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `Way
 branches are kept and every other mod's are removed; where a branch chose between mods
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
-The host side makes no assumptions about the plugin API's table layout yet: the API is being
-redesigned for bots without backward compatibility (#104).
+The host uses the port's plugin API v3 (the-specialistsmod-rs#104; `goldsrc-sys` and
+`ts-plugin-api` pinned to the port's `5a8ec94`). It registers the bot backend `rcbot`
+(`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
+`client_command`), and the `rcbot_ver` cvar. The plugin's data directory
+(`<gamedir>/tsmod/rcbot/`) is RCBot's bot folder: `bot_weapons.ini`, `bot_config.ini`,
+`bot_users.ini`, `waypoints/ts/<map>.rcw`/`.rcv`, the learned GAs. Each `start_frame` it runs
+every bot's [`Bot::frame`] (upstream's `Think` + `RunPlayerMove`) and passes the usercmd to
+`run_cmd` and the bot's actions to `bot_command`, `select_weapon`, `clear_loadout`/`buy` and
+`kick_bot`.
+
+The state sits behind a mutex that callbacks only `try_lock`: the server calls back into the
+plugin from inside API calls (`create_bot` spawns the bot, `run_cmd` runs its think), and a
+callback that finds the state busy is queued and runs before the next frame.
 
 ## 2. C++ → Rust map
 
@@ -74,22 +86,29 @@ redesigned for bots without backward compatibility (#104).
 | `bot_rep.cpp` (`CBotReputations` load/save, `GetPlayerRepId`, `GetClientRep`), `bot.h` `CBotReputation(s)`; `bot.cpp` `BotFunc_GetRepArrayNum`, `BotFunc_IncreaseRep`/`DecreaseRep`, `printRep(s)` | `config/rep.rs` | Mod-independent upstream, so TS keeps it |
 | `bot_menu.{h,cpp}` `SetupMenus` (TS menus), `CBotMenu`, `CBotMenuItem` (`Render`, `Activate`) | `config/menu.rs` | NS's add/kick-to-team menus dropped |
 | `bot_commands.{h,cpp}` `CBotCvar`, `CBotCvarList`, `SetupCommands`, every command class and help text, `BotFunc_AddBot`'s arguments and TS team (`mp_teamlist`) choice, `RCBot_ServerCommand`; `dll.cpp` `ClientCommand`'s `rcbot`/`menuselect` dispatch; `globals.cpp` `ReadConfig`'s dispatch; `bot_menu.cpp` `BotMenu_Func_*` | `config/commands.rs` | Side effects through `CommandHost` (`Effect`, `Print`). NS `config` settings, `util buildres/buildcomm`, the WhichBot/GraveBot `waypoint save` converters dropped; `+rcbot_force_grip` left to the host |
+| `bot.h` `CBotTask`, `CBotTasks` (schedules, front insertion, path hand-over) | `bot/tasks.rs` | Only the tasks a TS bot creates |
+| `bot.h` `CRememberPosition(s)` | `bot/remember.rs` | |
+| `bot.cpp` `CBot::Think`, `SpawnInit`, `DoTasks` (`FIND_PATH`, `NORMAL_ATTACK` (TS), `SEARCH_FOR_ENEMY`, `RELOAD`, `WAIT_AND_FACE_VECTOR`, `FACE_VECTOR`, `MOVE_TO_VECTOR`, `PICKUP_ITEM`, `USE`, `WAIT`, `DEFEND`, `LISTEN_TO_SOUND`, `CHANGE_WEAPON`, `DROP_WEAPON`, `CROUCH`), `LookForNewTasks` (TS), `SwitchWeapon`, `CanPickup`; `util.cpp` `UTIL_UpdateSounds`, `UTIL_IsFacingEntity`; `globals.cpp` `StartFrame`'s bot loop (kick, kill, think, move) | `bot/think.rs`, `bot/manager.rs` | `Bot::frame` |
+| `bot_navigate.cpp` `BotNavigate_UpdateWaypoint`, `BotNavigate_FindNextWaypoint`, `BotNavigate_ScanFOV`, `BotCheckWallOn{Left,Right}`; `bot.cpp` `touchedWpt`, `gotStuck`, `GetLadderDir`, `GetNextWaypoint`, `GetClimbType` | `bot/navigate.rs` | |
+| `bot.cpp` `WorkMoveDirection`, `CheckStuck`, `RunPlayerMove`, `UpdateMsec`; `util.cpp` `UTIL_GetAvoidAngle` | `bot/movement.rs` | |
+| `bot.cpp` `WorkViewAngles`, `SetViewAngles`, `ChangeAngles` (Whistler's), `GetAimVector`; `util.cpp` angle helpers | `bot/look.rs` | |
+| `bot.cpp` `UpdateVisibles`, `FVisible`, `CanAvoid`, `FindEnemy`, `IsEnemy` (TS), `EnemyFound`, `workEnemyCosts`, `clearEnemyCosts`, `decideJumpDuckStrafe`, `WantToFollowEnemy`, `RunForCover`, `UpdateConditions`; `bot_visibles.cpp` `CBotVisibles`; `BotFunc_BreakableIsEnemy` | `bot/combat.rs` | |
+| `bot_weapons.{h,cpp}` `CBotWeapon`, `CBotWeapons`, `GetBestWeaponId`, `NeedToReload`, `CanShootPrimary`; `bot_client.cpp` `BotClient_TS_WeaponInfo` | `bot/weapons.rs` | The port's `PlayerInfo` weapon fields stand in for the message |
+| `waypoint.cpp` `WaypointAddOrigin` (player flags, item scan), `WaypointAdd`, `WaypointDelete`, `WaypointCreatePath`, `WaypointRemovePath`, `WaypointDrawIndex`, `CWaypointLocations::DrawWaypoints`; `client.cpp` `CClient::Think`'s waypoint display and auto-waypointing (jumps, TS stunt jumps, ladders, distance, corners); `util.cpp` `UTIL_CanStand` | `nav/editor.rs` | Beams, sounds and messages come back as `EditorEvent`s |
+| `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_PlaySound`, `WaypointDrawBeam` | `host` | Plugin callbacks and API calls |
 
 ### Planned: every RCBot feature a TS server uses
 
 | Upstream | Rust (planned) | #1 step |
 |---|---|---|
-| Movement in `bot_navigate.cpp`: `BotNavigate_UpdateWaypoint`, `BotNavigate_FindNextWaypoint`, `BotTurnAtWall`, `BotCantMoveForward`, `BotCanDuckUnder`, `BotCheckWallOn{Left,Right}`, `BotNavigate_ScanFOV`, `CheckLift` | `nav/movement.rs` | 4 |
-| Waypoint editing: `WaypointAdd` (player flags, item scan), the delete/create-path/remove-path commands, `WaypointPrintInfo`, `WaypointDrawBeam`/`WaypointDrawIndex`/`DrawWaypoints`, the waypoint menu (`bot_menu.cpp`) | `nav/editor.rs` | 4 |
-| Autowaypointing (`client.cpp` recording, including the TS stunt jump waypoint; `AutoWaypoint`) | `nav/autowaypoint.rs` | 4 |
-| `CBot` (`bot.h`/`bot.cpp`): the think loop, conditions, tasks and schedules (`schedule.h`, `bot_tick.h`) | `bot/` | 4-6 |
-| Squads (`CBotSquad`, `bot.h`), reputation (`bot_rep.cpp`), botcam (`botcam.cpp`) | `bot/` | 7 |
-| What the bot sees (`bot_visibles.{h,cpp}`), `bot_combat.cpp`, enemy choice, aiming and skill (`bot.cpp`), hearing | `combat/` | 5 |
-| `CBotWeapon(s)`, `GetBestWeaponId`, `NeedToReload`, `CanShootPrimary` (`bot_weapons`) | `weapons/bot_weapons.rs` | 5 |
-| TS: the loadout GA, the stunt perceptron, kung fu and power-ups, pickups, teamplay and CTB (`bot.cpp` `MOD_TS` branches; `UTIL_makeTSweapon` becomes buying through the host) | `ts/` | 6 |
-| Using the learning in decisions: `dec_stunt` and the jump/duck/strafe, cover, hurt-origin and follow-enemy perceptrons' inputs (`bot.cpp`), enemy costs from `m_GASurvival` | `bot/`, `ts/` (on `learn/`) | 5, 6 |
-| What the commands ask of the host (`CommandHost`): the bot manager (adding/kicking bots, `m_Bots`), waypoint editing, squads, the bot cam, entities; the rest of `CClient` (`client.cpp`: auto-waypoint recording, tooltips, debug HUD) | `bot/`, `nav/editor.rs`, `host` | 4, 7 |
-| When bots chat (the chat tasks and timers in `bot.cpp`), loading/saving brains when bots join and leave (`dll.cpp`) | `bot/`, `host` | 4, 7 |
+| Lifts and other special waypoints: `CheckLift`, `BOT_TASK_WAIT_FOR_LIFT`, pushables (`BOT_TASK_PUSH_PUSHABLE`), human towers, grenade-throw waypoints; `BotTurnAtWall`, `BotCantMoveForward`, `BotCanDuckUnder` (unused by `Think`) | `bot/navigate.rs` | 4 |
+| The waypoint menu (`bot_menu.cpp`'s waypoint pages shown on the HUD: `UTIL_ShowMenu`) | `host` | 4 |
+| Squads (`CBotSquad`, `bot.h`), reputation in enemy choice and aim (`bot_rep.cpp`), botcam (`botcam.cpp`), bot profiles (`bot_profiles.ini` choice in `BotFunc_AddBot`) | `bot/`, `host` | 7 |
+| Hearing through the port's `sound` callback (upstream listens for `IN_ATTACK` only; ported) | `bot/` | 5 |
+| TS: kung fu and power-ups, the TS objectives (`TSObjective` messages) and CTB, `BOT_TASK_USE` on momentary buttons | `bot/` | 6 |
+| Learned data saved and loaded when bots join and leave (`saveLearnedData`), team scores in the death fitness | `host` | 7 |
+| What the commands ask of the host that isn't ported: squads, the bot cam, `util` effects, the debug HUD, tooltips | `host` | 7 |
+| When bots chat (the chat tasks and timers in `bot.cpp`), loading/saving brains when bots join and leave (`dll.cpp`) | `bot/`, `host` | 7 |
 | `util.cpp` helpers | next to their callers | |
 
 ### Dropped
@@ -220,6 +239,33 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   `showreps` skips reputations of players who left (upstream dereferences `NULL`).
 * **Additions**: `VisibilityTable::rows_in_file` and `work_out_rows`, so the host can rebuild only
   the rows an upstream `.rcv` doesn't hold (§5.1); the file format is unchanged.
+
+* **The bot through the port** (the-specialistsmod-rs#104): `pfnRunPlayerMove` is the API's
+  `run_cmd`, `FakeClientCommand` is `bot_command`, `ClientKill` is the `kill` command, the kick is
+  `kick_bot`, and the weapon switch is `select_weapon` (upstream's `CmdStart` with `weaponselect`,
+  which TS 3.0 ignores, so RCBot never switched). Teams are the port's rules team
+  (`PlayerInfo::team`; upstream compared `model` keys, which TS 3.0's teams don't use). What the
+  TS user messages told the bot comes from `PlayerInfo`: `WeaponInfo` when the weapon, clip or
+  reserve changes, `TSState` as the stunt state. Damage comes from `player_damaged` (the bot
+  faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
+* **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47).
+* **Kung fu is 38** everywhere (`TSWeapon::KungFu`); upstream also uses 36, TS 3.0's Contender
+  (§5.48).
+* **The loadout**: `UTIL_makeTSweapon` spawned the three GA-picked weapons for free at once; the
+  port empties the loadout (`clear_loadout`) and buys them (`buy`, ids 1-37 but 29) for the next
+  spawn, under the server's rules. Upstream's death-time `buy` / `menuselect 7` ("doesn't work")
+  is dropped. With `BOT_CONFIG_TS_KUNGFU` nothing is bought, as upstream.
+* **Visibility rows** an `.rcv` doesn't hold (or all of them, without one) are worked out when
+  the map's waypoints load (§5.1).
+* **Not yet used**: reputation in enemy choice and aim (every enemy gets the no-reputation
+  priority 10 and aim), idle chat, squads, the bot cam, TS objectives (the port doesn't report
+  `TSObjective`), lifts/pushables/human towers/grenade-throw waypoints, momentary buttons in
+  `BOT_TASK_USE`, team scores in the death fitness (0), bot profiles (each bot gets
+  `BotFunc_InitProfile`'s defaults), saving learned data. `UTIL_IsGrenadeRocket` in the enemy
+  costs is "classname contains `grenade`".
+* **Bot names**: the port's quota names its bots; `rcbot addbot` and nameless `addbot` use
+  RCBot's default name (`RCBot`). `addcustombot`'s skill (0-1) becomes the profile's skill
+  (0-100).
 
 ## 5. Upstream bugs found
 
@@ -352,6 +398,37 @@ Found while porting; not filed upstream.
 46. **`BotFunc_WriteProfile` writes a `NULL` string as its bare tag without a newline**
     (`dll.cpp:1636`), so the next key is lost on reading. Kept (nothing calls it).
 
+47. **Bots aim with a third of the inverted pitch** (`CBot::RunPlayerMove`, `bot.cpp:8961`):
+    `pfnRunPlayerMove` gets `pev->angles` (`angles.x = -v_angle.x / 3`), and the engine copies the
+    usercmd's angles into `v_angle`. Fixed (§4).
+48. **TS kung fu is 38, but the code also uses 36** (TS 3.0's Contender): `StartFrame` adds
+    weapon 36 to every TS bot (`globals.cpp:735`), `WStatus` makes 36 current when a weapon is lost
+    (`bot_client.cpp:341`), `NORMAL_ATTACK` treats 36 as melee (`bot.cpp:15122`) and the stunt
+    waypoint's kung fu check reads 36 (`bot_navigate.cpp:1490`). Fixed (§4).
+49. **TS bots never reload by RCBot's logic** (`BotClient_TS_WeaponInfo`, `bot_client.cpp:468`):
+    `SetWeapon` resets `m_iMaxClip` before `checkMaxClip(clip)`, so the "max clip" is the last
+    clip and 0 for an empty gun (`NeedToReload`, `ClipIsEmpty` false), and `m_iAmmo1` is NULL for
+    every TS weapon (`CanReload`, `LowOnAmmo` false). TS's own `WeaponIdle` reloads an empty gun.
+    Kept.
+50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
+    `2 * time + secs`. Kept.
+51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not
+    from now. Kept.
+52. **`gotStuck` decrements the waypoint index** (`bot.cpp:8000`) instead of going back to the
+    previous waypoint. Kept.
+53. **Remembered positions**: up to 9 are kept (`Size() > MAX_REMEMBER_POSITIONS`), positions
+    without an entity all compare equal (`bot.h:1888`), and `EnemyDown` runs after
+    `NORMAL_ATTACK` cleared the enemy, so nothing is removed. Kept.
+54. **The remembered-point check is always true** (`UpdateVisibles`, `bot.cpp:6091`): it checks
+    the bot against its own PVS. Kept.
+55. **The enemy-cost buckets all get the same cost** (`workEnemyCosts`, `bot.cpp:16873`): the
+    cheapest is always the first, so `m_vLowestEnemyCostVec`, where bots back off to within 256
+    units of an enemy, is always 192 units to the -x/-y side. Kept.
+56. **`WantToFollowEnemy` ignores its perceptron** (`bot.cpp:11040`, "Not required?"): the bot
+    follows while above 30% health. Kept.
+57. **Auto-waypoints moved to the floor stay in their old location bucket** (`client.cpp:541`,
+    `:587`: `waypoints[i].origin = v_floor + 36`). Kept.
+
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
 bias weight.
@@ -409,3 +486,16 @@ those by going through the port's own code when that code is ported.
   get/set for flags, ints and floats, `addbot` arguments, waypoint flags by name and by menu
   (TS's "Stunt"), team waypoints, `util`, `users`, squads, `botcam`, `autowaypoint`, `debug`,
   and the TS team choice from `mp_teamlist`.
+* **Bot tests** (`bot/tests.rs`): a bot on an open plane, its usercmds moving it, walks a line of
+  waypoints (touching them in order) and attacks a visible enemy with the gun it holds; unit tests
+  cover the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
+  remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
+  the empty-gun quirk), and the waypoint editor (flags, paths, delete, beam colours).
+* **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 2 min): installs
+  the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
+  `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects
+  `ts_bot_backend rcbot`, changes the map and adds bots (quota 3 and `addbot`). Checks: the
+  plugin loaded, the backend selected, ts_dojo's 154 waypoints loaded, bots created and run, one
+  moved more than 64 units, one touched three waypoints, no panic or crash. Every 5 s the log has
+  a line per bot (waypoint, goal, waypoints touched, distance, enemy, weapon, task). It refuses
+  to run while another `xtask` runs, and removes the library from `dlls/` afterwards.
