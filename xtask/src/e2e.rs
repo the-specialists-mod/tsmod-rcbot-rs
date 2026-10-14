@@ -4,12 +4,20 @@
 //! For each root: the port's own `cargo xtask install <root>` (in `TS_PORT_DIR`, default
 //! `../rust-hlmod-the-specialists`), then `dist/<platform>/` over `<root>/ts/` (the library in
 //! `dlls/`, the data in `tsmod/rcbot/`). A dedicated server starts on ts_dojo; its first server
-//! config selects `ts_bot_backend rcbot` and changes the map (the backend is read at map start),
-//! the second adds bots with the quota and `addbot`. The log must show the plugin loaded, the
-//! backend selected, the waypoints loaded, bots created and run, a bot that moved more than 64
-//! units and one that touched waypoints, and no panic or crash. The library is removed from
-//! `dlls/` afterwards so the port's own scenarios run without it. Nothing is written into the
-//! roots' `maps/` (a link to the content).
+//! config selects `ts_bot_backend rcbot` and changes the map (the backend is read at map start).
+//! The second adds six bots (`ts_bot_quota 5` and `addbot`), selects `ts_bot_backend native` for
+//! the next map and sets `mp_timelimit 2`, so after two minutes of RCBot on ts_dojo the game
+//! changes to the next map of the cycle with the native bots.
+//!
+//! The log must show the plugin loaded, the backend selected, the waypoints loaded, bots created
+//! and run, a bot that moved more than 64 units and one that touched waypoints, a kill by one of
+//! RCBot's bots (the plugin logs `kill "<killer>" killed "<victim>"`: the port logs no kills), a
+//! weapon switch (a living bot's weapon changing: RCBot's `select_weapon`, or TS switching after a
+//! pickup or a drop; RCBot itself never switches in TS, design §5), then at the map change the native backend taking
+//! over (`[ts] bots: backend native`, the plugin's backend going inactive, and the port adding
+//! native bots), and no panic or crash. The library is removed from `dlls/` afterwards so the
+//! port's own scenarios run without it. Nothing is written into the roots' `maps/` (a link to
+//! the content).
 //!
 //! It refuses to start while another `xtask` runs (they share the roots and Wine prefix).
 
@@ -122,10 +130,42 @@ pub fn checks(text: &str, file: &str, up: bool) -> Vec<(String, bool)> {
             !(text.contains("panicked") || text.contains("PANIC") || text.contains("FATAL ERROR") || text.contains("Segmentation")),
         ),
     ];
-    for what in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints"] {
+    for what in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch"] {
         c.push((format!("check {what}"), text.contains(&format!("[tsmod_rcbot] check {what} ok"))));
     }
+    c.push(("a kill by an RCBot bot".into(), kill_by_bot(text)));
+    c.push(("native again after the map change".into(), back_to_native(text)));
     c
+}
+
+/// The quoted name after `marker` in `line`.
+fn quoted<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = &line[line.find(marker)? + marker.len()..];
+    let rest = rest.strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// A `kill` line of the plugin whose killer is one of the bots it added or adopted.
+fn kill_by_bot(text: &str) -> bool {
+    let bots: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("[tsmod_rcbot]"))
+        .filter_map(|l| quoted(l, "] added ").or_else(|| quoted(l, "] adopted ")))
+        .collect();
+    text.lines().filter(|l| l.contains("[tsmod_rcbot] kill ")).filter_map(|l| quoted(l, "] kill ")).any(|k| bots.contains(&k))
+}
+
+/// After RCBot ran, the port selects `native` at the map change, the plugin's backend goes
+/// inactive, and the port adds native bots.
+fn back_to_native(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(rcbot) = lines.iter().position(|l| l.contains("[ts] bots: backend rcbot")) else { return false };
+    let Some(native) = lines.iter().skip(rcbot).position(|l| l.contains("[ts] bots: backend native")).map(|p| p + rcbot) else {
+        return false;
+    };
+    let inactive = lines[rcbot..].iter().any(|l| l.contains("[tsmod_rcbot] bot backend inactive"));
+    let added = lines[native..].iter().any(|l| l.contains("[ts] bots: added \""));
+    inactive && added
 }
 
 fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
@@ -141,8 +181,11 @@ fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
         format!("// Written by tsmod-rcbot-rs cargo xtask e2e.\nexec server.cfg\n// server.cfg ends without a newline: this line is the one it swallows\nts_bot_backend rcbot\nservercfgfile xtask_rcbot2.cfg\nchangelevel {map}\n"),
     )
     .map_err(|e| e.to_string())?;
-    std::fs::write(gamedir.join("xtask_rcbot2.cfg"), "// Written by tsmod-rcbot-rs cargo xtask e2e.\nts_bot_quota 3\naddbot\n")
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        gamedir.join("xtask_rcbot2.cfg"),
+        "// Written by tsmod-rcbot-rs cargo xtask e2e.\nts_bot_quota 5\naddbot\nts_bot_backend native\nmp_timelimit 2\n",
+    )
+    .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(root.log_path());
     let out_path = repo.join("target").join(format!("e2e-{}.log", root.name));
     let out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
@@ -150,7 +193,8 @@ fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
     cmd.stdin(Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out);
     let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", root.name))?;
     let start = Instant::now();
-    let limit = Duration::from_secs(if root.windows { 100 } else { 50 });
+    // Two minutes of RCBot, the intermission, then the native bots on the next map.
+    let limit = Duration::from_secs(if root.windows { 300 } else { 170 });
     let mut up = true;
     while start.elapsed() < limit {
         std::thread::sleep(Duration::from_millis(500));
@@ -166,7 +210,11 @@ fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
     text.push_str(&std::fs::read(&out_path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default());
     let text = text.replace('\r', "");
     let mut report = format!("== {}: tsmod_rcbot on {map}, port {port}\n", root.name);
-    for l in text.lines().filter(|l| l.contains("[tsmod_rcbot]") || l.contains("[ts] bots: backend") || l.contains("tsmod_rcbot")).take(60)
+    for l in text
+        .lines()
+        .filter(|l| l.contains("[tsmod_rcbot]") || l.contains("[ts] bots: backend") || l.contains("tsmod_rcbot"))
+        .filter(|l| !l.contains("] bot #"))
+        .take(80)
     {
         report += &format!("   | {}\n", l.trim_end());
     }
@@ -227,10 +275,24 @@ mod tests {
     fn a_passing_log() {
         let mut log = String::from("[ts] plugins: loaded tsmod_rcbot_amd64.so (RCBot 0.1)\n[ts] bots: backend rcbot\n");
         log += "[tsmod_rcbot] loaded 154 waypoints for ts_dojo (visibility rows from 23)\n";
-        for c in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints"] {
+        log += "[tsmod_rcbot] added \"Bot Neo\" (#1, profile 0)\n[tsmod_rcbot] added \"RCBot\" (#4, profile 0)\n";
+        for c in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch"] {
             log += &format!("[tsmod_rcbot] check {c} ok\n");
         }
-        assert!(checks(&log, "tsmod_rcbot_amd64.so", true).iter().all(|(_, ok)| *ok));
-        assert!(checks(&format!("{log}Segmentation fault\n"), "tsmod_rcbot_amd64.so", true).iter().any(|(_, ok)| !ok));
+        let without_kill = log.clone();
+        log += "[tsmod_rcbot] kill \"RCBot\" killed \"Bot Neo\"\n";
+        let native = "[ts] bots: backend native\n[tsmod_rcbot] bot backend inactive\n[ts] bots: added \"Bot Neo\" (#1)\n";
+        assert!(checks(&format!("{log}{native}"), "tsmod_rcbot_amd64.so", true).iter().all(|(_, ok)| *ok));
+        let failing =
+            |l: &str| checks(l, "tsmod_rcbot_amd64.so", true).into_iter().filter(|(_, ok)| !ok).map(|(w, _)| w).collect::<Vec<_>>();
+        assert_eq!(failing(&format!("{log}{native}Segmentation fault\n")), ["no panic or crash"]);
+        assert_eq!(failing(&format!("{without_kill}{native}")), ["a kill by an RCBot bot"]);
+        // A human's kill doesn't count.
+        assert_eq!(failing(&format!("{without_kill}[tsmod_rcbot] kill \"Player\" killed \"RCBot\"\n{native}")), ["a kill by an RCBot bot"]);
+        assert_eq!(failing(&log), ["native again after the map change"]);
+        assert_eq!(
+            failing(&format!("{log}[ts] bots: backend native\n[ts] bots: added \"Bot Neo\" (#1)\n")),
+            ["native again after the map change"]
+        );
     }
 }

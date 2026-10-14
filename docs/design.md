@@ -568,11 +568,15 @@ those by going through the port's own code when that code is ported.
   task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
   the empty-gun quirk), and the waypoint editor (flags, paths, delete, beam colours).
-* **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 2 min): installs
+* **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 5 min): installs
   the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
   `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects
-  `ts_bot_backend rcbot`, changes the map and adds bots (quota 3 and `addbot`). Checks: the
-  plugin loaded, the backend selected, ts_dojo's 154 waypoints loaded, bots created and run, one
-  moved more than 64 units, one touched three waypoints, no panic or crash. Every 5 s the log has
-  a line per bot (waypoint, goal, waypoints touched, distance, enemy, weapon, task). It refuses
-  to run while another `xtask` runs, and removes the library from `dlls/` afterwards.
+  `ts_bot_backend rcbot`, changes the map and adds six bots (quota 5 and `addbot`), selects
+  `native` for the next map and sets `mp_timelimit 2`. Checks: the plugin loaded, the backend
+  selected, ts_dojo's 154 waypoints loaded, bots created and run, one moved more than 64 units,
+  one touched three waypoints, a kill by one of RCBot's bots (the plugin's `kill` lines), a
+  living bot's weapon changing, then after the time limit the next map with the native backend
+  (`[ts] bots: backend native`, the plugin's backend inactive, native bots added), and no panic
+  or crash. Every 5 s the log has a line per bot (waypoint, goal, waypoints touched, distance,
+  enemy, weapon, task). It refuses to run while another `xtask` runs, and removes the library
+  from `dlls/` afterwards.

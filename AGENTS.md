@@ -56,7 +56,8 @@ cargo xtask dist     # release build -> dist/<platform>/dlls/ with the port's fi
 cargo xtask all      # lint, test, build
 cargo xtask e2e [root...]  # dist, then the port's engine roots (~/games): installs the port
                      # (../rust-hlmod-the-specialists, or TS_PORT_DIR) and tsmod_rcbot, runs ts_dojo
-                     # with ts_bot_backend rcbot and checks bots join, move and use waypoints
+                     # with ts_bot_backend rcbot and checks bots join, move, use waypoints, kill and
+                     # change weapons, then that native takes over at the next map (about 5 min)
 ```
 
 Before calling a change done: `cargo fmt`, `cargo xtask lint`, `cargo xtask test`.
