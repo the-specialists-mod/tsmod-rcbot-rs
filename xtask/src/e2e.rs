@@ -12,9 +12,9 @@
 //! The log must show the plugin loaded, the backend selected, the waypoints loaded, bots created
 //! and run, a bot that moved more than 64 units and one that touched waypoints, a kill by one of
 //! RCBot's bots (the plugin logs `kill "<killer>" killed "<victim>"`: the port logs no kills), a
-//! weapon switch (a living bot's weapon changing: RCBot's `select_weapon`, or TS switching after a
-//! pickup or a drop; RCBot itself never switches in TS, design §5), then at the map change the native backend taking
-//! over (`[ts] bots: backend native`, the plugin's backend going inactive, and the port adding
+//! weapon switch (a living bot's weapon changing: RCBot's `select_weapon` for an empty gun in a
+//! fight, or TS switching after a pickup or a drop), then at the map change the native backend
+//! taking over (`[ts] bots: backend native`, the plugin's backend going inactive, and the port adding
 //! native bots), and no panic or crash. The library is removed from `dlls/` afterwards so the
 //! port's own scenarios run without it. Nothing is written into the roots' `maps/` (a link to
 //! the content).

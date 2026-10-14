@@ -496,8 +496,8 @@ fn report(s: &mut State, a: Api, e: Engine) {
             st.weapon = None;
             continue;
         }
-        // A weapon change while alive: RCBot's `select_weapon`, or TS switching after a pickup
-        // or a drop (RCBot itself never switches in TS, design §5).
+        // A weapon change while alive: RCBot's `select_weapon` (an empty gun in a fight), or TS
+        // switching after a pickup or a drop.
         if let Some(cur) = b.current_weapon() {
             if st.weapon.is_some_and(|w| w != cur) {
                 a.log(log::INFO, &format!("weapon \"{}\" changed {} -> {cur}", b.name, st.weapon.unwrap_or(0)));

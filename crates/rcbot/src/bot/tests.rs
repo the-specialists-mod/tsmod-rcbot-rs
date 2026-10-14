@@ -661,3 +661,40 @@ fn a_grenade_lands_where_its_toss_ends() {
     // 256 times the last velocity.
     assert!((end.x - (150.0 + 225.0 + 337.5 + 506.25 + 506.25 * 256.0)).abs() < 1.0, "{end:?}");
 }
+
+#[test]
+fn the_loadout_is_bought_before_the_spawn() {
+    let mut rig = Rig::new(Config::default());
+    let mut dead = player(1, Vector::ZERO, 0);
+    dead.health = 0.0;
+    dead.player.as_mut().unwrap().alive = false;
+    let mut w = plane(vec![dead]);
+    let mut rng = XorShiftRandom::new(6);
+    let kinds = |f: &Frame| {
+        f.actions
+            .iter()
+            .map(|a| matches!(a, Action::Loadout(_)))
+            .zip(f.actions.iter().map(|a| matches!(a, Action::Command(c) if c == "respawn")))
+            .collect::<Vec<_>>()
+    };
+    // Dead: the picks go into the loadout first, then `respawn`; once per life.
+    let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+    assert_eq!(kinds(&f), [(true, false), (false, true)]);
+    w.time += 0.1;
+    let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+    assert!(!f.actions.iter().any(|a| matches!(a, Action::Loadout(_))));
+    // Alive, and dead again: a new pick for the next life.
+    *w.ents.borrow_mut() = vec![player(1, Vector::ZERO, 0)];
+    for _ in 0..5 {
+        w.time += 0.1;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        assert!(!f.actions.iter().any(|a| matches!(a, Action::Loadout(_))));
+    }
+    let mut dead = player(1, Vector::ZERO, 0);
+    dead.health = 0.0;
+    dead.player.as_mut().unwrap().alive = false;
+    *w.ents.borrow_mut() = vec![dead];
+    w.time += 0.1;
+    let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+    assert!(f.actions.iter().any(|a| matches!(a, Action::Loadout(_))));
+}

@@ -143,6 +143,19 @@ impl Bot {
         self.touched_waypoints = 0;
     }
 
+    /// `Think`'s TS weapon choice (`BOT_CONDITION_SELECTED_GUN`): the GA's pick (or seeded
+    /// values), bought unless `BOT_CONFIG_TS_KUNGFU`.
+    fn select_loadout(&mut self, g: &mut BotGlobals<'_>, rng: &mut dyn Random) {
+        if self.has(cond::SELECTED_GUN) {
+            return;
+        }
+        let picks = self.learned.select_ts_weapons(&mut g.learned.ts_weapon_choices, g.config.is_on(cfg::DISABLE_WEAPON_LEARN), rng);
+        if !g.config.is_on(cfg::TS_KUNGFU) {
+            self.actions.push(Action::Loadout(picks.to_vec()));
+        }
+        self.set(cond::SELECTED_GUN);
+    }
+
     /// `CBot::Think`.
     pub(crate) fn think(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
         let now = w.time();
@@ -180,6 +193,10 @@ impl Bot {
                 self.spawn_init(g, rng);
                 self.spawn_time = 0.0;
             }
+            // The loadout is chosen before the spawn: the port's `buy` fills the next spawn's
+            // loadout, and upstream's `UTIL_makeTSweapon` gave the picks at the first think of
+            // the life, whose death then grades them (design §4).
+            self.select_loadout(g, rng);
             if self.respawn_time < now {
                 self.actions.push(Action::Command("respawn".into()));
                 self.respawn_time = now + 5.0;
@@ -210,13 +227,8 @@ impl Bot {
         }
         self.last_think_time = now + self.think_time;
 
-        if !self.has(cond::SELECTED_GUN) {
-            let picks = self.learned.select_ts_weapons(&mut g.learned.ts_weapon_choices, g.config.is_on(cfg::DISABLE_WEAPON_LEARN), rng);
-            if !g.config.is_on(cfg::TS_KUNGFU) {
-                self.actions.push(Action::Loadout(picks.to_vec()));
-            }
-            self.set(cond::SELECTED_GUN);
-        }
+        // A bot the port handed over alive (`adopt_bot`) picks here, as upstream.
+        self.select_loadout(g, rng);
 
         self.ideal_move_speed = self.max_speed;
         self.want_to_find_enemy = !g.config.is_on(cfg::DONT_SHOOT);

@@ -255,12 +255,19 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   reserve changes, `TSState` as the stunt state. Damage comes from `player_damaged` (the bot
   faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
 * **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47).
+* **A TS gun's max clip is the largest clip seen** (`checkMaxClip`'s intent; upstream resets it
+  on every `WeaponInfo`, §5.49), so an empty gun needs a reload and a fighting bot reloads or
+  switches as upstream's TS code says. `CanReload`/`LowOnAmmo` stay false (`m_iAmmo1`).
 * **Kung fu is 38** everywhere (`TSWeapon::KungFu`); upstream also uses 36, TS 3.0's Contender
   (§5.48).
 * **The loadout**: `UTIL_makeTSweapon` spawned the three GA-picked weapons for free at once; the
   port empties the loadout (`clear_loadout`) and buys them (`buy`, ids 1-37 but 29) for the next
-  spawn, under the server's rules. Upstream's death-time `buy` / `menuselect 7` ("doesn't work")
-  is dropped. With `BOT_CONFIG_TS_KUNGFU` nothing is bought, as upstream.
+  spawn, under the server's rules. So the pick is made while the bot is dead, before its
+  `respawn` (upstream: at the first think of the life): the weapons a life uses are the ones its
+  death grades, as upstream, and a new bot's first life has them too. A bot the port hands over
+  alive picks at its first think, for its next life. Upstream's death-time `buy` /
+  `menuselect 7` ("doesn't work") is dropped. With `BOT_CONFIG_TS_KUNGFU` nothing is bought, as
+  upstream.
 * **Visibility rows** an `.rcv` doesn't hold (or all of them, without one) are worked out when
   the map's waypoints load (§5.1).
 * **What the port can't tell a plugin**, worked around: touches (`DispatchTouch`) are the bot's
@@ -438,10 +445,16 @@ Found while porting; not filed upstream.
     (`bot_client.cpp:341`), `NORMAL_ATTACK` treats 36 as melee (`bot.cpp:15122`) and the stunt
     waypoint's kung fu check reads 36 (`bot_navigate.cpp:1490`). Fixed (§4).
 49. **TS bots never reload by RCBot's logic** (`BotClient_TS_WeaponInfo`, `bot_client.cpp:468`):
-    `SetWeapon` resets `m_iMaxClip` before `checkMaxClip(clip)`, so the "max clip" is the last
-    clip and 0 for an empty gun (`NeedToReload`, `ClipIsEmpty` false), and `m_iAmmo1` is NULL for
-    every TS weapon (`CanReload`, `LowOnAmmo` false). TS's own `WeaponIdle` reloads an empty gun.
-    Kept.
+    `AddWeapon`/`SetWeapon` reset `m_iMaxClip` before `checkMaxClip(clip)`, so the "max clip" is
+    the last clip and 0 for an empty gun (`NeedToReload`, `ClipIsEmpty` false), and `m_iAmmo1` is
+    NULL for every TS weapon (`CanReload`, `LowOnAmmo` false). TS's `WeaponIdle` reloads an empty
+    gun only once the trigger has been up for half a second (a dry fire sets
+    `m_flTimeWeaponIdle` 0.5 s on), and `NORMAL_ATTACK` presses it on 90% of thinks (every 0.04
+    s) while the enemy is in sight: a bot that empties its gun dry-fires until the enemy is out
+    of sight. In `cargo xtask e2e` three quarters of the bots' attack commands were on an empty
+    clip, and kills were rare enough that a two-minute run sometimes had none. **Fixed** for the
+    max clip (§4): the largest clip seen is kept, so `NeedToReload` makes `NORMAL_ATTACK` take
+    cover and press reload, as upstream means to; `m_iAmmo1` stays NULL (`CanReload` false).
 50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
     `2 * time + secs`. Kept.
 51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not
@@ -498,7 +511,7 @@ Found while porting; not filed upstream.
     time limit bots leave as soon as they can (unless bored to 255, which gives `NaN`). Kept.
 70. **TS bots never switch weapons by RCBot's logic**, a consequence of 49: the only TS switch
     (`Think`, an empty clip while fighting) needs `ClipIsEmpty`, which an empty TS gun never is.
-    TS itself changes weapons (a dropped empty gun, a pickup). Kept.
+    TS itself changes weapons (a dropped empty gun, a pickup). Fixed with 49.
 
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
@@ -564,10 +577,11 @@ those by going through the port's own code when that code is ported.
   a momentary button held while its door moves, grenade-throw waypoints failing in TS, touching
   a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation
   (and the priority quirk), reputation after a death, sound kinds and hearing range, chat lines
-  (greetings once, `%n`/`%m`, typing), the bot camera, and the grenade toss; unit tests cover the
+  (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, and the loadout
+  bought before each spawn; unit tests cover the
   task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
-  the empty-gun quirk), and the waypoint editor (flags, paths, delete, beam colours).
+  an emptied gun needing a reload), and the waypoint editor (flags, paths, delete, beam colours).
 * **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 5 min): installs
   the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
   `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects

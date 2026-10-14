@@ -18,10 +18,10 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set (side effects through a host trait) | done; the host runs the commands (only `util`'s toys say they aren't available) |
 | Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v3 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
-| Combat: what the bot sees, enemy choice and aim by reputation, best weapon, switching, cover, hearing (the port's `sound` callback) | done |
+| Combat: what the bot sees, enemy choice and aim by reputation, best weapon, reloads and switching (upstream's TS reload bug fixed), cover, hearing (the port's `sound` callback) | done |
 | Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
 | Special waypoints: lifts and their buttons, pushables, human towers, grenade-throw waypoints | done |
-| TS: loadouts by GA, kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
+| TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
 | Bot events and reputation (kills, deaths, what bots see), squads, botcam, chat (idle, events, greetings, MegaHAL replies, typing), profiles from `bot_profiles.ini`, learned data, brains and reputations saved and loaded | done |
 | End-to-end: `cargo xtask e2e` on all seven engine roots | bots join, move, use waypoints, kill, change weapons; back to `native` at the next map |
 

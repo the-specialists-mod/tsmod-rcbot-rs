@@ -134,15 +134,19 @@ impl BotWeapons {
     /// `BotClient_TS_WeaponInfo`: the game says the bot holds `game_id` (0 for kung fu) with
     /// `clip` rounds and `ammo` in reserve.
     ///
-    /// `SetWeapon` resets `m_iMaxClip` before `checkMaxClip(clip)`, so the "max clip" is always
-    /// the clip of the last message, and an empty gun has none: `NeedToReload` and `ClipIsEmpty`
-    /// are then false. Kept (design §5).
+    /// Upstream's `AddWeapon` and `SetWeapon` reset `m_iMaxClip` before `checkMaxClip(clip)`, so
+    /// its "max clip" is the clip of the last message and an empty gun has none: `NeedToReload`
+    /// and `ClipIsEmpty` are never true, and a bot dry-fires an empty gun for as long as it sees
+    /// its enemy (TS reloads only after the trigger is released for half a second). The port
+    /// keeps the largest clip seen, as `checkMaxClip` means to (design §4, §5.49).
     pub fn weapon_info(&mut self, game_id: i32, clip: i32, ammo: i32, registry: &mut Weapons, presets: &WeaponPresets) -> WeaponInfoResult {
         let id = TsWeapon::from_game_id(game_id).map_or(game_id, TsWeapon::id);
         registry.add(presets, crate::weapons::MOD_TS, id, "tsweapon", ammo, ammo, 0, 0, 0, 0, 0);
+        let seen = self.get(id).filter(|w| w.id == id).map_or(0, |w| w.max_clip);
         self.add(id, registry);
         if let Some(w) = usize::try_from(id).ok().and_then(|i| self.weapons.get_mut(i)) {
             w.set_weapon(id, registry);
+            w.max_clip = seen;
             w.clip = clip;
             w.has_weapon = true;
             w.reserve = ammo;
@@ -231,8 +235,20 @@ mod tests {
         assert_eq!(w.best_weapon_id(Some(500.0), false, false), (1, false));
         // Too close for the Glock's preset (min 64): kung fu at 30 units.
         assert_eq!(w.best_weapon_id(Some(30.0), false, false).0, 38);
-        // An empty Glock has max clip 0 (upstream's reset), so it doesn't "need a reload".
+        // The Glock emptied: its max clip (17) is kept, so it needs a reload (upstream's reset
+        // made it 0, design §5.49) and isn't the best weapon until reloaded, though it is one
+        // to reload when nothing else can fire.
         w.weapon_info(1, 0, 34, &mut reg, &p);
+        let g = w.get(1).unwrap();
+        assert!(g.need_to_reload() && g.clip_is_empty() && g.max_clip == 17);
+        assert_eq!(w.best_weapon_id(Some(500.0), false, false).0, 1);
+        // Out of everything: nothing to reload.
+        w.weapon_info(1, 0, 0, &mut reg, &p);
         assert!(!w.get(1).unwrap().need_to_reload());
+        // A refill shows a full clip again; a weapon seen for the first time starts from its clip.
+        w.weapon_info(1, 17, 17, &mut reg, &p);
+        assert!(!w.get(1).unwrap().need_to_reload());
+        w.weapon_info(7, 0, 30, &mut reg, &p);
+        assert_eq!(w.get(7).unwrap().max_clip, 0);
     }
 }
