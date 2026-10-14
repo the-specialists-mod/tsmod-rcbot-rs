@@ -11,22 +11,30 @@
 //! ([`PlayerState`]), which is also how teams are known (upstream compared model strings, which
 //! TS 3.0's teams don't use; the-specialistsmod-rs#104).
 
+pub mod botcam;
 mod combat;
+pub mod events;
 mod look;
 mod manager;
 mod movement;
 mod navigate;
 mod remember;
+pub(crate) mod special;
+pub mod squad;
 pub mod tasks;
-mod think;
+pub(crate) mod think;
 pub mod weapons;
 
 #[cfg(test)]
 mod tests;
 
+pub use botcam::BotCam;
+pub use events::{BotEvent, NO_CLIENT, SoundKind};
 pub use look::make_vectors;
 pub use manager::{BotManager, BotSlot};
 pub use remember::RememberPositions;
+pub use special::{MasterEntity, OtherBot};
+pub use squad::{SquadId, SquadOrder, Squads};
 pub use tasks::{EntRef, ScheduleDesc, Task, TaskKind, Tasks};
 pub use weapons::{BotWeapon, BotWeapons};
 
@@ -171,6 +179,14 @@ pub struct Entity {
     pub spawnflags: i32,
     /// `target`.
     pub target: String,
+    /// `targetname`.
+    pub targetname: String,
+    /// `movedir`.
+    pub movedir: Vector,
+    /// `avelocity`.
+    pub avelocity: Vector,
+    /// `frame`.
+    pub frame: f32,
     /// `deadflag`.
     pub deadflag: i32,
     /// `takedamage`.
@@ -211,6 +227,11 @@ impl Entity {
         self.absmin + self.size * 0.5
     }
 
+    /// `BotFunc_EntityIsMoving`: any linear or angular velocity.
+    pub fn is_moving(&self) -> bool {
+        self.velocity != Vector::ZERO || self.avelocity != Vector::ZERO
+    }
+
     /// `EntityIsAlive`.
     pub fn is_alive(&self) -> bool {
         self.deadflag == DEAD_NO && self.health > 0.0
@@ -240,6 +261,32 @@ pub trait BotWorld: World {
     fn entities_in_sphere(&self, origin: Vector, radius: f32) -> Vec<u32>;
     /// `gBotGlobals.m_bTeamPlay`.
     fn teamplay(&self) -> bool;
+    /// `UTIL_FindEntityByString(start, key, value)` over the whole entity list, in the engine's
+    /// order (`key` is `classname`, `target` or `targetname`). None by default.
+    fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
+        let _ = (key, value);
+        Vec::new()
+    }
+    /// `pfnTraceHull(start, end, monsters, point_hull, ignore)`; a line by default.
+    fn trace_point_hull(&self, start: Vector, end: Vector, monsters: crate::nav::Monsters, ignore: Option<u32>) -> crate::nav::Trace {
+        self.trace_line(start, end, monsters, crate::nav::Glass::DontIgnore, ignore)
+    }
+    /// `CVAR_GET_FLOAT`; 0 by default.
+    fn cvar_float(&self, name: &str) -> f32 {
+        let _ = name;
+        0.0
+    }
+}
+
+/// The string field [`BotWorld::find_entities`] matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityKey {
+    /// `classname` (`UTIL_FindEntityByClassname`).
+    Classname,
+    /// `target` (`UTIL_FindEntityByTarget`, `FIND_ENTITY_BY_TARGET`).
+    Target,
+    /// `targetname` (`UTIL_FindEntityByTargetname`).
+    Targetname,
 }
 
 /// What the bot does that isn't its usercmd: upstream's `FakeClientCommand`, the TS weapon
@@ -302,6 +349,20 @@ pub struct BotGlobals<'a> {
     pub learned: &'a mut GlobalLearnedData,
     /// `m_iTeamScores`.
     pub team_scores: [i32; 4],
+    /// `m_Masters`: entities with a `master` key value.
+    pub masters: &'a [MasterEntity],
+    /// The other bots, as they are while this one thinks (the manager fills it).
+    pub other_bots: Vec<OtherBot>,
+    /// `m_Squads`.
+    pub squads: &'a mut Squads,
+    /// `m_BotCam`.
+    pub botcam: &'a mut BotCam,
+    /// Each player's `CClient` reputation id by entity index ([`NO_CLIENT`] for none).
+    pub rep_ids: &'a [i32],
+    /// `m_BotChat`.
+    pub chat: &'a crate::chat::bot_chat::BotChatMessages,
+    /// `gpGlobals->mapname`.
+    pub map_name: &'a str,
 }
 
 /// `eBotCondition` bits (`bot_const.h`) the TS bot uses.
@@ -332,6 +393,12 @@ pub mod cond {
     pub const SELECTED_GUN: u32 = 1 << 11;
     /// `BOT_CONDITION_NEED_WEAPONS`.
     pub const NEED_WEAPONS: u32 = 1 << 12;
+    /// `BOT_CONDITION_SEE_SQUAD_LEADER`.
+    pub const SEE_SQUAD_LEADER: u32 = 1 << 13;
+    /// `BOT_CONDITION_SQUAD_LEADER_DEAD`.
+    pub const SQUAD_LEADER_DEAD: u32 = 1 << 14;
+    /// `BOT_CONDITION_WANT_TO_LEAVE_GAME`.
+    pub const WANT_TO_LEAVE_GAME: u32 = 1 << 15;
 }
 
 /// `eBotLookTask`.
@@ -500,6 +567,22 @@ pub struct Bot {
     pub(crate) prev_team_score: i32,
     pub(crate) respawn_time: f32,
     pub(crate) team: i32,
+
+    pub(crate) squad: Option<SquadId>,
+    pub(crate) squad_leader: Option<EntRef>,
+    pub(crate) said_move_out: bool,
+    pub(crate) said_in_position: bool,
+    pub(crate) next_use_say_message: f32,
+    /// `m_iBoredom` (0-255).
+    pub boredom: u8,
+    /// `m_fJoinServerTime`.
+    pub join_server_time: f32,
+    /// `m_fLeaveTime`.
+    pub leave_time: f32,
+    pub(crate) said_greetings_to: u32,
+    pub(crate) chat_string: Vec<u8>,
+    /// `m_Profile.m_HAL`: the MegaHAL brain, once loaded.
+    pub hal: Option<crate::chat::reply::HalBot>,
 }
 
 impl Bot {
@@ -614,6 +697,17 @@ impl Bot {
             prev_team_score: 0,
             respawn_time: 0.0,
             team: -1,
+            squad: None,
+            squad_leader: None,
+            said_move_out: false,
+            said_in_position: false,
+            next_use_say_message: 0.0,
+            boredom: 127,
+            join_server_time: 0.0,
+            leave_time: 0.0,
+            said_greetings_to: 0,
+            chat_string: Vec::new(),
+            hal: None,
         }
     }
 

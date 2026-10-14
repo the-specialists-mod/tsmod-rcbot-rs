@@ -2,8 +2,7 @@
 //! `BotNavigate_FindNextWaypoint`, `BotNavigate_ScanFOV`, `BotCheckWallOnLeft/Right`;
 //! `bot.cpp` `CBot::touchedWpt`, `gotStuck`).
 //!
-//! Not ported yet: lifts (`CheckLift`, `W_FL_WAIT_FOR_LIFT`), pushables, human towers and
-//! grenade-throw waypoints (design §2); their waypoints are walked like plain ones.
+//! Lifts, pushables, human towers and grenade-throw waypoints are in `special.rs`.
 
 use super::look::{fix_float_angle, make_vectors, vec_to_angles};
 use super::{Bot, BotGlobals, BotWorld, Climb, LookTask, Task, TaskKind};
@@ -175,6 +174,8 @@ impl Bot {
                 touched = (wpt_origin - origin).length_2d() <= self.me.size.length_2d() / 2.0
                     && (wpt_origin.z - origin.z).abs() <= self.me.size.z / 2.0;
             }
+        } else if wpt_flags & fl::HUMAN_TOWER != 0 {
+            touched = self.touched_human_tower(w, wpt_origin, distance);
         } else if wpt_flags & (fl::STAY_NEAR | fl::CROUCH) != 0 {
             if distance <= 24.0 {
                 touched = true;
@@ -224,6 +225,7 @@ impl Bot {
                     self.alt_button();
                 }
             }
+            self.touched_pushable_waypoint(w, wpt_origin);
             if self.goal_waypoint == self.current_waypoint {
                 if let Some(t) = self.tasks.current().copied()
                     && t.kind == TaskKind::FindPath
@@ -244,19 +246,26 @@ impl Bot {
             let prev_flags = self.current_waypoint_flags;
             self.prev_waypoint = self.current_waypoint;
             self.current_waypoint = self.find_next_waypoint(g, w, rng);
+            if g.config.is_on(crate::config::flags::BOTS_WAIT_FOR_BOTS)
+                && self.current_waypoint != -1
+                && let Some(other) = g.other_bots.iter().find(|b| b.current_waypoint == self.current_waypoint)
+            {
+                self.add_priority_task(Task::new(
+                    TaskKind::WaitForBotAtWpt,
+                    0,
+                    Some(other.handle),
+                    self.current_waypoint,
+                    0.0,
+                    Vector::ZERO,
+                ));
+            }
             if self.current_waypoint == -1 {
                 self.current_waypoint_flags = 0;
                 return false;
             }
             let wpt = g.waypoints.origin(self.current_waypoint);
             self.current_waypoint_flags = g.waypoints.flags(self.current_waypoint);
-            if self.me.flags & super::entflags::ONGROUND != 0
-                && self.me.waterlevel < 3
-                && ((self.current_waypoint_flags & fl::JUMP != 0 && prev_flags & fl::CROUCH != 0)
-                    || (self.current_waypoint_flags & fl::JUMP != 0 && self.current_waypoint_flags & fl::STAY_NEAR != 0))
-            {
-                self.add_priority_task(Task::new(TaskKind::WaitAndFaceVector, 0, None, 0, 0.75, wpt));
-            }
+            self.next_waypoint_tasks(g, w, prev_flags, rng);
             let on_ladder = self.is_on_ladder();
             let wpt_on_ladder = self.current_waypoint_flags & fl::LADDER != 0;
             if !on_ladder && wpt_on_ladder {
@@ -266,6 +275,8 @@ impl Bot {
             } else if on_ladder && !wpt_on_ladder {
                 self.start_duck_time = now;
                 self.end_duck_time = now + 1.0;
+            } else if self.current_waypoint_flags & fl::HUMAN_TOWER != 0 {
+                self.add_priority_task(Task::new(TaskKind::HumanTower, 0, None, 0, 0.0, wpt));
             }
         } else {
             self.prev_waypoint_dist = distance;

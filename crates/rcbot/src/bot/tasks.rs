@@ -57,6 +57,24 @@ pub enum TaskKind {
     DropWeapon,
     /// `BOT_TASK_CROUCH`: float = how long.
     Crouch,
+    /// `BOT_TASK_PUSH_PUSHABLE`: edict = the pushable, vector = where it must go, int = state.
+    PushPushable,
+    /// `BOT_TASK_WAIT_FOR_LIFT`: vector = where the lift comes, float = until when.
+    WaitForLift,
+    /// `BOT_TASK_WAIT_FOR_ENTITY`: edict = what has to stop moving.
+    WaitForEntity,
+    /// `BOT_TASK_HUMAN_TOWER`: vector = the tower's waypoint, float = until when, int = state.
+    HumanTower,
+    /// `BOT_TASK_THROW_GRENADE`: vector = the target (TS: fails at once).
+    ThrowGrenade,
+    /// `BOT_TASK_WAIT_FOR_BOT_AT_WPT`: edict = the other bot, int = the waypoint.
+    WaitForBotAtWpt,
+    /// `BOT_TASK_FACE_EDICT`: edict = what to face, float = how long.
+    FaceEdict,
+    /// `BOT_TASK_FOLLOW_LEADER`: follow the squad leader in formation.
+    FollowLeader,
+    /// `BOT_TASK_TYPE_MESSAGE`: int = team only, float = when the line is typed.
+    TypeMessage,
 }
 
 impl TaskKind {
@@ -79,6 +97,15 @@ impl TaskKind {
             TaskKind::ChangeWeapon => "BOT_TASK_CHANGE_WEAPON",
             TaskKind::DropWeapon => "BOT_TASK_DROP_WEAPON",
             TaskKind::Crouch => "BOT_TASK_CROUCH",
+            TaskKind::PushPushable => "BOT_TASK_PUSH_PUSHABLE",
+            TaskKind::WaitForLift => "BOT_TASK_WAIT_FOR_LIFT",
+            TaskKind::WaitForEntity => "BOT_TASK_WAIT_FOR_ENTITY",
+            TaskKind::HumanTower => "BOT_TASK_HUMAN_TOWER",
+            TaskKind::ThrowGrenade => "BOT_TASK_THROW_GRENADE",
+            TaskKind::WaitForBotAtWpt => "BOT_TASK_WAIT_FOR_BOT_AT_WPT",
+            TaskKind::FaceEdict => "BOT_TASK_FACE_EDICT",
+            TaskKind::FollowLeader => "BOT_TASK_FOLLOW_LEADER",
+            TaskKind::TypeMessage => "BOT_TASK_TYPE_MESSAGE",
         }
     }
 }
@@ -90,6 +117,8 @@ pub enum ScheduleDesc {
     None,
     /// `BOT_SCHED_RUN_FOR_COVER`.
     RunForCover,
+    /// `BOT_SCHED_USE_LIFT`.
+    UseLift,
 }
 
 /// `CBotTask`.
@@ -161,6 +190,11 @@ impl Tasks {
         self.tasks.iter()
     }
 
+    /// The tasks, for changing them.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Task> {
+        self.tasks.iter_mut()
+    }
+
     /// `CurrentTask`.
     pub fn current(&self) -> Option<&Task> {
         self.tasks.front()
@@ -184,6 +218,16 @@ impl Tasks {
     /// `HasTask(eBotTask)`.
     pub fn has_task(&self, kind: TaskKind) -> bool {
         self.tasks.iter().any(|t| t.kind == kind)
+    }
+
+    /// `HasTask(CBotTask)`: an equal task (`operator==`).
+    pub fn has_same_task(&self, task: &Task) -> bool {
+        self.tasks.iter().any(|t| t.same(task))
+    }
+
+    /// `GetTask(eBotTask, &task)`: the first task of a kind.
+    pub fn get_task(&self, kind: TaskKind) -> Option<Task> {
+        self.tasks.iter().find(|t| t.kind == kind).copied()
     }
 
     /// `HasSchedule`.

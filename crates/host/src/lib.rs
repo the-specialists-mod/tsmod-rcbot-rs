@@ -15,14 +15,17 @@
 #![allow(clippy::missing_safety_doc)] // the exports are called by the server only
 
 mod api;
+mod bots;
 mod commands;
 mod editor;
 mod world;
 
 use api::{Api, Engine};
+use bots::globals;
 use rcbot::Vector;
-use rcbot::bot::{Action, Bot, BotGlobals, BotManager};
-use rcbot::config::{AllowedPlayers, BotProfile, Clients, Config, PlayerId};
+use rcbot::bot::{Action, BotCam, BotManager, MasterEntity, Squads};
+use rcbot::chat::bot_chat::BotChatMessages;
+use rcbot::config::{AllowedPlayers, Clients, Config};
 use rcbot::learn::GlobalLearnedData;
 use rcbot::nav::Waypoints;
 use rcbot::weapons::{WeaponPresets, Weapons};
@@ -48,6 +51,9 @@ enum Event {
     PutInServer(i32, bool),
     Disconnect(i32),
     Damaged(i32, i32),
+    Killed(i32, i32),
+    Sound(i32, String),
+    Say(i32, Vec<String>),
 }
 
 /// What the e2e test and `rcbot` status read about a bot.
@@ -55,6 +61,8 @@ enum Event {
 struct Stats {
     start: Option<Vector>,
     moved: f32,
+    /// The weapon in hand while alive, to log changes.
+    weapon: Option<i32>,
 }
 
 /// RCBot's globals.
@@ -72,6 +80,22 @@ pub struct State {
     pub(crate) active: bool,
     pub(crate) sprite: i32,
     pub(crate) editor: editor::Editor,
+    pub(crate) squads: Squads,
+    pub(crate) botcam: BotCam,
+    pub(crate) chat: BotChatMessages,
+    /// `m_Masters`: the plugin API doesn't report key values, so it stays empty (design §4).
+    pub(crate) masters: Vec<MasterEntity>,
+    /// The profile each bot had, by player index, for the bots the port keeps across a level
+    /// change (upstream's `RESPAWN_NEED_TO_REJOIN` bots rejoin with their profile).
+    previous_profiles: HashMap<u32, i32>,
+    /// `m_fMapInitTime`.
+    map_init_time: f32,
+    /// `m_bBotCanRejoin`, `m_fBotRejoinTime`.
+    can_rejoin: bool,
+    rejoin_time: f32,
+    /// `fpMapConfig` (`map_configs/ts/<map>.cfg`, what is left of it) and `m_fReadConfigTime`.
+    map_config: std::collections::VecDeque<String>,
+    read_config_time: f32,
     stats: HashMap<u32, Stats>,
     next_report: f32,
     checks: Vec<&'static str>,
@@ -84,7 +108,7 @@ pub(crate) fn api() -> Option<Api> {
     (!p.is_null()).then(|| Api::new(unsafe { &*p }, PLUGIN_ID.load(Ordering::Relaxed)))
 }
 
-fn say(level: c_int, msg: &str) {
+pub(crate) fn say(level: c_int, msg: &str) {
     if let Some(a) = api() {
         a.log(level, msg);
     }
@@ -123,9 +147,12 @@ fn drain(s: &mut State, a: Api, e: Engine) {
     let events: Vec<Event> = PENDING.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
     for ev in events {
         match ev {
-            Event::PutInServer(i, is_bot) => put_in_server(s, a, e, i, is_bot),
-            Event::Disconnect(i) => disconnect(s, i),
+            Event::PutInServer(i, is_bot) => bots::put_in_server(s, e, i, is_bot),
+            Event::Disconnect(i) => bots::disconnect(s, a, e, i),
             Event::Damaged(victim, attacker) => damaged(s, e, victim, attacker),
+            Event::Killed(victim, killer) => bots::killed(s, a, e, victim, killer),
+            Event::Sound(entity, sample) => bots::sound(s, a, e, entity, &sample),
+            Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
     }
 }
@@ -174,10 +201,13 @@ const DESCRIPTOR: Plugin = Plugin {
     server_activate: Some(server_activate),
     server_deactivate: Some(server_deactivate),
     start_frame: Some(start_frame),
+    shutdown: Some(shutdown),
     client_put_in_server: Some(client_put_in_server),
     client_disconnect: Some(client_disconnect),
     client_command: Some(commands::client_command),
     player_damaged: Some(player_damaged),
+    player_killed: Some(player_killed),
+    sound: Some(sound),
     ..Plugin::EMPTY
 };
 
@@ -230,11 +260,25 @@ extern "C" fn game_init() {
         active: false,
         sprite: 0,
         editor: editor::Editor::default(),
+        squads: Squads::default(),
+        botcam: BotCam::default(),
+        chat: BotChatMessages::default(),
+        masters: Vec::new(),
+        previous_profiles: HashMap::new(),
+        map_init_time: 0.0,
+        can_rejoin: false,
+        rejoin_time: 5.0,
+        map_config: Default::default(),
+        read_config_time: 0.0,
         stats: HashMap::new(),
         next_report: 0.0,
         checks: Vec::new(),
         added: 0,
     };
+    // `SetupBotChat`.
+    if let Ok(b) = std::fs::read(state.data_dir.join("bot_chat.ini")) {
+        state.chat = BotChatMessages::parse(&b);
+    }
     a.log(log::INFO, &format!("RCBot {} for TS 3.0, data in {}", rcbot::config::BOT_VER, state.data_dir.display()));
     if let Some(e) = a.engine() {
         commands::read_users(&mut state, a, e);
@@ -246,10 +290,11 @@ extern "C" fn game_init() {
     }
 }
 
-/// The map's precache: the beam sprite (`m_iWaypointTexture`).
+/// The map's precache: the beam sprite (`m_iWaypointTexture`) and the bot camera's model.
 extern "C" fn precache() {
     let Some(e) = api().and_then(|a| a.engine()) else { return };
     let sprite = e.precache_model(c"sprites/lgtning.spr");
+    e.precache_model(c"models/mechgibs.mdl");
     with_state(None, |s, _, _| s.sprite = sprite);
 }
 
@@ -262,36 +307,132 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
         s.weapons.clear();
         s.bots.clear();
         s.stats.clear();
+        s.squads.clear();
+        s.botcam.clear();
         commands::load_waypoints(s, a, e);
+        // `CBotGlobals::MapInit`.
+        s.map_init_time = e.time();
+        s.rejoin_time = e.time();
+        s.can_rejoin = false;
+        let cfg = s.data_dir.join("map_configs").join(&s.config.mod_folder).join(format!("{}.cfg", s.map));
+        s.map_config = match std::fs::read(&cfg) {
+            Ok(b) => {
+                a.log(log::INFO, "map specific config file found...");
+                let text = String::from_utf8_lossy(&b).replace("\r\n", "\n");
+                text.split_inclusive('\n').map(str::to_owned).collect()
+            }
+            Err(_) => {
+                a.log(log::INFO, &format!("No map specific config file found ({})", cfg.display()));
+                Default::default()
+            }
+        };
     });
 }
 
+/// `ReadMapConfig`, a line a frame once the map has run 10 s: `rcbot addbot` holds the next
+/// line (and new bots) back 5 s. Each line is a server command (`SERVER_COMMAND`).
+fn map_config_frame(s: &mut State, e: Engine) {
+    let now = e.time();
+    if s.map_config.is_empty() || s.map_init_time + 10.0 >= now || s.read_config_time >= now {
+        return;
+    }
+    let Some(mut line) = s.map_config.pop_front() else { return };
+    if line.starts_with('#') {
+        return;
+    }
+    if !line.ends_with('\n') {
+        line.push('\n');
+    }
+    if line.starts_with("rcbot addbot") {
+        s.rejoin_time = now + 5.0;
+        s.read_config_time = now + 5.0;
+    }
+    e.server_command(&line);
+}
+
+/// `StartFrame`'s rejoin part: with `max_bots` set, RCBot adds bots while there are fewer
+/// clients; with `min_bots`, while it has fewer bots; with neither, under
+/// `bots_leave_and_join`, at random while the server is less than about an eighth full. One
+/// bot per 5 s, from 10 s into the map. (Bots of the last map come back through the port,
+/// `adopt_bot`.)
+fn rejoin_frame(s: &mut State, a: Api, e: Engine) {
+    let now = e.time();
+    if !s.can_rejoin && s.map_init_time + 10.0 < now && s.rejoin_time < now {
+        s.can_rejoin = true;
+    }
+    let max_clients = e.max_clients().max(1);
+    let num_clients = (1..=max_clients)
+        .filter(|&i| e.edict(i).is_some_and(|ed| e.vars(ed, |v, _| v.flags & goldsrc_sys::FL_CLIENT as i32 != 0 && v.netname != 0)))
+        .count() as i32;
+    let mut rng = EngineRandom(e);
+    let bot_join = s.config.is_on(rcbot::config::flags::BOTS_LEAVE_AND_JOIN)
+        && num_clients as f32 / max_clients as f32 * rcbot::Random::random_float(&mut rng, 4.9, 6.3) < 0.75;
+    if num_clients >= max_clients || !s.can_rejoin {
+        return;
+    }
+    let num_bots = s.bots.len() as i32;
+    let (min, max) = (i32::from(s.config.min_bots), i32::from(s.config.max_bots));
+    let mut add = false;
+    if max == -1 && min == -1 {
+        add = bot_join;
+    }
+    if max != -1 && num_clients < max {
+        add = true;
+    }
+    if min != -1 && num_bots < min {
+        add = true;
+    }
+    if add {
+        commands::add_bot_now(s, a, e);
+        s.can_rejoin = false;
+        s.rejoin_time = now + 5.0;
+    }
+}
+
+/// Saves the bots (brains, learned data) and remembers their profiles for when the port hands
+/// them back (`adopt_bot`); then the teams' and loadout GAs.
+fn save_all(s: &mut State) {
+    for b in s.bots.drain() {
+        bots::save_bot(s, &b);
+        s.previous_profiles.insert(b.index, b.profile.profile_id);
+    }
+    bots::save_globals(s);
+}
+
+/// `ServerDeactivate`: `CBotGlobals::saveLearnedData`, the bots saved for the next map,
+/// `FreeLocalMemory` (squads, the camera).
 extern "C" fn server_deactivate() {
     with_state(None, |s, _, _| {
-        s.bots.clear();
+        save_all(s);
+        s.squads.clear();
+        s.botcam.clear();
         s.editor = editor::Editor::default();
     });
+}
+
+/// `GameShutdown`: saves as at a map's end (upstream relies on `ServerDeactivate` coming first).
+extern "C" fn shutdown() {
+    with_state(None, |s, _, _| save_all(s));
 }
 
 /// `StartFrame`: each bot thinks and moves; the waypoint editor draws.
 extern "C" fn start_frame() {
     with_state(None, |s, a, e| {
         editor::frame(s, a, e);
+        map_config_frame(s, e);
         if !s.active {
             return;
         }
+        rejoin_frame(s, a, e);
         let gs = a.game_state();
         let w = HostWorld { api: a, eng: e, teamplay: gs.teamplay != 0 };
         let mut rng = EngineRandom(e);
-        let mut g = BotGlobals {
-            config: &s.config,
-            waypoints: &mut s.waypoints,
-            weapons: &mut s.weapons,
-            presets: &s.presets,
-            learned: &mut s.learned,
-            team_scores: [0; 4],
-        };
+        bots::touches(s, a, e);
+        let reps = s.rep_ids();
+        let mut g = globals!(s, &reps);
         let frames = s.bots.frame(&mut g, &w, &mut rng);
+        bots::flush_squad_messages(s, e);
+        bots::botcam_frame(s, a, e);
         for (idx, f) in frames {
             let i = idx as i32;
             for act in f.actions {
@@ -300,7 +441,11 @@ extern "C" fn start_frame() {
                         a.bot_command(i, &line);
                     }
                     Action::SelectWeapon(id) => {
-                        a.select_weapon(i, id);
+                        let rc = a.select_weapon(i, id);
+                        if rc == OK || rc == ts_plugin_api::DEFERRED {
+                            a.log(log::INFO, &format!("weapon \"{}\" switched to {id}", s.bots.get(idx).map_or("", |b| b.name.as_str())));
+                            s.check("weapon_switch");
+                        }
                     }
                     Action::Loadout(ids) => {
                         a.clear_loadout(i);
@@ -341,13 +486,24 @@ fn report(s: &mut State, a: Api, e: Engine) {
     let mut moved = false;
     let mut used_waypoints = false;
     let mut attacked = false;
+    let mut switched = false;
     for b in s.bots.iter() {
         let Some(origin) = e.edict(b.index as i32).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin))) else { continue };
         let alive = b.is_alive();
         let st = s.stats.entry(b.index).or_default();
         if !alive {
             st.start = None;
+            st.weapon = None;
             continue;
+        }
+        // A weapon change while alive: RCBot's `select_weapon`, or TS switching after a pickup
+        // or a drop (RCBot itself never switches in TS, design §5).
+        if let Some(cur) = b.current_weapon() {
+            if st.weapon.is_some_and(|w| w != cur) {
+                a.log(log::INFO, &format!("weapon \"{}\" changed {} -> {cur}", b.name, st.weapon.unwrap_or(0)));
+                switched = true;
+            }
+            st.weapon = Some(cur);
         }
         let start = *st.start.get_or_insert(origin);
         st.moved = st.moved.max((origin - start).length_2d());
@@ -363,6 +519,9 @@ fn report(s: &mut State, a: Api, e: Engine) {
     }
     if attacked {
         s.check("enemy");
+    }
+    if switched {
+        s.check("weapon_switch");
     }
     if now < s.next_report {
         return;
@@ -389,33 +548,31 @@ fn report(s: &mut State, a: Api, e: Engine) {
     }
 }
 
-/// `ClientPutInServer`: a human gets a `CClient`; a bot made elsewhere is ignored.
-fn put_in_server(s: &mut State, a: Api, e: Engine, i: i32, is_bot: bool) {
-    if is_bot {
-        return;
-    }
-    let name = e.edict(i).map(|ed| e.vars(ed, |v, _| v.netname)).map(|n| e.string(n)).unwrap_or_default();
-    let dedicated = e.is_dedicated();
-    if let Some((_, Some(msg))) = s.clients.connect(PlayerId(i as u32), &name, "", -1, &s.users, dedicated) {
-        e.client_print(i, &format!("{}{msg}\n", rcbot::config::BOT_DBG_MSG_TAG));
-    }
-    let _ = a;
-}
-
 extern "C" fn client_put_in_server(player: c_int, is_bot: c_int) {
-    with_state(Some(Event::PutInServer(player, is_bot != 0)), |s, a, e| put_in_server(s, a, e, player, is_bot != 0));
-}
-
-fn disconnect(s: &mut State, i: i32) {
-    s.bots.remove(i as u32);
-    s.stats.remove(&(i as u32));
-    if let Some(ci) = s.clients.index_of(PlayerId(i as u32)) {
-        s.clients.disconnect(ci);
-    }
+    with_state(Some(Event::PutInServer(player, is_bot != 0)), |s, _, e| bots::put_in_server(s, e, player, is_bot != 0));
 }
 
 extern "C" fn client_disconnect(player: c_int, _is_bot: c_int) {
-    with_state(Some(Event::Disconnect(player)), |s, _, _| disconnect(s, player));
+    with_state(Some(Event::Disconnect(player)), |s, a, e| bots::disconnect(s, a, e, player));
+}
+
+extern "C" fn player_killed(victim: c_int, attacker: c_int, _inflictor: c_int) {
+    with_state(Some(Event::Killed(victim, attacker)), |s, a, e| bots::killed(s, a, e, victim, attacker));
+}
+
+/// `pfnEmitSound` for the bots' hearing.
+unsafe extern "C" fn sound(entity: c_int, _origin: *const f32, sample: *const c_char, _volume: f32, _attenuation: f32) {
+    if sample.is_null() {
+        return;
+    }
+    // SAFETY: the server's string for the call.
+    let sample = unsafe { CStr::from_ptr(sample) }.to_string_lossy().into_owned();
+    with_state(Some(Event::Sound(entity, sample.clone())), |s, a, e| bots::sound(s, a, e, entity, &sample));
+}
+
+/// `ClientCommand`'s `say`/`say_team` (bots' own, from inside `bot_command`, are queued).
+pub(crate) fn player_say(player: i32, args: Vec<String>) {
+    with_state(Some(Event::Say(player, args.clone())), |s, a, e| bots::say_command(s, a, e, player, &args));
 }
 
 /// `BotEvent(BOT_EVENT_HURT)`: the bot looks toward who hurt it.
@@ -435,11 +592,11 @@ extern "C" fn player_damaged(victim: c_int, attacker: c_int, _inflictor: c_int, 
 
 // ---- the bot backend -------------------------------------------------------------------------------
 
-/// The rest of `BotFunc_AddBot` once the port asks for a bot: a profile (RCBot's defaults; the
-/// `bot_profiles.ini` choice comes with step 7), the fake client, the `CBot`.
+/// The rest of `BotFunc_AddBot` once the port asks for a bot: a profile from
+/// `bot_profiles.ini`, the fake client, the `CBot` with its brain, learned data and
+/// reputations, the greeting.
 pub(crate) fn create(s: &mut State, a: Api, e: Engine, name: &str, model: *const c_char, skill: f32) -> c_int {
-    let mut rng = EngineRandom(e);
-    let mut profile = BotProfile::init(&s.config, &mut rng);
+    let mut profile = bots::profile_for(s, e, None);
     if skill > 0.0 {
         profile.skill = if skill <= 1.0 { (skill * 100.0) as i32 } else { skill as i32 };
     }
@@ -454,10 +611,12 @@ pub(crate) fn create(s: &mut State, a: Api, e: Engine, name: &str, model: *const
         a.log(log::WARNING, &format!("create_bot \"{name}\": {idx}"));
         return idx;
     }
-    let bot = Bot::new(idx as u32, name.clone(), profile, &s.config, &mut rng);
+    let profile_id = profile.profile_id;
+    let bot = bots::new_bot(s, e, idx as u32, name.clone(), profile);
     s.bots.add(bot);
-    a.log(log::INFO, &format!("added \"{name}\" (#{idx})"));
+    a.log(log::INFO, &format!("added \"{name}\" (#{idx}, profile {profile_id})"));
     s.check("create_bot");
+    bots::greet(s, a, e, idx as u32);
     idx
 }
 
@@ -479,19 +638,22 @@ extern "C" fn activate() {
 extern "C" fn deactivate() {
     with_state(None, |s, a, _| {
         s.active = false;
-        s.bots.clear();
+        save_all(s);
+        s.previous_profiles.clear();
         a.log(log::INFO, "bot backend inactive");
     });
 }
 
-/// A quota bot the engine kept across the level change: a new `CBot` for it.
+/// A quota bot the engine kept across the level change: a new `CBot` for it, with the profile
+/// it had.
 extern "C" fn adopt_bot(idx: c_int) {
-    with_state(None, |s, _, e| {
+    with_state(None, |s, a, e| {
         let name = e.edict(idx).map(|ed| e.vars(ed, |v, _| v.netname)).map(|n| e.string(n)).unwrap_or_default();
-        let mut rng = EngineRandom(e);
-        let profile = BotProfile::init(&s.config, &mut rng);
-        let bot = Bot::new(idx as u32, name, profile, &s.config, &mut rng);
+        let again = s.previous_profiles.remove(&(idx as u32));
+        let profile = bots::profile_for(s, e, again);
+        let bot = bots::new_bot(s, e, idx as u32, name.clone(), profile);
         s.bots.add(bot);
+        a.log(log::INFO, &format!("adopted \"{name}\" (#{idx})"));
     });
 }
 

@@ -3,7 +3,7 @@
 //! sequence, as upstream's `RANDOM_LONG` does).
 
 use crate::api::{Api, Engine};
-use rcbot::bot::{BotWorld, Entity, PlayerState};
+use rcbot::bot::{BotWorld, Entity, EntityKey, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
 
@@ -61,6 +61,10 @@ impl BotWorld for HostWorld {
             max_health: v.max_health,
             spawnflags: v.spawnflags,
             target: String::new(),
+            targetname: String::new(),
+            movedir: v.movedir.into(),
+            avelocity: v.avelocity.into(),
+            frame: v.frame,
             deadflag: v.deadflag,
             takedamage: v.takedamage,
             effects: v.effects,
@@ -74,11 +78,12 @@ impl BotWorld for HostWorld {
             groundentity: None,
             player: None,
         });
-        let (classname, netname, target, ground, owner) =
-            self.eng.vars(e, |v, _| (v.classname, v.netname, v.target, v.groundentity, v.owner));
+        let (classname, netname, target, targetname, ground, owner) =
+            self.eng.vars(e, |v, _| (v.classname, v.netname, v.target, v.targetname, v.groundentity, v.owner));
         ent.classname = self.eng.string(classname);
         ent.netname = self.eng.string(netname);
         ent.target = self.eng.string(target);
+        ent.targetname = self.eng.string(targetname);
         ent.groundentity = (!ground.is_null()).then(|| self.eng.index_of(ground)).and_then(|i| u32::try_from(i).ok());
         ent.owner = (!owner.is_null()).then(|| self.eng.index_of(owner)).and_then(|i| u32::try_from(i).ok());
         if index >= 1 && index <= self.max_clients() {
@@ -106,6 +111,26 @@ impl BotWorld for HostWorld {
 
     fn teamplay(&self) -> bool {
         self.teamplay
+    }
+
+    fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
+        let field = match key {
+            EntityKey::Classname => "classname",
+            EntityKey::Target => "target",
+            EntityKey::Targetname => "targetname",
+        };
+        self.eng.find_entities(field, value).into_iter().filter_map(|i| u32::try_from(i).ok()).collect()
+    }
+
+    fn trace_point_hull(&self, start: Vector, end: Vector, monsters: Monsters, ignore: Option<u32>) -> Trace {
+        // `point_hull` is hull 0.
+        let (fraction, end_pos, hit) = self.eng.trace_hull(start, end, monsters == Monsters::Ignore, 0, ignore.map(|i| i as i32));
+        let hit = (!hit.is_null()).then(|| self.eng.index_of(hit)).and_then(|i| u32::try_from(i).ok());
+        Trace { fraction, end_pos, hit }
+    }
+
+    fn cvar_float(&self, name: &str) -> f32 {
+        self.eng.cvar_float(name)
     }
 }
 

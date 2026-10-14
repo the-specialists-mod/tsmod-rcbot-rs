@@ -15,12 +15,15 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | `bot_weapons.ini` (TS section) and the TS weapon table | done |
 | Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Chat: MegaHAL (byte-compatible brains), `bot_chat.ini`, replies | done; checked against RCBot's own code |
-| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set (side effects through a host trait) | done; the host runs the commands (squads, botcam, the menus' HUD and the `util` toys say they aren't available yet) |
-| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`) | done, on the port's plugin API v3; `cargo xtask e2e` passes on all seven engine roots |
+| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set (side effects through a host trait) | done; the host runs the commands (only `util`'s toys say they aren't available) |
+| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v3 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
-| Combat basics: what the bot sees, enemy choice, aim and skill, best weapon, switching, cover | done (reputation not yet used) |
-| Waypoint editing, display (beams) and autowaypointing | done (the waypoint menu's HUD not yet) |
-| TS behaviour (kung fu, power-ups, objectives, CTB), squads, botcam, chat timing, profiles, saving learned data | to do |
+| Combat: what the bot sees, enemy choice and aim by reputation, best weapon, switching, cover, hearing (the port's `sound` callback) | done |
+| Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
+| Special waypoints: lifts and their buttons, pushables, human towers, grenade-throw waypoints | done |
+| TS: loadouts by GA, kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
+| Bot events and reputation (kills, deaths, what bots see), squads, botcam, chat (idle, events, greetings, MegaHAL replies, typing), profiles from `bot_profiles.ini`, learned data, brains and reputations saved and loaded | done |
+| End-to-end: `cargo xtask e2e` on all seven engine roots | bots join, move, use waypoints, kill, change weapons; back to `native` at the next map |
 
 Only The Specialists 3.0 is supported. Code for RCBot's other mods, its copies of metamod, its
 engine hooks and its user-message parsing are not ported (the port supplies structured state
@@ -35,7 +38,8 @@ crates/rcbot     the bot (no unsafe, no FFI)
   src/learn/     GA, perceptrons, NN, SOM, .rld learned-data files
   src/chat/      MegaHAL and its brain files, bot_chat.ini, replies
   src/config/    bot_config.ini, users, profiles, reputation, menus, rcbot commands
-  src/bot/       the bot: think, tasks, navigation, movement, aim, combat, its weapons
+  src/bot/       the bot: think, tasks, navigation, special waypoints, movement, aim, combat,
+                 its weapons, events and hearing, squads, the bot camera
 crates/host      the tsmod_rcbot library: the plugin API v3 and the engine (the only crate allowed unsafe)
 data/rcbot       bot_weapons.ini (TS), waypoints/ts/ (44 maps)
 tools/reference  C++ harnesses that record RCBot's own results for the tests
@@ -52,7 +56,8 @@ cargo xtask test     # unit and fixture tests, x86_64 and i686
 cargo xtask lint     # fmt, clippy -D warnings on all four targets, the unsafe rule
 cargo xtask build    # the library for all four targets
 cargo xtask dist     # dist/<platform>/dlls/tsmod_rcbot{.dll,_amd64.dll,_i386.so,_amd64.so} + tsmod/rcbot/ data
-cargo xtask e2e      # on the port's engine roots (~/games): rcbot bots join, move, use waypoints
+cargo xtask e2e      # on the port's engine roots (~/games): rcbot bots join, move, use waypoints,
+                     # kill and change weapons, then the native bots take over at the next map
 ```
 
 ## Credits

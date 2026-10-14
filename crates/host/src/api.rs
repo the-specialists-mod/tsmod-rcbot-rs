@@ -242,6 +242,164 @@ impl Engine {
         (tr.flFraction, Vector::from(tr.vecEndPos), tr.pHit)
     }
 
+    /// `pfnTraceHull(start, end, no_monsters, hull, ignore)`.
+    pub fn trace_hull(&self, start: Vector, end: Vector, no_monsters: bool, hull: i32, ignore: Option<i32>) -> (f32, Vector, *mut edict_t) {
+        let Some(f) = self.f.pfnTraceHull else { return (1.0, end, std::ptr::null_mut()) };
+        let skip = ignore.and_then(|i| self.edict(i)).map_or(std::ptr::null_mut(), |e| e.0);
+        let mut tr = TraceResult::default();
+        let (s, e) = (start.to_array(), end.to_array());
+        // SAFETY: the vectors and the result are valid for the call; `skip` is NULL or an edict.
+        unsafe { f(s.as_ptr(), e.as_ptr(), c_int::from(no_monsters), hull, skip, &mut tr) };
+        (tr.flFraction, Vector::from(tr.vecEndPos), tr.pHit)
+    }
+
+    /// `UTIL_FindEntityByString` from the start of the list to the end: every match.
+    pub fn find_entities(&self, field: &str, value: &str) -> Vec<i32> {
+        let Some(f) = self.f.pfnFindEntityByString else { return Vec::new() };
+        let (k, v) = (cstring(field), cstring(value));
+        let mut out = Vec::new();
+        let mut e: *mut edict_t = std::ptr::null_mut();
+        loop {
+            // SAFETY: `e` is NULL or the engine's last result; both strings live for the call.
+            e = unsafe { f(e, k.as_ptr(), v.as_ptr()) };
+            // SAFETY: a non-NULL result is one of the engine's edicts.
+            if e.is_null() || unsafe { (*e).free } != 0 {
+                break;
+            }
+            out.push(self.index_of(e));
+            if out.len() > 4096 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// `CVAR_GET_FLOAT`.
+    pub fn cvar_float(&self, name: &str) -> f32 {
+        let Some(f) = self.f.pfnCVarGetFloat else { return 0.0 };
+        let n = cstring(name);
+        // SAFETY: the name is read during the call.
+        unsafe { f(n.as_ptr()) }
+    }
+
+    /// `CREATE_NAMED_ENTITY(MAKE_STRING(classname))`: the new entity's index.
+    pub fn create_named_entity(&self, classname: &'static CStr) -> Option<i32> {
+        let (Some(alloc), Some(create)) = (self.f.pfnAllocString, self.f.pfnCreateNamedEntity) else { return None };
+        // SAFETY: a static string the engine copies into its pool.
+        let s = unsafe { alloc(classname.as_ptr()) };
+        // SAFETY: a string_t the engine just made.
+        let e = unsafe { create(s) };
+        (!e.is_null()).then(|| self.index_of(e))
+    }
+
+    /// `MAKE_STRING`.
+    pub fn alloc_string(&self, s: &'static CStr) -> c_int {
+        // SAFETY: a static string the engine copies into its pool.
+        self.f.pfnAllocString.map_or(0, |f| unsafe { f(s.as_ptr()) })
+    }
+
+    /// `SET_MODEL`.
+    pub fn set_model(&self, entity: i32, model: &'static CStr) {
+        let (Some(f), Some(e)) = (self.f.pfnSetModel, self.edict(entity)) else { return };
+        // SAFETY: a live edict and a precached model's static name.
+        unsafe { f(e.0, model.as_ptr()) };
+    }
+
+    /// `SET_VIEW(player, view)`.
+    pub fn set_view(&self, player: i32, view: i32) {
+        let (Some(f), Some(p), Some(v)) = (self.f.pfnSetView, self.edict(player), self.edict(view)) else { return };
+        // SAFETY: two live edicts.
+        unsafe { f(p.0, v.0) };
+    }
+
+    /// `UTIL_ShowMenu(player, slots, displaytime, needmore, text)`: the game's `ShowMenu`
+    /// message (`pfnRegUserMsg` gives the id the game registered).
+    pub fn show_menu(&self, player: i32, slots: i32, display_time: i32, need_more: bool, text: &str) {
+        let f = self.f;
+        let (Some(reg), Some(begin), Some(short), Some(chr), Some(byte), Some(string), Some(endm), Some(e)) = (
+            f.pfnRegUserMsg,
+            f.pfnMessageBegin,
+            f.pfnWriteShort,
+            f.pfnWriteChar,
+            f.pfnWriteByte,
+            f.pfnWriteString,
+            f.pfnMessageEnd,
+            self.edict(player),
+        ) else {
+            return;
+        };
+        // SAFETY: a static name; an existing message's id comes back.
+        let id = unsafe { reg(c"ShowMenu".as_ptr(), -1) };
+        if id <= 0 {
+            return;
+        }
+        let t = cstring(text);
+        const MSG_ONE: c_int = 1;
+        // SAFETY: a well-formed user message to a live client, on the engine's thread.
+        unsafe {
+            begin(MSG_ONE, id, std::ptr::null(), e.0);
+            short(slots);
+            chr(display_time);
+            byte(c_int::from(need_more));
+            string(t.as_ptr());
+            endm();
+        }
+    }
+
+    /// `UTIL_BotHudMessage` (the SDK's `UTIL_HudMessage`): a `TE_TEXTMESSAGE` to one client, not
+    /// to bots. `fade`, `hold` and `fx` are in seconds; `effect` 0 fades in and out.
+    #[allow(clippy::too_many_arguments)] // hudtextparms_t's fields
+    pub fn hud_message(
+        &self,
+        to: i32,
+        channel: i32,
+        pos: (f32, f32),
+        effect: i32,
+        rgba1: [u8; 4],
+        rgba2: [u8; 4],
+        fade: (f32, f32, f32, f32),
+        text: &str,
+    ) {
+        let f = self.f;
+        let (Some(begin), Some(byte), Some(short), Some(string), Some(endm), Some(e)) =
+            (f.pfnMessageBegin, f.pfnWriteByte, f.pfnWriteShort, f.pfnWriteString, f.pfnMessageEnd, self.edict(to))
+        else {
+            return;
+        };
+        if self.vars(e, |v, _| v.flags & goldsrc_sys::FL_CLIENT as i32 == 0 || v.flags & goldsrc_sys::FL_FAKECLIENT as i32 != 0) {
+            return;
+        }
+        let signed = |v: f32, scale: f32| ((v * scale) as i32).clamp(-32768, 32767);
+        let unsigned = |v: f32, scale: f32| ((v * scale) as i32).clamp(0, 65535);
+        let mut t = text.to_owned();
+        t.truncate(511);
+        let t = cstring(&t);
+        const MSG_ONE_UNRELIABLE: c_int = 8;
+        const SVC_TEMPENTITY: c_int = 23;
+        const TE_TEXTMESSAGE: c_int = 29;
+        let (fade_in, fade_out, hold, fx) = fade;
+        // SAFETY: a well-formed temp-entity message to a live client, on the engine's thread.
+        unsafe {
+            begin(MSG_ONE_UNRELIABLE, SVC_TEMPENTITY, std::ptr::null(), e.0);
+            byte(TE_TEXTMESSAGE);
+            byte(channel & 0xFF);
+            short(signed(pos.0, 8192.0));
+            short(signed(pos.1, 8192.0));
+            byte(effect);
+            for c in rgba1.into_iter().chain(rgba2) {
+                byte(c_int::from(c));
+            }
+            short(unsigned(fade_in, 256.0));
+            short(unsigned(fade_out, 256.0));
+            short(unsigned(hold, 256.0));
+            if effect == 2 {
+                short(unsigned(fx, 256.0));
+            }
+            string(t.as_ptr());
+            endm();
+        }
+    }
+
     /// `POINT_CONTENTS`.
     pub fn point_contents(&self, at: Vector) -> i32 {
         let Some(f) = self.f.pfnPointContents else { return -1 };
@@ -331,6 +489,14 @@ impl Engine {
         let o = to.to_array();
         // SAFETY: as above.
         unsafe { f(e.0, o.as_ptr()) };
+    }
+
+    /// `SERVER_COMMAND`.
+    pub fn server_command(&self, line: &str) {
+        let Some(f) = self.f.pfnServerCommand else { return };
+        let l = cstring(line);
+        // SAFETY: the engine copies the line into its command buffer.
+        unsafe { f(l.as_ptr()) };
     }
 
     /// `CVAR_GET_STRING`.

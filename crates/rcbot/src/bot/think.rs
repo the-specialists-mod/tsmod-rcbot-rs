@@ -13,6 +13,25 @@ use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl}
 use crate::weapons::TsWeapon;
 use crate::{Random, Vector};
 
+/// `UTIL_IsGrenadeRocket`.
+pub(crate) fn is_grenade_rocket(e: &Entity) -> bool {
+    e.classname.contains("grenade") || e.classname.contains("rpg_rocket")
+}
+
+/// `BotFunc_TraceToss`: where a thrown entity lands, four half-second steps with upstream's
+/// gravity term, then a long trace along the last velocity.
+pub(crate) fn trace_toss(w: &dyn BotWorld, e: &Entity) -> Vector {
+    let gravity = Vector::new(0.0, 0.0, w.cvar_float("sv_gravity"));
+    let (mut origin, mut velocity) = (e.origin, e.velocity);
+    for _ in 0..4 {
+        let next_vel = velocity + (velocity - gravity) * 0.5;
+        let tr = w.trace_line(origin, origin + next_vel, Monsters::DontIgnore, Glass::DontIgnore, None);
+        origin = tr.end_pos;
+        velocity = next_vel;
+    }
+    w.trace_line(origin, origin + velocity * 256.0, Monsters::DontIgnore, Glass::DontIgnore, None).end_pos
+}
+
 impl Bot {
     /// One server frame for this bot: the `StartFrame` loop's kick / kill / think, then
     /// `RunPlayerMove`. `world` must report the bot's own entity, else nothing happens.
@@ -142,6 +161,10 @@ impl Bot {
         if !self.paths.failed_goals.is_empty() && self.paths.next_clear_failed_goals < now {
             self.paths.failed_goals.clear();
         }
+        self.squad_think(g, w);
+        if !self.has(cond::WANT_TO_LEAVE_GAME) && g.config.is_on(cfg::BOTS_LEAVE_AND_JOIN) && self.want_to_leave_game(w, rng) {
+            self.set(cond::WANT_TO_LEAVE_GAME);
+        }
 
         if !self.is_alive() {
             if self.need_to_init {
@@ -172,6 +195,11 @@ impl Bot {
             self.spawn_position = self.me.origin;
         }
         self.need_to_init = true;
+        // A stealthy squad walks at half speed; `Think` resets the speed before anything reads
+        // it, so this never shows (design §5). Kept.
+        if self.squad.and_then(|id| g.squads.get(id)).is_some_and(|s| s.is_stealth()) {
+            self.ideal_move_speed = self.max_speed / 2.0;
+        }
 
         self.work_view_angles(w, rng);
         self.work_move_direction(w, g);
@@ -203,6 +231,15 @@ impl Bot {
 
         if last_buttons == self.button {
             self.button = 0;
+        }
+
+        // TS: run from a grenade that is coming (`m_fNextCheckCover` is never set in TS, so
+        // this runs every think while the grenade is the entity to avoid).
+        if let Some(g_ent) = self.resolve(w, self.avoid_entity)
+            && is_grenade_rocket(&g_ent)
+        {
+            let end = trace_toss(w, &g_ent);
+            self.run_for_cover(g, w, end, true, rng);
         }
 
         // TS: reload or switch an empty gun.
@@ -259,12 +296,16 @@ impl Bot {
             }
         }
 
-        if self.update_waypoint_time < now && !self.update_waypoint(g, w, rng) {
+        if !self.follow_formation(g, w) && self.update_waypoint_time < now && !self.update_waypoint(g, w, rng) {
             self.update_waypoint_time = now + 0.5;
         }
 
         if self.enemy.is_none() {
-            if self.climb_type() == super::Climb::None && self.listen_to_sound_time < now {
+            if self.climb_type() == super::Climb::None
+                && self.player_standing_on_me(w).is_none()
+                && self.standing_on_player(w).is_none()
+                && self.listen_to_sound_time < now
+            {
                 self.listen_to_sound_time = now + self.reaction_time + rng.random_float(0.3, 0.75);
                 if let Some(p) = self.update_sounds(w)
                     && !self.tasks.has_task(TaskKind::ListenToSound)
@@ -273,8 +314,13 @@ impl Bot {
                     self.add_priority_task(Task::new(TaskKind::ListenToSound, 0, Some(p.handle()), 0, f, Vector::ZERO));
                 }
             } else if self.chat_message_time < now {
-                // Idle chat comes with step 7 (`BotChat(BOT_CHAT_IDLE)`).
-                self.chat_message_time = now + rng.random_float(10.0, 20.0);
+                if !self.tasks.has_task(TaskKind::TypeMessage) {
+                    self.chat_message_time = now + rng.random_float(10.0, 20.0);
+                    if rng.random_long(0, 100) < i32::from(g.config.bot_chat_percent) {
+                        self.bot_chat(g, w, crate::chat::bot_chat::ChatKind::Idle, None, false, rng);
+                        self.getting_bored();
+                    }
+                }
             } else if self.last_see_enemy_time > 0.0 && self.last_see_enemy_time + 5.0 < now {
                 if self.current_weapon.and_then(|id| self.weapons.get(id)).is_some_and(|w| w.can_reload() && w.out_of_ammo()) {
                     self.add_priority_task(Task::simple(TaskKind::Reload));
@@ -286,6 +332,7 @@ impl Bot {
             self.last_see_enemy_time = now;
         }
 
+        self.squad_modes(g);
         self.clear(cond::CANT_SHOOT);
         self.enemy = None;
         self.do_tasks(g, w, rng);
@@ -294,7 +341,7 @@ impl Bot {
             self.look_for_new_tasks(g, w, rng);
         }
         // `WantToFindEnemy`, TS: unless `dont_shoot` is on.
-        self.enemy = if self.want_to_find_enemy { self.find_enemy(w, rng) } else { None };
+        self.enemy = if self.want_to_find_enemy { self.find_enemy(g, w, rng) } else { None };
     }
 
     /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0).
@@ -341,7 +388,7 @@ impl Bot {
     }
 
     /// `UTIL_IsFacingEntity`: the view line at the entity's distance ends inside its box.
-    fn facing(&self, e: &Entity) -> bool {
+    pub(crate) fn facing(&self, e: &Entity) -> bool {
         let (forward, _) = make_vectors(self.v_angle);
         let src = self.gun_position();
         let dst = src + forward * (e.entity_origin() - src).length();
@@ -386,7 +433,13 @@ impl Bot {
             self.add_task(Task::new(TaskKind::Use, id, h, 0, 0.0, Vector::ZERO));
             roam = false;
         } else if w.teamplay() {
-            // The TS objectives (`TSObjective` messages) aren't reported by the port yet.
+            // TODO(the-specialistsmod-rs#117): upstream first goes for a random one of the TS
+            // objectives the `TSObjective` messages listed (`m_TSObjectives`: id, origin, name):
+            // the nearest waypoint to it, roaming instead with 1/3 chance on team 1 and 1/11 on
+            // team 2; team 1 then `DEFEND`s it, team 2 `USE`s a `ts_hack`/`ts_bomb` within 100
+            // units for 9 s. Plugin API v3 doesn't report the objectives (`entity_info`'s
+            // OBJECTIVE kind has neither id nor name), so bots only take the end-level waypoints
+            // below until #117 adds them.
             let wpt = g
                 .waypoints
                 .find_random_goal_near(self.me.origin, 4096.0, -1, fl::ENDLEVEL, &self.paths.failed_goals, rng)
@@ -603,6 +656,15 @@ impl Bot {
                 self.actions.push(Action::Command("drop".into()));
                 done = true;
             }
+            TaskKind::PushPushable => self.task_push_pushable(w, rng, task, &mut done, &mut failed),
+            TaskKind::WaitForLift => self.task_wait_for_lift(w, task, &mut done),
+            TaskKind::WaitForEntity => self.task_wait_for_entity(w, task, &mut done, &mut failed),
+            TaskKind::HumanTower => self.task_human_tower(w, rng, task, &mut done),
+            TaskKind::ThrowGrenade => self.task_throw_grenade(&mut failed),
+            TaskKind::WaitForBotAtWpt => self.task_wait_for_bot_at_wpt(g, w, rng, task, &mut done, &mut failed),
+            TaskKind::FaceEdict => self.task_face_edict(w, task, &mut done, &mut failed),
+            TaskKind::FollowLeader => self.task_follow_leader(g, w, task, &mut failed),
+            TaskKind::TypeMessage => self.task_type_message(w, rng, task, &mut done, &mut failed),
             TaskKind::Crouch => {
                 self.duck();
                 if task.int == 0 {
@@ -923,7 +985,7 @@ impl Bot {
     }
 
     /// `BOT_TASK_USE`.
-    fn task_use(&mut self, w: &dyn BotWorld, _rng: &mut dyn Random, task: Task, done: &mut bool, failed: &mut bool) {
+    pub(crate) fn task_use(&mut self, w: &dyn BotWorld, _rng: &mut dyn Random, task: Task, done: &mut bool, failed: &mut bool) {
         let now = w.time();
         if task.int != -2 && task.int != -1 && !task.found_path {
             *failed = true;
@@ -942,9 +1004,24 @@ impl Bot {
                 self.tasks.current_mut().expect("current task").vector = Vector::new(until, 0.0, 0.0);
             }
             self.use_button();
-            // Momentary buttons and doors that are still moving aren't followed (no TS map
-            // uses them for objectives).
-            *done = until <= now;
+            if until > now {
+                // A momentary button is held until what it targets stops moving.
+                if e.classname.starts_with("momentary") {
+                    *done = true;
+                    if !e.target.is_empty() {
+                        let moving = w
+                            .find_entities(super::EntityKey::Targetname, &e.target)
+                            .into_iter()
+                            .filter_map(|i| w.entity(i))
+                            .any(|d| d.is_moving());
+                        if moving {
+                            *done = false;
+                        }
+                    }
+                }
+            } else {
+                *done = until <= now;
+            }
             return;
         }
         let o = e.entity_origin();

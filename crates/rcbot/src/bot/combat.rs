@@ -4,8 +4,8 @@
 //! `UpdateConditions`; `bot_visibles.cpp` `CBotVisibles`; `BotFunc_BreakableIsEnemy`).
 //!
 //! The visible list keeps upstream's insertion order (`m_iVisibleList`), which decides ties in
-//! `FindEnemy`. Reputation isn't wired into enemy choice and aim yet (every enemy has the
-//! no-reputation priority 10; step 7).
+//! `FindEnemy`; a player the bot has a reputation of gets priority `BOT_MAX_REP - rep` and that
+//! reputation steers the aim (`GetAimVector`).
 
 use super::remember::REMEMBER_LOST_ENEMY;
 use super::{
@@ -165,8 +165,10 @@ impl Bot {
             let tr = w.trace_line(src, src + forward * 768.0, Monsters::DontIgnore, Glass::DontIgnore, Some(self.index));
             self.distance_from_wall = (tr.end_pos - src).length();
             work_costs = true;
-            self.clear_enemy_costs(w, rng);
+            self.clear_enemy_costs(g, w, rng);
         }
+        let need_to_follow = !self.tasks.has_task(TaskKind::FollowLeader) && self.squad_leader.is_some();
+        let mut saw_leader = false;
         let avoid_dist = self.me.size.length_2d() * 3.0;
         let max = (self.vis_update_revs + self.profile.vision_revs.max(1) as u32).min(w.max_entities());
 
@@ -206,18 +208,23 @@ impl Bot {
                 self.nearest_avoid_dist = dist;
                 self.avoid_entity = Some(e.handle());
             }
+            if !saw_leader && self.squad_leader == Some(e.handle()) {
+                saw_leader = true;
+            }
             self.set_visible(i, true);
             if work_costs {
                 self.work_enemy_costs(w, &e, dist);
             }
         }
-        if max >= w.max_entities() {
+        let finished = if max >= w.max_entities() {
             self.vis_update_revs = 0;
             true
         } else {
             self.vis_update_revs = max + 1;
             false
-        }
+        };
+        self.see_leader_again(w, saw_leader, need_to_follow);
+        finished
     }
 
     /// `CBot::isInAnimate`.
@@ -260,7 +267,7 @@ impl Bot {
     }
 
     /// `CBot::clearEnemyCosts`, which also looks for an enemy when the bot wants one.
-    fn clear_enemy_costs(&mut self, w: &dyn BotWorld, rng: &mut dyn Random) {
+    fn clear_enemy_costs(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
         self.range_costs = [[0.0; BOT_COST_BUCKETS]; BOT_COST_BUCKETS];
         self.lowest_enemy_cost = 99999.0;
         self.lowest_enemy_cost_vec = self.me.origin;
@@ -268,13 +275,13 @@ impl Bot {
         // `WantToFindEnemy` is answered by the caller's config; `clearEnemyCosts` runs inside
         // `UpdateVisibles`, where upstream asks it again.
         if self.want_to_find_enemy {
-            self.enemy = self.find_enemy(w, rng);
+            self.enemy = self.find_enemy(g, w, rng);
             if old != self.enemy {
                 if let Some(o) = old {
                     self.enemy_down(o);
                 }
                 if let Some(e) = self.resolve(w, self.enemy) {
-                    self.enemy_found(&e, w.time(), rng);
+                    self.enemy_found(g, &e, w.time(), rng);
                 }
             }
         } else {
@@ -285,7 +292,7 @@ impl Bot {
     /// `CBot::FindEnemy`, TS: every 0.75-1.25 s the enemy is dropped and the nearest, slowest
     /// visible enemy (`distance + speed`) other than the last one is taken; a new enemy starts
     /// a priority `NORMAL_ATTACK` schedule.
-    pub(crate) fn find_enemy(&mut self, w: &dyn BotWorld, rng: &mut dyn Random) -> Option<EntRef> {
+    pub(crate) fn find_enemy(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) -> Option<EntRef> {
         let now = w.time();
         let old = self.enemy;
         if self.enemy.is_some() && self.next_get_enemy_time < now {
@@ -301,12 +308,19 @@ impl Bot {
                     continue;
                 }
                 let dist = (e.origin - self.me.origin).length();
-                let priority = if e.classname == "func_breakable" { 5 } else { 10 };
+                let mut priority = 10;
+                let rep = if e.is_client() { self.rep_of(g, e.index) } else { None };
+                if let Some(r) = rep {
+                    priority = super::BOT_MAX_REP - r;
+                }
                 let fitness = dist + e.velocity.length();
+                if e.classname == "func_breakable" {
+                    priority = 5;
+                }
                 if priority >= best_priority && (self.enemy.is_none() || fitness < best_fitness) {
                     self.enemy = Some(e.handle());
                     best_fitness = fitness;
-                    self.enemy_rep = None;
+                    self.enemy_rep = rep;
                     best_priority = priority;
                 }
             }
@@ -314,7 +328,7 @@ impl Bot {
                 self.tasks.remove_similar_task(TaskKind::NormalAttack);
                 let id = self.tasks.new_schedule_id();
                 self.add_priority_task(Task::new(TaskKind::NormalAttack, id, Some(e.handle()), 0, 0.0, Vector::ZERO));
-                self.enemy_found(&e, now, rng);
+                self.enemy_found(g, &e, now, rng);
             }
         }
         self.enemy
@@ -322,14 +336,33 @@ impl Bot {
 
     /// `CBot::EnemyFound`. Upstream sets `m_fStrafeTime` to 2-6 *seconds since the map
     /// started*, not from now (design §5); kept.
-    pub(crate) fn enemy_found(&mut self, e: &Entity, now: f32, rng: &mut dyn Random) {
+    pub(crate) fn enemy_found(&mut self, g: &mut BotGlobals<'_>, e: &Entity, now: f32, rng: &mut dyn Random) {
         self.set(cond::SEE_ENEMY);
         self.strafe_speed = 1.0;
         self.strafe_time = rng.random_float(2.0, 6.0);
         self.enemy = Some(e.handle());
         self.first_see_enemy_time = now;
+        self.squad_enemy_found(g.squads);
         self.remembered.add(e.entity_origin(), Some(e.handle()), REMEMBER_1ST_SEE_ENEMY, self.me.origin);
         self.investigate_sound_time = now + 2.0;
+        // `BotHasEnemy`: this bot has one now.
+        let cam_has_enemy = g.botcam.current_bot() == Some(self.index) || g.botcam.other_has_enemy;
+        if !cam_has_enemy {
+            g.botcam.set_current_bot(self.index, now, rng);
+        }
+        if self.next_use_say_message > now {
+            return;
+        }
+        self.next_use_say_message = now + rng.random_float(4.0, 8.0);
+        // TS: use a stored power-up; a skilled bot far from the enemy also presses the stunt key
+        // ("this won't work anyway", upstream says).
+        self.actions.push(super::Action::Command("usepowerup".into()));
+        if self.current_weapon.is_some_and(|id| id != crate::weapons::TsWeapon::KungFu.id())
+            && self.distance_from(e.origin, false) > 200.0
+            && rng.random_long(0, 100) < self.profile.skill
+        {
+            self.button |= super::buttons::ALT1;
+        }
     }
 
     /// `CBot::EnemyDown`.
@@ -416,6 +449,7 @@ impl Bot {
     /// `CBot::UpdateConditions`.
     pub(crate) fn update_conditions(&mut self, w: &dyn BotWorld) {
         let now = w.time();
+        self.update_squad_conditions(w);
         if self.last_update_conditions > now {
             return;
         }

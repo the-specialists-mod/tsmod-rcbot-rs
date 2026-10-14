@@ -2,15 +2,17 @@
 //! `bot_config.ini`), `rcbot::config::CommandHost` on the engine, and loading RCBot's files from
 //! the plugin's data directory (`<gamedir>/tsmod/rcbot/`, RCBot's bot folder).
 //!
-//! Effects of features not ported yet (squads, the bot cam, menus' HUD, chat, `util` toys) print
-//! that they aren't available instead of doing nothing silently.
+//! Effects the plugin API can't do (`util explo`, which needs the game's `ExplosionCreate`, and
+//! `util givetsweapon`, which needs a weapon given at once) print that they aren't available
+//! instead of doing nothing silently.
 
 use crate::api::{Api, Engine};
 use crate::world::{EngineRandom, HostWorld};
 use crate::{State, editor, with_state};
 use rcbot::Vector;
 use rcbot::bot::BotWorld;
-use rcbot::config::commands::{self as cmds, AddBotRequest, CommandContext, CommandHost, CvarState, Effect, Print};
+use rcbot::bot::squad::{CombatType as SquadCombat, SquadForm};
+use rcbot::config::commands::{self as cmds, AddBotRequest, CombatType, CommandContext, CommandHost, CvarState, Effect, Formation, Print};
 use rcbot::config::{BOT_CONFIG_FILE, BOT_DBG_MSG_TAG, BOT_USERS_FILE, PlayerId, read_config as parse_config};
 use rcbot::nav::editor as ed;
 use rcbot::nav::{NearestOptions, Waypoints, World};
@@ -48,6 +50,10 @@ pub unsafe extern "C" fn server_command(argc: c_int, argv: *const *const c_char)
 pub unsafe extern "C" fn client_command(player: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
     let args = args_of(argc, argv);
     let a = |i: usize| args.get(i).map_or("", String::as_str);
+    if a(0) == "say" || a(0) == "say_team" {
+        crate::player_say(player, args.clone());
+        return 0;
+    }
     if a(0) != rcbot::config::BOT_COMMAND_ACCESS && a(0) != "menuselect" {
         return 0;
     }
@@ -134,6 +140,12 @@ pub fn load_waypoints(s: &mut State, a: Api, e: Engine) {
     }
 }
 
+/// `BotFunc_AddBot(NULL, ...)`: a bot with the defaults, as the rejoin code adds them.
+pub fn add_bot_now(s: &mut State, a: Api, e: Engine) {
+    let mut host = Host { s, api: a, e };
+    host.add_bot(None, AddBotRequest { team: None, class: None });
+}
+
 /// `CommandHost` on the engine and the state (everything but the config, users and clients,
 /// which the command context holds).
 struct Host<'a> {
@@ -153,6 +165,24 @@ impl Host<'_> {
 
     fn not_ported(&mut self, what: &str) {
         self.print(Print::Message(None), &format!("{what} is not available yet in this port of RCBot"));
+    }
+
+    /// The squad `leader` leads (`FindSquadByLeader`).
+    fn squad_of(&self, leader: PlayerId) -> Option<rcbot::bot::SquadId> {
+        self.player_entity(leader).and_then(|e| self.s.squads.find_by_leader(e.handle()))
+    }
+
+    /// Changes the squad `leader` leads; what it says goes to the leader's chat area.
+    fn with_squad(&mut self, leader: PlayerId, f: impl FnOnce(&mut rcbot::bot::squad::Squad, &mut Vec<String>)) {
+        let mut said = Vec::new();
+        if let Some(id) = self.squad_of(leader)
+            && let Some(s) = self.s.squads.get_mut(id)
+        {
+            f(s, &mut said);
+        }
+        for m in said {
+            self.print(Print::TalkOne(leader), &m);
+        }
     }
 
     /// The edit commands of a client slot: its player and position.
@@ -266,13 +296,115 @@ impl CommandHost for Host<'_> {
             Effect::SetBotsVisionTime(t) => self.s.bots.iter_mut().for_each(|b| b.profile.vision_time = t),
             // `SetViewAngles` resets to the configured turn speed every frame.
             Effect::SetBotsTurnSpeed(_) | Effect::ClearDebugMessage => {}
-            Effect::ShowMenu { player, text, .. } => self.print(Print::Message(Some(player)), &text),
+            Effect::ShowMenu { player, slots, text } => self.e.show_menu(player.0 as i32, slots, -1, false, &text),
             Effect::AddToolTip(..) | Effect::SayToolTip(..) => {}
+            Effect::BotcamOff(p) => self.e.set_view(p.0 as i32, p.0 as i32),
+            Effect::HudText { text, colour } => {
+                let [r, g, b] = colour;
+                for i in 1..=self.e.max_clients() {
+                    self.e.hud_message(i, 3, (-1.0, -1.0), 0, [r, g, b, 200], [r, g, b, 200], (0.75, 0.75, 2.0, 0.75), &text);
+                }
+            }
+            Effect::PlaySoundToAll(sample) => {
+                for i in 1..=self.e.max_clients() {
+                    if w.entity(i as u32).is_some_and(|p| !p.netname.is_empty()) {
+                        self.e.client_command_sound(i, &sample);
+                    }
+                }
+            }
+            Effect::Search { player, range } => {
+                if let Some(p) = self.player_entity(player) {
+                    for i in w.entities_in_sphere(p.origin, range) {
+                        let Some(e) = w.entity(i) else { continue };
+                        let line =
+                            format!("Found: id: {i}, classname:{} distance:{:.2}", e.classname, (e.entity_origin() - p.origin).length());
+                        self.print(Print::Message(Some(player)), &line);
+                    }
+                }
+            }
+            Effect::TeleportEntityInFront { player, to } => {
+                if let Some(i) = self.facing_entity(player, true)
+                    && w.entity(i).is_some_and(|e| e.flags & rcbot::bot::entflags::WORLDBRUSH == 0)
+                {
+                    self.e.set_origin(i as i32, to);
+                }
+            }
+            Effect::PrintBoredoms { bot, to } => {
+                if let Some(t) = self.s.bots.get(bot.0).map(|b| b.boredom_text()) {
+                    self.print(Print::Message(to), &t);
+                }
+            }
+            Effect::PrintReps { bot, to } => {
+                let names: Vec<(i32, String)> =
+                    self.s.clients.iter().filter_map(|c| c.player.map(|p| (c.player_rep_id, self.player_name(p)))).collect();
+                let lines = self
+                    .s
+                    .bots
+                    .get(bot.0)
+                    .map(|b| b.profile.rep.print_reps(&b.name, |id| names.iter().find(|(r, _)| *r == id).map(|(_, n)| n.clone())));
+                for l in lines.unwrap_or_default() {
+                    self.print(Print::Message(to), &l);
+                }
+            }
+            Effect::SquadFormation { leader, formation } => {
+                let f = match formation {
+                    Formation::Wedge => SquadForm::Wedge,
+                    Formation::Line => SquadForm::Line,
+                    Formation::Column => SquadForm::Column,
+                    Formation::EchelonLeft => SquadForm::EchelonLeft,
+                    Formation::EchelonRight => SquadForm::EchelonRight,
+                    Formation::Vee => SquadForm::Vee,
+                };
+                self.with_squad(leader, |s, _| s.change_formation(f));
+            }
+            Effect::SquadSetSpread { leader, spread } => self.with_squad(leader, |s, _| s.change_spread(spread)),
+            Effect::SquadChangeSpread { leader, delta } => self.with_squad(leader, |s, _| s.change_spread(s.spread() + delta)),
+            Effect::SquadToggleFireMode(leader) => {
+                self.with_squad(leader, |s, out| out.push(s.toggle_fire_mode().to_owned()));
+            }
+            Effect::SquadToggleCombatType { leader, combat_type } => self.with_squad(leader, |s, out| {
+                let t = match combat_type {
+                    CombatType::Crouch if !s.is_crouch() => SquadCombat::Crouch,
+                    CombatType::Stealth if !s.is_stealth() => SquadCombat::Stealth,
+                    _ => SquadCombat::Combat,
+                };
+                out.extend(s.set_combat_type(t));
+            }),
+            Effect::SquadReturnToFormation(leader) => {
+                if let Some(id) = self.squad_of(leader) {
+                    let bots: Vec<u32> = self.s.bots.iter().map(|b| b.index).collect();
+                    self.s.squads.return_all_to_formation(id, |i| bots.contains(&i));
+                }
+            }
+            Effect::SquadLeave(leader) => {
+                if let Some(id) = self.squad_of(leader) {
+                    self.s.squads.change_leader(id, &w);
+                }
+            }
+            Effect::SquadRemove(leader) => {
+                if let Some(id) = self.squad_of(leader) {
+                    self.s.squads.remove(id);
+                }
+            }
+            Effect::MakeSquad(c) => {
+                if let Some(p) = self.editor_player(c) {
+                    let reps = self.s.rep_ids();
+                    let s = &mut *self.s;
+                    let mut g = crate::bots::globals!(s, &reps);
+                    s.bots.make_squad(&mut g, &w, &p);
+                }
+            }
+            Effect::RemoveAllBotSquads(p) => {
+                let team = self.player_entity(p).and_then(|e| e.player).map_or(0, |x| x.team);
+                let n = crate::bots::remove_all_bot_squads(self.s, team);
+                self.print(Print::HudTalk(p), &format!("{BOT_DBG_MSG_TAG} {n} bot squads removed"));
+            }
             other => self.not_ported(format!("{other:?}").split(['(', ' ', '{']).next().unwrap_or("it")),
         }
         if let Some(p) = to {
             editor::send(self.s, self.e, p, out);
         }
+        crate::bots::flush_squad_messages(self.s, self.e);
     }
 
     fn find_player(&self, name: &str) -> Option<PlayerId> {
@@ -358,8 +490,8 @@ impl CommandHost for Host<'_> {
         (1..=self.e.max_clients() as u32).filter(|&i| self.player_entity(PlayerId(i)).is_some_and(|e| e.is_client())).count() as i32
     }
 
-    fn leads_squad(&self, _player: PlayerId) -> bool {
-        false
+    fn leads_squad(&self, player: PlayerId) -> bool {
+        self.squad_of(player).is_some()
     }
 
     fn toggle_notarget(&mut self, player: PlayerId) -> bool {
@@ -391,9 +523,14 @@ impl CommandHost for Host<'_> {
         })
     }
 
-    fn botcam_tune_in(&mut self, _player: PlayerId) -> bool {
-        self.not_ported("botcam");
-        false
+    fn botcam_tune_in(&mut self, player: PlayerId) -> bool {
+        match crate::bots::botcam_tune_in(self.s, self.e, player.0) {
+            None => true,
+            Some(why) => {
+                self.print(Print::Message(Some(player)), why);
+                false
+            }
+        }
     }
 
     /// The rest of `BotFunc_AddBot`: a bot through the port (`create_bot`), RCBot's team choice
