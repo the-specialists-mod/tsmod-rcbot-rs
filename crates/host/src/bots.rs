@@ -204,7 +204,7 @@ pub(crate) fn greet(s: &mut State, a: Api, e: Engine, index: u32) {
         return;
     }
     let reps = s.rep_ids();
-    let w = HostWorld { api: a, eng: e, teamplay: a.game_state().teamplay != 0 };
+    let w = HostWorld::new(a, e);
     let mut rng = EngineRandom(e);
     let clients = &s.clients;
     let Some(bot) = s.bots.get(index) else { return };
@@ -264,7 +264,11 @@ pub(crate) fn put_in_server(s: &mut State, e: Engine, i: i32, is_bot: bool) {
 /// every bot saves and drops its reputation of them and may greet them again; a bot saves its
 /// brain and learned data.
 pub(crate) fn disconnect(s: &mut State, a: Api, e: Engine, i: i32) {
-    let w = HostWorld { api: a, eng: e, teamplay: false };
+    let w = HostWorld::new(a, e);
+    // Its client's grip ends (`CClient::Init`); a grip on it would follow the next player in
+    // the slot.
+    s.force_grips.remove(&(i as u32));
+    s.force_grips.retain(|_, g| *g != i as u32);
     if let Some(p) = w.entity(i as u32)
         && let Some(id) = s.squads.find_by_leader(p.handle())
     {
@@ -308,7 +312,7 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
         s.check("kill");
     }
     let reps = s.rep_ids();
-    let w = HostWorld { api: a, eng: e, teamplay: a.game_state().teamplay != 0 };
+    let w = HostWorld::new(a, e);
     let mut rng = EngineRandom(e);
     let mut g = globals!(s, &reps);
     s.bots.death(&mut g, &w, killer, victim, &mut rng);
@@ -317,7 +321,7 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
 /// `sound`: `pfnEmitSound`'s part for the bots.
 pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, sample: &str) {
     let Ok(entity) = u32::try_from(entity) else { return };
-    let w = HostWorld { api: a, eng: e, teamplay: a.game_state().teamplay != 0 };
+    let w = HostWorld::new(a, e);
     s.bots.sound(&w, entity, sample);
 }
 
@@ -326,7 +330,7 @@ pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, sample: &str)
 /// within one unit). Design §4.
 pub(crate) fn touches(s: &mut State, a: Api, e: Engine) {
     let reps = s.rep_ids();
-    let w = HostWorld { api: a, eng: e, teamplay: a.game_state().teamplay != 0 };
+    let w = HostWorld::new(a, e);
     let mut rng = EngineRandom(e);
     let indices: Vec<u32> = s.bots.iter().filter(|b| b.is_alive()).map(|b| b.index).collect();
     let g = globals!(s, &reps);
@@ -357,7 +361,7 @@ pub(crate) fn touches(s: &mut State, a: Api, e: Engine) {
 pub(crate) fn say_command(s: &mut State, a: Api, e: Engine, player: i32, args: &[String]) {
     let arg = |i: usize| args.get(i).map_or("", String::as_str);
     let team_only = arg(0) == "say_team";
-    let w = HostWorld { api: a, eng: e, teamplay: a.game_state().teamplay != 0 };
+    let w = HostWorld::new(a, e);
     let Some(sender) = w.entity(player as u32) else { return };
     if team_only && arg(1).starts_with("form") && (arg(1)[4..].starts_with(" up") || arg(2).starts_with("up")) {
         let reps = s.rep_ids();
@@ -419,7 +423,7 @@ pub(crate) fn botcam_frame(s: &mut State, a: Api, e: Engine) {
         }
         return;
     }
-    let w = HostWorld { api: a, eng: e, teamplay: false };
+    let w = HostWorld::new(a, e);
     let mut rng = EngineRandom(e);
     s.botcam.think(&s.bots, &s.waypoints, &w, &mut rng);
     let (Some(cam), view) = (s.botcam.camera, s.botcam.view) else { return };
@@ -452,4 +456,52 @@ pub(crate) fn remove_all_bot_squads(s: &mut State, team: i32) -> i32 {
         }
     }
     n
+}
+
+/// `CClient::Think`'s force grip: each gripped entity is held 210 units in front of its
+/// player's eyes (or short of what is in the way), turned to face the player, and frozen.
+/// Upstream builds the end point from `gpGlobals->v_forward` before `UTIL_MakeVectors(v_angle)`,
+/// so from whatever direction was computed last (design §5); the port uses the player's view.
+pub(crate) fn force_grip_frame(s: &mut State, a: Api, e: Engine) {
+    if s.force_grips.is_empty() {
+        return;
+    }
+    let w = HostWorld::new(a, e);
+    let grips: Vec<(u32, u32)> = s.force_grips.iter().map(|(&p, &g)| (p, g)).collect();
+    for (player, gripped) in grips {
+        let (Some(p), Some(g)) = (w.entity(player), w.entity(gripped)) else {
+            s.force_grips.remove(&player);
+            continue;
+        };
+        let (forward, _) = rcbot::bot::make_vectors(p.v_angle);
+        let src = p.origin + p.view_ofs;
+        let mut end = src + forward * 210.0;
+        let tr = rcbot::nav::World::trace_line(&w, src, end, rcbot::nav::Monsters::Ignore, rcbot::nav::Glass::DontIgnore, Some(player));
+        if tr.fraction < 1.0 {
+            let comp = tr.end_pos - src;
+            let dist = comp.length();
+            end = src + comp * (1.0 / dist) * (dist - g.size.length_2d());
+        }
+        e.set_origin(gripped as i32, end);
+        let mut angles = rcbot::bot::vec_to_angles(src - end);
+        rcbot::bot::fix_angles(&mut angles);
+        angles.z = 0.0;
+        angles.x = g.v_angle.x;
+        if let Some(ed) = e.edict(gripped as i32) {
+            e.vars_mut(ed, |v| {
+                v.v_angle = angles.to_array();
+                v.angles = angles.to_array();
+                v.angles[0] = angles.x / 3.0;
+                v.flags |= rcbot::bot::entflags::FROZEN;
+            });
+        }
+    }
+}
+
+/// `-rcbot_force_grip`: `FL_FROZEN` off and `DROP_TO_FLOOR`.
+pub(crate) fn release_force_grip(e: Engine, gripped: u32) {
+    if let Some(ed) = e.edict(gripped as i32) {
+        e.vars_mut(ed, |v| v.flags &= !rcbot::bot::entflags::FROZEN);
+        e.drop_to_floor(gripped as i32);
+    }
 }

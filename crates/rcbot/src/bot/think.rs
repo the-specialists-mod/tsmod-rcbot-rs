@@ -413,9 +413,9 @@ impl Bot {
     }
 
     /// `CBot::LookForNewTasks`, TS: pick up the nearest visible weapon or power-up; in teamplay
-    /// go to a random end-level waypoint; else roam (a remembered enemy position half the time,
-    /// otherwise a random goal).
-    fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+    /// go to a random end-level waypoint; else roam (follow the squad leader; or a remembered
+    /// enemy position half the time, otherwise a random goal).
+    pub(crate) fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
         let now = w.time();
         self.stop_moving();
         self.look_task = if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) {
@@ -451,7 +451,9 @@ impl Bot {
             // team 2; team 1 then `DEFEND`s it, team 2 `USE`s a `ts_hack`/`ts_bomb` within 100
             // units for 9 s. Plugin API v3 doesn't report the objectives (`entity_info`'s
             // OBJECTIVE kind has neither id nor name), so bots only take the end-level waypoints
-            // below until #117 adds them.
+            // below until #117 adds them. The list's lifetime goes with them: `SpawnInit` clears
+            // it unless a `TSObjective` came since the last weapon pick
+            // (`BOT_CONDITION_DONT_CLEAR_OBJECTIVES`, removed where `SELECTED_GUN` is set).
             let wpt = g
                 .waypoints
                 .find_random_goal_near(self.me.origin, 4096.0, -1, fl::ENDLEVEL, &self.paths.failed_goals, rng)
@@ -462,6 +464,11 @@ impl Bot {
             }
         }
         if !roam {
+            return;
+        }
+        // In a squad (one a player made: TS bots never assemble their own), follow the leader.
+        if self.squad_leader.is_some() {
+            self.add_task(Task::new(TaskKind::FollowLeader, id, None, 0, 0.0, Vector::ZERO));
             return;
         }
         self.looking_for_enemy = false;

@@ -84,6 +84,9 @@ impl Bot {
                 return false;
             }
             if w.teamplay() {
+                if w.model_teams() {
+                    return w.player_model(self.index) != w.player_model(e.index);
+                }
                 return p.team != self.state.team;
             }
             return true;

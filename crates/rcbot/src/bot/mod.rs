@@ -30,7 +30,7 @@ mod tests;
 
 pub use botcam::BotCam;
 pub use events::{BotEvent, NO_CLIENT, SoundKind};
-pub use look::make_vectors;
+pub use look::{fix_angles, make_vectors, vec_to_angles};
 pub use manager::{BotManager, BotSlot};
 pub use remember::RememberPositions;
 pub use special::{MasterEntity, OtherBot};
@@ -259,8 +259,18 @@ pub trait BotWorld: World {
     fn in_pvs(&self, viewer: u32, origin: Vector) -> bool;
     /// `UTIL_FindEntityInSphere`, every match.
     fn entities_in_sphere(&self, origin: Vector, radius: f32) -> Vec<u32>;
-    /// `gBotGlobals.m_bTeamPlay`.
+    /// `gBotGlobals.m_bTeamPlay || isMapType(NON_TS_TEAMPLAY)`: the game's teamplay, or a `tm_`
+    /// map.
     fn teamplay(&self) -> bool;
+    /// Teams are players' `model` keys, as upstream decides them: a `tm_` map the game doesn't
+    /// run as teamplay (its teams would all be 0). Otherwise teams are [`PlayerState::team`].
+    fn model_teams(&self) -> bool {
+        false
+    }
+    /// A player's `model` info key (`INFOKEY_VALUE(GET_INFOKEYBUFFER(e), "model")`).
+    fn player_model(&self, _index: u32) -> String {
+        String::new()
+    }
     /// `UTIL_FindEntityByString(start, key, value)` over the whole entity list, in the engine's
     /// order (`key` is `classname`, `target` or `targetname`). None by default.
     fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
@@ -805,6 +815,13 @@ impl Bot {
             self.start_duck_time = now + 0.1;
             self.end_duck_time = now + 0.7;
         }
+    }
+
+    /// `util bot_goto`: `ClearTasks` (`m_OrderTask` is TFC's and NS's) and a priority
+    /// `BOT_TASK_FIND_PATH` to `waypoint` (schedule 0, float -2; -1 is any goal).
+    pub fn go_to_waypoint(&mut self, waypoint: i32) {
+        self.tasks.flush();
+        self.add_priority_task(Task::new(TaskKind::FindPath, 0, None, waypoint, -2.0, Vector::ZERO));
     }
 
     /// `AddTask`.

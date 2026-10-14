@@ -187,6 +187,24 @@ impl Engine {
         unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     }
 
+    /// `INFOKEY_VALUE(GET_INFOKEYBUFFER(e), key)`: a client's user info key ("" if unset).
+    pub fn info_key(&self, e: Edict, key: &CStr) -> String {
+        let (Some(buf), Some(val)) = (self.f.pfnGetInfoKeyBuffer, self.f.pfnInfoKeyValue) else { return String::new() };
+        // SAFETY: `e` is a live edict (see `edict`); the engine returns its info buffer or NULL.
+        let b = unsafe { buf(e.0) };
+        if b.is_null() {
+            return String::new();
+        }
+        // SAFETY: a buffer from `pfnGetInfoKeyBuffer` and a NUL-terminated key; the engine
+        // returns a NUL-terminated string (static, possibly empty).
+        let v = unsafe { val(b, key.as_ptr()) };
+        if v.is_null() {
+            return String::new();
+        }
+        // SAFETY: as above.
+        unsafe { CStr::from_ptr(v) }.to_string_lossy().into_owned()
+    }
+
     /// `INDEXENT(i)`, `None` for a missing or free edict.
     pub fn edict(&self, index: i32) -> Option<Edict> {
         let f = self.f.pfnPEntityOfEntIndex?;
@@ -489,6 +507,13 @@ impl Engine {
         let o = to.to_array();
         // SAFETY: as above.
         unsafe { f(e.0, o.as_ptr()) };
+    }
+
+    /// `DROP_TO_FLOOR`.
+    pub fn drop_to_floor(&self, entity: i32) {
+        let (Some(f), Some(e)) = (self.f.pfnDropToFloor, self.edict(entity)) else { return };
+        // SAFETY: a live edict (`edict`); the engine moves it down onto the floor.
+        unsafe { f(e.0) };
     }
 
     /// `SERVER_COMMAND`.

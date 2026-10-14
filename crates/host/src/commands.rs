@@ -46,7 +46,8 @@ pub unsafe extern "C" fn server_command(argc: c_int, argv: *const *const c_char)
     });
 }
 
-/// `ClientCommand`'s `rcbot <command>` and `menuselect`: non-zero when RCBot handled it.
+/// `ClientCommand`'s `rcbot <command>`, `menuselect` and `±rcbot_force_grip`: non-zero when
+/// RCBot handled it.
 pub unsafe extern "C" fn client_command(player: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
     let args = args_of(argc, argv);
     let a = |i: usize| args.get(i).map_or("", String::as_str);
@@ -54,7 +55,7 @@ pub unsafe extern "C" fn client_command(player: c_int, argc: c_int, argv: *const
         crate::player_say(player, args.clone());
         return 0;
     }
-    if a(0) != rcbot::config::BOT_COMMAND_ACCESS && a(0) != "menuselect" {
+    if !matches!(a(0), rcbot::config::BOT_COMMAND_ACCESS | "menuselect" | "+rcbot_force_grip" | "-rcbot_force_grip") {
         return 0;
     }
     with_state(None, |s, api, e| {
@@ -120,7 +121,7 @@ pub fn load_waypoints(s: &mut State, a: Api, e: Engine) {
     match Waypoints::from_rcw(&bytes, &s.map) {
         Ok((mut w, header)) => {
             let n = w.len();
-            let world = HostWorld { api: a, eng: e, teamplay: false };
+            let world = HostWorld::new(a, e);
             let mut first_row = 0;
             if !header.needs_visibility()
                 && let Ok(rcv) = std::fs::read(dir.join(format!("{}.rcv", s.map)))
@@ -156,7 +157,7 @@ struct Host<'a> {
 
 impl Host<'_> {
     fn world(&self) -> HostWorld {
-        HostWorld { api: self.api, eng: self.e, teamplay: false }
+        HostWorld::new(self.api, self.e)
     }
 
     fn player_entity(&self, p: PlayerId) -> Option<rcbot::bot::Entity> {
@@ -280,6 +281,29 @@ impl CommandHost for Host<'_> {
                 };
                 self.print(Print::Message(Some(p)), &text);
             }
+            Effect::ForceGrip { player, grip } => {
+                if grip {
+                    let e = self.facing_entity(player, false);
+                    match e {
+                        Some(e) => self.s.force_grips.insert(player.0, e),
+                        None => self.s.force_grips.remove(&player.0),
+                    };
+                } else if let Some(e) = self.s.force_grips.remove(&player.0) {
+                    crate::bots::release_force_grip(self.e, e);
+                }
+            }
+            Effect::BotGoto { bot, waypoint } => {
+                if let Some(b) = self.s.bots.get_mut(bot.0) {
+                    b.go_to_waypoint(waypoint);
+                }
+            }
+            // TODO(plugin API): `UTIL_makeTSweapon` and `ExplosionCreate` create a `ts_groundweapon`
+            // / `env_explosion` and set its keys (`DispatchKeyValue`) before spawning it; plugin
+            // API v3 can create an entity and run `Spawn`/`Use` (ham) but not set its keys, and
+            // `buy` only fills the next spawn's loadout (the bots' own loadouts use it, design §4).
+            // Needs an API addition (design §2, "Waiting for the port").
+            Effect::GiveTsWeapon { .. } => self.not_ported("givetsweapon"),
+            Effect::Explosion { .. } => self.not_ported("explo"),
             Effect::KillBot(p) => {
                 if let Some(b) = self.s.bots.get_mut(p.0) {
                     b.kill = true;
@@ -323,7 +347,8 @@ impl CommandHost for Host<'_> {
                 }
             }
             Effect::TeleportEntityInFront { player, to } => {
-                if let Some(i) = self.facing_entity(player, true)
+                // `UTIL_getEntityInFront`: 8192 units, anything but the world.
+                if let Some(i) = view_trace(&w, player.0, 8192.0).filter(|&i| i != 0)
                     && w.entity(i).is_some_and(|e| e.flags & rcbot::bot::entflags::WORLDBRUSH == 0)
                 {
                     self.e.set_origin(i as i32, to);
@@ -399,7 +424,6 @@ impl CommandHost for Host<'_> {
                 let n = crate::bots::remove_all_bot_squads(self.s, team);
                 self.print(Print::HudTalk(p), &format!("{BOT_DBG_MSG_TAG} {n} bot squads removed"));
             }
-            other => self.not_ported(format!("{other:?}").split(['(', ' ', '{']).next().unwrap_or("it")),
         }
         if let Some(p) = to {
             editor::send(self.s, self.e, p, out);
@@ -436,18 +460,11 @@ impl CommandHost for Host<'_> {
         if self.is_rcbot(player) { player.0 as i32 - 1 } else { -1 }
     }
 
-    fn facing_entity(&self, player: PlayerId, _any: bool) -> Option<u32> {
-        let p = self.player_entity(player)?;
-        let (forward, _) = rcbot::bot::make_vectors(p.v_angle);
-        let src = p.origin + p.view_ofs;
-        let tr = self.world().trace_line(
-            src,
-            src + forward * 8192.0,
-            rcbot::nav::Monsters::DontIgnore,
-            rcbot::nav::Glass::DontIgnore,
-            Some(player.0),
-        );
-        tr.hit.filter(|&h| h != 0)
+    fn facing_entity(&self, player: PlayerId, any: bool) -> Option<u32> {
+        let w = self.world();
+        let hit = view_trace(&w, player.0, 4096.0)?;
+        let e = w.entity(hit)?;
+        (any || e.flags & (rcbot::bot::entflags::CLIENT | rcbot::bot::entflags::MONSTER) != 0).then_some(hit)
     }
 
     fn bot_index_of_entity(&self, entity: u32) -> i32 {
@@ -558,4 +575,13 @@ impl CommandHost for Host<'_> {
         let p = self.s.data_dir.join(BOT_USERS_FILE);
         (std::fs::read(&p).ok(), p.to_string_lossy().into_owned())
     }
+}
+
+/// The entity a player looks at within `dist` (`UTIL_TraceLine` from the eyes along `v_angle`,
+/// monsters and glass counted, the player ignored): 0 is the world.
+fn view_trace(w: &HostWorld, player: u32, dist: f32) -> Option<u32> {
+    let p = w.entity(player)?;
+    let (forward, _) = rcbot::bot::make_vectors(p.v_angle);
+    let src = p.origin + p.view_ofs;
+    w.trace_line(src, src + forward * dist, rcbot::nav::Monsters::DontIgnore, rcbot::nav::Glass::DontIgnore, Some(player)).hit
 }

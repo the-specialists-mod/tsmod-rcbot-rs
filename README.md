@@ -15,13 +15,13 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | `bot_weapons.ini` (TS section) and the TS weapon table | done |
 | Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Chat: MegaHAL (byte-compatible brains), `bot_chat.ini`, replies | done; checked against RCBot's own code |
-| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set (side effects through a host trait) | done; the host runs the commands (only `util`'s toys say they aren't available) |
+| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set and `±rcbot_force_grip` (side effects through a host trait) | done; the host runs the commands (`util givetsweapon` and `util explo` wait for a plugin API addition) |
 | Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v3 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
 | Combat: what the bot sees, enemy choice and aim by reputation, best weapon, reloads and switching (upstream's TS reload bug fixed), cover, hearing (the port's `sound` callback) | done |
 | Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
 | Special waypoints: lifts and their buttons, pushables, human towers, grenade-throw waypoints | done |
-| TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
+| TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals (and `tm_` maps' model teams) | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
 | Bot events and reputation (kills, deaths, what bots see), squads, botcam, chat (idle, events, greetings, MegaHAL replies, typing), profiles from `bot_profiles.ini`, learned data, brains and reputations saved and loaded | done |
 | End-to-end: `cargo xtask e2e` on all seven engine roots | bots join, move, use waypoints, kill, change weapons; back to `native` at the next map |
 
@@ -80,5 +80,5 @@ GPL-2.0-or-later with that exception. The library is loaded by the port at runti
 linked into the port's own libraries.
 
 The port's plugin API crate `ts-plugin-api` (a dependency from the-specialistsmod-rs) is
-MIT-licensed. MIT is compatible with the GPL, so the built library is is distributed under the
+MIT-licensed. MIT is compatible with the GPL, so the built library is distributed under the
 GPL as a whole. Keep the API crate's MIT notice with it.

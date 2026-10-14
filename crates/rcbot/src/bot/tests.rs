@@ -10,6 +10,8 @@ struct Plane {
     time: f32,
     ents: RefCell<Vec<Entity>>,
     teamplay: bool,
+    /// Players' `model` keys for a `tm_` map (teams by model), by index.
+    models: Option<Vec<(u32, &'static str)>>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -64,7 +66,13 @@ impl BotWorld for Plane {
         self.ents.borrow().iter().filter(|e| (e.origin - o).length() < r).map(|e| e.index).collect()
     }
     fn teamplay(&self) -> bool {
-        self.teamplay
+        self.teamplay || self.models.is_some()
+    }
+    fn model_teams(&self) -> bool {
+        self.models.is_some()
+    }
+    fn player_model(&self, index: u32) -> String {
+        self.models.iter().flatten().find(|(i, _)| *i == index).map_or(String::new(), |(_, m)| (*m).into())
     }
 }
 
@@ -103,7 +111,7 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
     if enemy {
         ents.push(player(2, Vector::new(400.0, 0.0, 0.0), 0));
     }
-    let plane = Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false };
+    let plane = Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
     let profile = crate::config::BotProfile::init(&config, &mut rng);
@@ -302,7 +310,7 @@ impl Rig {
 }
 
 fn plane(ents: Vec<Entity>) -> Plane {
-    Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false }
+    Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None }
 }
 
 #[test]
@@ -660,6 +668,47 @@ fn a_grenade_lands_where_its_toss_ends() {
     // No gravity (cvar 0): each step goes 1.5 times the last (150, 225, 337.5, 506.25), then
     // 256 times the last velocity.
     assert!((end.x - (150.0 + 225.0 + 337.5 + 506.25 + 506.25 * 256.0)).abs() < 1.0, "{end:?}");
+}
+
+#[test]
+fn tm_maps_make_teams_of_models() {
+    let (_, mut bot, ..) = setup(false);
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(0.0, 300.0, 0.0), 0)]);
+    bot.me = w.entity(1).unwrap();
+    bot.state = bot.me.player.unwrap();
+    let (p2, p3) = (w.entity(2).unwrap(), w.entity(3).unwrap());
+    // Deathmatch: everyone; the game's teamplay with every team 0: no one.
+    assert!(bot.is_enemy(&w, &p2) && bot.is_enemy(&w, &p3));
+    w.teamplay = true;
+    assert!(!bot.is_enemy(&w, &p2) && !bot.is_enemy(&w, &p3));
+    // A `tm_` map the game doesn't run as teamplay: upstream's `model` comparison.
+    w.teamplay = false;
+    w.models = Some(vec![(1, "agent"), (2, "agent"), (3, "merc")]);
+    assert!(!bot.is_enemy(&w, &p2) && bot.is_enemy(&w, &p3));
+}
+
+#[test]
+fn util_bot_goto_replaces_the_tasks() {
+    let (_, mut bot, ..) = setup(false);
+    bot.add_task(Task::new(TaskKind::Wait, 3, None, 0, 5.0, Vector::ZERO));
+    bot.go_to_waypoint(4);
+    let t: Vec<_> = bot.tasks().iter().map(|t| (t.kind, t.schedule_id, t.int, t.float)).collect();
+    assert_eq!(t, [(TaskKind::FindPath, 0, 4, -2.0)]);
+}
+
+#[test]
+fn roaming_squad_members_follow_the_leader() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(100.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(4);
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        b.squad_leader = Some(w.entity(2).unwrap().handle());
+        b.look_for_new_tasks(g, &w, &mut rng);
+        assert_eq!(b.tasks().iter().map(|t| t.kind).collect::<Vec<_>>(), [TaskKind::FollowLeader]);
+    });
 }
 
 #[test]

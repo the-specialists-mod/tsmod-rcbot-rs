@@ -6,12 +6,30 @@ use crate::api::{Api, Engine};
 use rcbot::bot::{BotWorld, Entity, EntityKey, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// `NON_TS_TEAMPLAY`: the map's name starts with `tm_` (`CBotGlobals::MapInit`), set at
+/// `ServerActivate`.
+pub static NON_TS_TEAMPLAY: AtomicBool = AtomicBool::new(false);
 
 /// The world for one frame.
 pub struct HostWorld {
     pub api: Api,
     pub eng: Engine,
-    pub teamplay: bool,
+    /// The game's teamplay (`GameState::teamplay`).
+    pub game_teamplay: bool,
+}
+
+impl HostWorld {
+    /// The world now, with the game's teamplay.
+    pub fn new(api: Api, eng: Engine) -> HostWorld {
+        HostWorld { api, eng, game_teamplay: api.game_state().teamplay != 0 }
+    }
+
+    /// Teams by `model` key: a `tm_` map the game doesn't run as teamplay.
+    fn model_teams(&self) -> bool {
+        !self.game_teamplay && NON_TS_TEAMPLAY.load(Ordering::Relaxed)
+    }
 }
 
 impl World for HostWorld {
@@ -110,7 +128,15 @@ impl BotWorld for HostWorld {
     }
 
     fn teamplay(&self) -> bool {
-        self.teamplay
+        self.game_teamplay || NON_TS_TEAMPLAY.load(Ordering::Relaxed)
+    }
+
+    fn model_teams(&self) -> bool {
+        HostWorld::model_teams(self)
+    }
+
+    fn player_model(&self, index: u32) -> String {
+        self.eng.edict(index as i32).map(|e| self.eng.info_key(e, c"model")).unwrap_or_default()
     }
 
     fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {

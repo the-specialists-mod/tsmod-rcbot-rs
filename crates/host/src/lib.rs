@@ -88,6 +88,8 @@ pub struct State {
     /// The profile each bot had, by player index, for the bots the port keeps across a level
     /// change (upstream's `RESPAWN_NEED_TO_REJOIN` bots rejoin with their profile).
     previous_profiles: HashMap<u32, i32>,
+    /// `CClient::m_pForceGripEntity` by player: what `+rcbot_force_grip` holds.
+    pub(crate) force_grips: HashMap<u32, u32>,
     /// `m_fMapInitTime`.
     map_init_time: f32,
     /// `m_bBotCanRejoin`, `m_fBotRejoinTime`.
@@ -265,6 +267,7 @@ extern "C" fn game_init() {
         chat: BotChatMessages::default(),
         masters: Vec::new(),
         previous_profiles: HashMap::new(),
+        force_grips: HashMap::new(),
         map_init_time: 0.0,
         can_rejoin: false,
         rejoin_time: 5.0,
@@ -302,6 +305,8 @@ extern "C" fn precache() {
 unsafe extern "C" fn server_activate(map: *const c_char) {
     // SAFETY: the server's string for the call.
     let map = if map.is_null() { String::new() } else { unsafe { CStr::from_ptr(map) }.to_string_lossy().into_owned() };
+    // `CBotGlobals::MapInit`: TS's `tm_` maps are team maps (`NON_TS_TEAMPLAY`, `m_bTeamPlay`).
+    world::NON_TS_TEAMPLAY.store(map.starts_with("tm_"), Ordering::Relaxed);
     with_state(None, |s, a, e| {
         s.map = map;
         s.weapons.clear();
@@ -419,13 +424,13 @@ extern "C" fn shutdown() {
 extern "C" fn start_frame() {
     with_state(None, |s, a, e| {
         editor::frame(s, a, e);
+        bots::force_grip_frame(s, a, e);
         map_config_frame(s, e);
         if !s.active {
             return;
         }
         rejoin_frame(s, a, e);
-        let gs = a.game_state();
-        let w = HostWorld { api: a, eng: e, teamplay: gs.teamplay != 0 };
+        let w = HostWorld::new(a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);
         let reps = s.rep_ids();

@@ -89,7 +89,7 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot.h` `bot_profile_t`; `dll.cpp` `BotFunc_InitProfile`, `BotFunc_ReadProfile`, `BotFunc_WriteProfile`; `bot_profiles.ini` and `BotFunc_AddBot`'s profile choice | `config/profile.rs` | |
 | `bot_rep.cpp` (`CBotReputations` load/save, `GetPlayerRepId`, `GetClientRep`), `bot.h` `CBotReputation(s)`; `bot.cpp` `BotFunc_GetRepArrayNum`, `BotFunc_IncreaseRep`/`DecreaseRep`, `printRep(s)` | `config/rep.rs` | Mod-independent upstream, so TS keeps it |
 | `bot_menu.{h,cpp}` `SetupMenus` (TS menus), `CBotMenu`, `CBotMenuItem` (`Render`, `Activate`) | `config/menu.rs` | NS's add/kick-to-team menus dropped |
-| `bot_commands.{h,cpp}` `CBotCvar`, `CBotCvarList`, `SetupCommands`, every command class and help text, `BotFunc_AddBot`'s arguments and TS team (`mp_teamlist`) choice, `RCBot_ServerCommand`; `dll.cpp` `ClientCommand`'s `rcbot`/`menuselect` dispatch; `globals.cpp` `ReadConfig`'s dispatch; `bot_menu.cpp` `BotMenu_Func_*` | `config/commands.rs` | Side effects through `CommandHost` (`Effect`, `Print`). NS `config` settings, `util buildres/buildcomm`, the WhichBot/GraveBot `waypoint save` converters dropped; `+rcbot_force_grip` left to the host |
+| `bot_commands.{h,cpp}` `CBotCvar`, `CBotCvarList`, `SetupCommands`, every command class and help text, `BotFunc_AddBot`'s arguments and TS team (`mp_teamlist`) choice, `RCBot_ServerCommand`; `dll.cpp` `ClientCommand`'s `rcbot`/`menuselect` dispatch; `globals.cpp` `ReadConfig`'s dispatch; `bot_menu.cpp` `BotMenu_Func_*` | `config/commands.rs` | Side effects through `CommandHost` (`Effect`, `Print`). NS `config` settings, `util buildres/buildcomm`, the WhichBot/GraveBot `waypoint save` converters dropped; `±rcbot_force_grip`'s access check here, its grip in the host |
 | `bot.h` `CBotTask`, `CBotTasks` (schedules, front insertion, path hand-over) | `bot/tasks.rs` | Only the tasks a TS bot creates |
 | `bot.h` `CRememberPosition(s)` | `bot/remember.rs` | |
 | `bot.cpp` `CBot::Think`, `SpawnInit`, `DoTasks` (`FIND_PATH`, `NORMAL_ATTACK` (TS), `SEARCH_FOR_ENEMY`, `RELOAD`, `WAIT_AND_FACE_VECTOR`, `FACE_VECTOR`, `MOVE_TO_VECTOR`, `PICKUP_ITEM`, `USE`, `WAIT`, `DEFEND`, `LISTEN_TO_SOUND`, `CHANGE_WEAPON`, `DROP_WEAPON`, `CROUCH`), `LookForNewTasks` (TS), `SwitchWeapon`, `CanPickup`; `util.cpp` `UTIL_UpdateSounds`, `UTIL_IsFacingEntity`; `globals.cpp` `StartFrame`'s bot loop (kick, kill, think, move) | `bot/think.rs`, `bot/manager.rs` | `Bot::frame` |
@@ -105,7 +105,7 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot_client.cpp` `BotClient_Generic_DeathMessage`'s events; `engine.cpp` `pfnEmitSound`'s loop; `dll.cpp` `DispatchTouch`, `ClientCommand`'s `say`; `globals.cpp` `StartFrame`'s leave-the-game part | `bot/manager.rs` | |
 | `bot.h` `CBotCam`; `dll.cpp` `CBotCam::Think`, `TuneIn`, `TuneOff`, `Spawn`, `Clear` | `bot/botcam.rs`, `host` | |
 | `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs` | |
-| `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config, `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam` | `host` | Plugin callbacks and API calls |
+| `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config and `NON_TS_TEAMPLAY` (`tm_` maps), `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam`, `ClientCommand`'s `±rcbot_force_grip` with `CClient::Think`'s grip, `UTIL_FacingEnt`, `UTIL_getEntityInFront` | `host` | Plugin callbacks and API calls |
 
 ### Waiting for the port
 
@@ -113,6 +113,7 @@ callback that finds the state busy is queued and runs before the next frame.
 |---|---|---|
 | The TS objectives (`TSObjective` messages, `m_TSObjectives`: team 1 defends one, team 2 uses its `ts_hack`/`ts_bomb`) in `LookForNewTasks` | plugin API v3 doesn't report them (the-specialistsmod-rs#117) | `TODO(the-specialistsmod-rs#117)` in `bot/think.rs` |
 | `m_iTeamScores` (`TeamScore`) in the death fitness | plugin API v3 doesn't report team scores (the-specialistsmod-rs#117); 0 until then | `TODO(the-specialistsmod-rs#117)` in `host/src/bots.rs` |
+| `util givetsweapon` (`UTIL_makeTSweapon`: a `ts_groundweapon` with `tsweaponid`, `wextraclip`, `wduration` keys) and `util explo` (`ExplosionCreate`: an `env_explosion` with `iMagnitude`) | plugin API v3 can create an entity and run its `Spawn`/`Use` (ham) but not set its keys (`DispatchKeyValue`); not filed with the port yet | `TODO(plugin API)` in `host/src/commands.rs`; they say they aren't available |
 
 Upstream RCBot has no capture-the-briefcase code for TS (its `m_bHasFlag` logic is TFC's and
 Opposing Force's), so CTB maps are played as teamplay maps: end-level waypoints.
@@ -250,7 +251,9 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   `run_cmd`, `FakeClientCommand` is `bot_command`, `ClientKill` is the `kill` command, the kick is
   `kick_bot`, and the weapon switch is `select_weapon` (upstream's `CmdStart` with `weaponselect`,
   which TS 3.0 ignores, so RCBot never switched). Teams are the port's rules team
-  (`PlayerInfo::team`; upstream compared `model` keys, which TS 3.0's teams don't use). What the
+  (`PlayerInfo::team`; upstream compared `model` keys, which TS 3.0's teams don't use), except on
+  a `tm_` map the game doesn't run as teamplay (upstream's `NON_TS_TEAMPLAY`, which forces
+  `m_bTeamPlay`): there every team is 0, so the bots compare `model` keys as upstream does. What the
   TS user messages told the bot comes from `PlayerInfo`: `WeaponInfo` when the weapon, clip or
   reserve changes, `TSState` as the stunt state. Damage comes from `player_damaged` (the bot
   faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
@@ -258,6 +261,8 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **A TS gun's max clip is the largest clip seen** (`checkMaxClip`'s intent; upstream resets it
   on every `WeaponInfo`, §5.49), so an empty gun needs a reload and a fighting bot reloads or
   switches as upstream's TS code says. `CanReload`/`LowOnAmmo` stay false (`m_iAmmo1`).
+* **The force grip** holds the entity in front of the player's view (upstream: along a stale
+  `gpGlobals->v_forward`, §5.71), and ends when either player leaves.
 * **Kung fu is 38** everywhere (`TSWeapon::KungFu`); upstream also uses 36, TS 3.0's Contender
   (§5.48).
 * **The loadout**: `UTIL_makeTSweapon` spawned the three GA-picked weapons for free at once; the
@@ -512,6 +517,11 @@ Found while porting; not filed upstream.
 70. **TS bots never switch weapons by RCBot's logic**, a consequence of 49: the only TS switch
     (`Think`, an empty clip while fighting) needs `ClipIsEmpty`, which an empty TS gun never is.
     TS itself changes weapons (a dropped empty gun, a pickup). Fixed with 49.
+71. **The force grip holds the entity along the last computed direction** (`CClient::Think`,
+    `client.cpp:234`): the end point is built from `gpGlobals->v_forward` before
+    `UTIL_MakeVectors(pev->v_angle)`, so from whatever the previous `MakeVectors` (any bot's or
+    client's) left there. **Fixed** (the player's view). `+rcbot_force_grip` also compares the
+    access bit set with 9 as a number (`dll.cpp:946`); kept.
 
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
@@ -577,7 +587,8 @@ those by going through the port's own code when that code is ported.
   a momentary button held while its door moves, grenade-throw waypoints failing in TS, touching
   a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation
   (and the priority quirk), reputation after a death, sound kinds and hearing range, chat lines
-  (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, and the loadout
+  (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, `tm_` maps' model
+  teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
   bought before each spawn; unit tests cover the
   task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,

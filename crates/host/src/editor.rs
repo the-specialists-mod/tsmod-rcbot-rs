@@ -29,7 +29,7 @@ pub fn send(s: &State, e: Engine, player: u32, events: Vec<EditorEvent>) {
 
 pub fn frame(s: &mut State, a: Api, e: Engine) {
     let now = e.time();
-    let w = HostWorld { api: a, eng: e, teamplay: false };
+    let w = HostWorld::new(a, e);
     let editing: Vec<(u32, bool, bool, bool, bool)> = s
         .clients
         .iter()

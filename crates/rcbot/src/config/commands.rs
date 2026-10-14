@@ -12,7 +12,7 @@
 //! TS only: `config` keeps every TS setting and drops NS's (`marine_auto_build`,
 //! `abnormal_game`, `not_ns3final`, `blinking`, `wait_at_res`, `gorge_amount`,
 //! `wall_stick_tolerance`, `u_*`); `util` drops `buildres`/`buildcomm`; `waypoint save` drops
-//! the WhichBot (NS) and GraveBot converters (design §2). `+rcbot_force_grip` is the host's.
+//! the WhichBot (NS) and GraveBot converters (design §2). `+rcbot_force_grip`'s effect is the host's.
 
 use super::client::{PlayerId, ToolTip};
 use super::cstr::{atof_f32, atoi, f2};
@@ -22,6 +22,9 @@ use super::{BOT_USERS_FILE, BOT_VER, Clients, Config, flags};
 use crate::Random;
 use crate::math::Vector;
 use crate::nav::flags as wf;
+
+/// `RCBOT_ACCESS_FORCE_GRIP` (`bot_const.h`): the access level `+rcbot_force_grip` needs.
+pub const RCBOT_ACCESS_FORCE_GRIP: i32 = 9;
 
 /// `BOT_COMMAND_ACCESS_*` (`bot_commands.h`): the access groups. A user's access level is a set
 /// of these bits; a command needs any one of its bits (`ALLOWED`, 0: everyone).
@@ -476,6 +479,15 @@ pub enum Effect {
         bot: PlayerId,
         /// Who reads it.
         to: Option<PlayerId>,
+    },
+    /// `+rcbot_force_grip` (`grip`: the client grips the player or monster it faces,
+    /// `UTIL_FacingEnt`, or nothing) and `-rcbot_force_grip` (lets go: `FL_FROZEN` off,
+    /// `DROP_TO_FLOOR`). While gripped, `CClient::Think` holds the entity in front of the player.
+    ForceGrip {
+        /// Who grips.
+        player: PlayerId,
+        /// `+` or `-`.
+        grip: bool,
     },
     /// `util teleport_ent`: `SET_ORIGIN` of the (non-world) entity in front of the player.
     TeleportEntityInFront {
@@ -1794,6 +1806,18 @@ pub fn client_command(
             return Some(CvarState::Accessed);
         }
         state = Some(run(ctx, host, client, CommandId::MenuSelect, [args[0], args[1], args[2], args[3]]));
+    } else if pcmd == "+rcbot_force_grip" || pcmd == "-rcbot_force_grip" {
+        // "little force grip thing, a bit messy!!!": the access *level* is compared with
+        // `RCBOT_ACCESS_FORCE_GRIP` as a number, though it is a set of bits. Kept.
+        let level = client.and_then(|i| ctx.clients.get(i)).map_or(0, |c| c.access_level);
+        state = Some(if level < RCBOT_ACCESS_FORCE_GRIP {
+            CvarState::NeedAccess
+        } else {
+            if let Some(p) = player {
+                host.apply(Effect::ForceGrip { player: p, grip: pcmd.starts_with('+') });
+            }
+            CvarState::Accessed
+        });
     } else if pcmd == super::BOT_COMMAND_ACCESS && (host.is_dedicated_server() || player != ctx.clients.listen_server) {
         let level = client.and_then(|i| ctx.clients.get(i)).map_or(0, |c| c.access_level);
         state = Some(match CommandId::lookup(args[0]) {
@@ -2094,6 +2118,20 @@ mod tests {
         assert_eq!(w.with(|ctx, host| client_command(ctx, host, Some(0), "say", ["hi", "", "", "", ""])), None);
         assert_eq!(w.with(|ctx, host| client_command(ctx, host, Some(0), "addbots", ["", "", "", "", ""])), None);
         assert!(w.texts().last().unwrap().starts_with("Tip: "));
+    }
+
+    #[test]
+    fn force_grip_needs_level_nine() {
+        let mut w = World::new();
+        let grip = |w: &mut World, c: &str| w.with(|ctx, host| client_command(ctx, host, Some(0), c, ["", "", "", "", ""]));
+        assert_eq!(grip(&mut w, "+rcbot_force_grip"), Some(CvarState::NeedAccess));
+        assert!(w.host.effects.iter().all(|e| !matches!(e, Effect::ForceGrip { .. })));
+        // A number, not a bit: 9 or more (any level with a group above `CONFIG`) will do.
+        w.clients.get_mut(0).unwrap().access_level = RCBOT_ACCESS_FORCE_GRIP;
+        assert_eq!(grip(&mut w, "+rcbot_force_grip"), Some(CvarState::Accessed));
+        assert_eq!(grip(&mut w, "-rcbot_force_grip"), Some(CvarState::Accessed));
+        let grips: Vec<_> = w.host.effects.iter().filter(|e| matches!(e, Effect::ForceGrip { .. })).cloned().collect();
+        assert_eq!(grips, [Effect::ForceGrip { player: PlayerId(1), grip: true }, Effect::ForceGrip { player: PlayerId(1), grip: false }]);
     }
 
     #[test]
