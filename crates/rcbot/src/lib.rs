@@ -18,7 +18,7 @@
 //!   `bot_ga.cpp`, `perceptron.cpp`, `bot_nn.cpp`, `som.cpp`, `bits.cpp`).
 //!
 //! RCBot's licence: GPL-2.0-or-later with a linking exception for the HL engine and MODs; this port
-//! is GPL-3.0-or-later and keeps that exception (`LICENSE-EXCEPTION.txt`).
+//! is GPL-3.0-or-later and keeps that exception (`GPL-EXCEPTION.txt`).
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 

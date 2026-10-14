@@ -75,6 +75,10 @@ cargo xtask e2e      # on the port's engine roots (~/games): rcbot bots join, mo
 ## Licence
 
 GPL-3.0-or-later ([LICENSE](LICENSE)) with RCBot's exception for linking with the Half-Life
-engine and MODs ([LICENSE-EXCEPTION.txt](LICENSE-EXCEPTION.txt)). RCBot itself is
+engine and MODs ([GPL-EXCEPTION.txt](GPL-EXCEPTION.txt)). RCBot itself is
 GPL-2.0-or-later with that exception. The library is loaded by the port at runtime and is never
 linked into the port's own libraries.
+
+The port's plugin API crate `ts-plugin-api` (a dependency from the-specialistsmod-rs) is
+MIT-licensed. MIT is compatible with the GPL, so the built library is is distributed under the
+GPL as a whole. Keep the API crate's MIT notice with it.
