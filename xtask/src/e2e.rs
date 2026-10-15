@@ -5,9 +5,14 @@
 //! `../rust-hlmod-the-specialists`), then `dist/<platform>/` over `<root>/ts/` (the library in
 //! `dlls/`, the data in `tsmod/rcbot/`). A dedicated server starts on ts_dojo; its first server
 //! config selects `ts_bot_backend rcbot` and changes the map (the backend is read at map start).
-//! The second adds six bots (`ts_bot_quota 5` and `addbot`), selects `ts_bot_backend native` for
-//! the next map and sets `mp_timelimit 2`, so after two minutes of RCBot on ts_dojo the game
-//! changes to the next map of the cycle with the native bots.
+//! The second adds six bots (`ts_bot_quota 5` and `addbot`), sets `mp_timelimit 2` and makes the
+//! third the map change config (`mapchangecfgfile`, all three engines), so after two minutes of
+//! RCBot on ts_dojo the game changes to the next map of the cycle, where the third selects
+//! `ts_bot_backend native`. The port reloads the map when the backend changes (its `reload.rs`),
+//! so `native` can't be selected ahead on the RCBot map: it would reload ts_dojo with the native
+//! bots at once. Nor can the third be the next server config: after a `changelevel` from the
+//! server config, the Steam engines run the next map's server config twice, so it would run on
+//! the RCBot map too.
 //!
 //! The log must show the plugin loaded, the backend selected, the waypoints loaded, bots created
 //! and run, a bot that moved more than 64 units and one that touched waypoints, a kill by one of
@@ -183,9 +188,12 @@ fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
     .map_err(|e| e.to_string())?;
     std::fs::write(
         gamedir.join("xtask_rcbot2.cfg"),
-        "// Written by tsmod-rcbot-rs cargo xtask e2e.\nts_bot_quota 5\naddbot\nts_bot_backend native\nmp_timelimit 2\n",
+        "// Written by tsmod-rcbot-rs cargo xtask e2e.\nts_bot_quota 5\naddbot\nmp_timelimit 2\nmapchangecfgfile xtask_rcbot3.cfg\n",
     )
     .map_err(|e| e.to_string())?;
+    // Run at the next map's start: the port reloads that map with the native backend.
+    std::fs::write(gamedir.join("xtask_rcbot3.cfg"), "// Written by tsmod-rcbot-rs cargo xtask e2e.\nts_bot_backend native\n")
+        .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(root.log_path());
     let out_path = repo.join("target").join(format!("e2e-{}.log", root.name));
     let out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
@@ -193,8 +201,8 @@ fn one(root: &Root, port: u16, repo: &Path) -> Result<bool, String> {
     cmd.stdin(Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out);
     let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", root.name))?;
     let start = Instant::now();
-    // Two minutes of RCBot, the intermission, then the native bots on the next map.
-    let limit = Duration::from_secs(if root.windows { 300 } else { 170 });
+    // Two minutes of RCBot, the intermission, then the next map reloaded with the native bots.
+    let limit = Duration::from_secs(if root.windows { 300 } else { 180 });
     let mut up = true;
     while start.elapsed() < limit {
         std::thread::sleep(Duration::from_millis(500));

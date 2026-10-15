@@ -619,8 +619,10 @@ those by going through the port's own code when that code is ported.
 * **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 5 min): installs
   the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
   `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects
-  `ts_bot_backend rcbot`, changes the map and adds six bots (quota 5 and `addbot`), selects
-  `native` for the next map and sets `mp_timelimit 2`. Checks: the plugin loaded, the backend
+  `ts_bot_backend rcbot`, changes the map and adds six bots (quota 5 and `addbot`), sets
+  `mp_timelimit 2` and selects `native` from the next map's `mapchangecfgfile` (the port reloads
+  the map when `ts_bot_backend` changes, so selecting it on the RCBot map would end RCBot's run at
+  once). Checks: the plugin loaded, the backend
   selected, ts_dojo's 154 waypoints loaded, bots created and run, one moved more than 64 units,
   one touched three waypoints, a kill by one of RCBot's bots (the plugin's `kill` lines), a
   living bot's weapon changing, then after the time limit the next map with the native backend
