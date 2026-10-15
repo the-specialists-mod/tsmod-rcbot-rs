@@ -570,7 +570,7 @@ impl CommandHost for Host<'_> {
             String::new()
         };
         let m = std::ffi::CString::new(model).unwrap_or_default();
-        let idx = crate::create(self.s, self.api, self.e, "", m.as_ptr(), 0.0);
+        let idx = crate::create(self.s, self.api, self.e, c"", m.as_ptr(), 0.0);
         if idx > 0 { CvarState::Accessed } else { CvarState::Error }
     }
 

@@ -152,12 +152,12 @@ impl Api {
         self.ham_execute(HAM_TAKEDAMAGE, victim, &args, INT).0
     }
 
-    /// `create_bot`: the index, or a status below 1.
-    pub fn create_bot(&self, name: &str, model: *const c_char, skill: f32) -> c_int {
-        let n = cstring(name);
+    /// `create_bot`: the index, or a status below 1. `name` is bytes (the API's strings aren't
+    /// UTF-8: a name typed with `addcustombot` reaches the netname as typed).
+    pub fn create_bot(&self, name: &CStr, model: *const c_char, skill: f32) -> c_int {
         // SAFETY: the name is read during the call; `model` is the server's string for the
         // `add_bot` call we are in (or NULL-free empty).
-        unsafe { (self.table.create_bot)(self.id, n.as_ptr(), model, skill) }
+        unsafe { (self.table.create_bot)(self.id, name.as_ptr(), model, skill) }
     }
 
     /// `kick_bot`.

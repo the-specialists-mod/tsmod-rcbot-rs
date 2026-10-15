@@ -30,7 +30,7 @@ use rcbot::learn::GlobalLearnedData;
 use rcbot::nav::Waypoints;
 use rcbot::weapons::{WeaponPresets, Weapons};
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -610,18 +610,22 @@ extern "C" fn player_damaged(victim: c_int, attacker: c_int, _inflictor: c_int, 
 /// The rest of `BotFunc_AddBot` once the port asks for a bot: a profile from
 /// `bot_profiles.ini`, the fake client, the `CBot` with its brain, learned data and
 /// reputations, the greeting.
-pub(crate) fn create(s: &mut State, a: Api, e: Engine, name: &str, model: *const c_char, skill: f32) -> c_int {
+pub(crate) fn create(s: &mut State, a: Api, e: Engine, name: &CStr, model: *const c_char, skill: f32) -> c_int {
     let mut profile = bots::profile_for(s, e, None);
     if skill > 0.0 {
         profile.skill = if skill <= 1.0 { (skill * 100.0) as i32 } else { skill as i32 };
     }
     s.added += 1;
-    let name = if name.is_empty() {
-        profile.bot_name.clone().unwrap_or_else(|| rcbot::config::profile::BOT_DEFAULT_NAME.into())
+    // A given name goes to `create_bot` as the server's bytes (a CP1252 byte stays one, as
+    // RCBot's `strcpy`); the bot's own copy (chat, HAL, logs) is its lossy text.
+    let cname = if name.is_empty() {
+        let n = profile.bot_name.clone().unwrap_or_else(|| rcbot::config::profile::BOT_DEFAULT_NAME.into());
+        CString::new(n.replace('\0', " ")).unwrap_or_default()
     } else {
-        name.into()
+        name.to_owned()
     };
-    let idx = a.create_bot(&name, model, profile.skill as f32 / 100.0);
+    let name = cname.to_string_lossy().into_owned();
+    let idx = a.create_bot(&cname, model, profile.skill as f32 / 100.0);
     if idx <= 0 {
         a.log(log::WARNING, &format!("create_bot \"{name}\": {idx}"));
         return idx;
@@ -638,8 +642,8 @@ pub(crate) fn create(s: &mut State, a: Api, e: Engine, name: &str, model: *const
 /// `addbot`, `addcustombot`, the quota.
 unsafe extern "C" fn add_bot(name: *const c_char, model: *const c_char, skill: f32) -> c_int {
     // SAFETY: the server passes NUL-terminated strings for the call.
-    let name = if name.is_null() { String::new() } else { unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned() };
-    with_state(None, |s, a, e| create(s, a, e, &name, model, skill)).unwrap_or(0)
+    let name = if name.is_null() { c"" } else { unsafe { CStr::from_ptr(name) } };
+    with_state(None, |s, a, e| create(s, a, e, name, model, skill)).unwrap_or(0)
 }
 
 extern "C" fn activate() {
