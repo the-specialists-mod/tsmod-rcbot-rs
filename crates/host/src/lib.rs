@@ -1,4 +1,4 @@
-//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v3,
+//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v4,
 //! the-specialistsmod-rs#104), and the only crate in this workspace allowed `unsafe` (every other
 //! crate is `#![deny(unsafe_code)]`, which `cargo xtask lint` checks).
 //!
@@ -79,6 +79,10 @@ pub struct State {
     pub(crate) map: String,
     pub(crate) active: bool,
     pub(crate) sprite: i32,
+    /// `m_sModelIndexFireball` (`sprites/zerogxplode.spr`, `util explo`).
+    pub(crate) fireball: i32,
+    /// `m_iTeamScores`: the `TeamScore` values (`GameState::team_scores`), refreshed every frame.
+    pub(crate) team_scores: [i32; 4],
     pub(crate) editor: editor::Editor,
     pub(crate) squads: Squads,
     pub(crate) botcam: BotCam,
@@ -261,6 +265,8 @@ extern "C" fn game_init() {
         map: String::new(),
         active: false,
         sprite: 0,
+        fireball: 0,
+        team_scores: [0; 4],
         editor: editor::Editor::default(),
         squads: Squads::default(),
         botcam: BotCam::default(),
@@ -298,7 +304,9 @@ extern "C" fn precache() {
     let Some(e) = api().and_then(|a| a.engine()) else { return };
     let sprite = e.precache_model(c"sprites/lgtning.spr");
     e.precache_model(c"models/mechgibs.mdl");
-    with_state(None, |s, _, _| s.sprite = sprite);
+    // `CBotGlobals::MapInit`'s `m_sModelIndexFireball`.
+    let fireball = e.precache_model(c"sprites/zerogxplode.spr");
+    with_state(None, |s, _, _| (s.sprite, s.fireball) = (sprite, fireball));
 }
 
 /// `ServerActivate`: `WaypointLoad` for the map, and the visibility table.
@@ -430,6 +438,8 @@ extern "C" fn start_frame() {
             return;
         }
         rejoin_frame(s, a, e);
+        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages.
+        s.team_scores = a.game_state().team_scores;
         let w = HostWorld::new(a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);

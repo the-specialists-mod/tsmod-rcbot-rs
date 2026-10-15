@@ -164,8 +164,16 @@ impl Host<'_> {
         self.world().entity(p.0)
     }
 
-    fn not_ported(&mut self, what: &str) {
-        self.print(Print::Message(None), &format!("{what} is not available yet in this port of RCBot"));
+    /// `util explo`: the view trace (4096 units), its beam to the caller
+    /// (`WaypointDrawBeam(…, 20, 10, 200, 1, 1, 160, 10)`), and [`explosion_create`] 4 units
+    /// short of where it ends. Upstream's `UTIL_BotScreenShake` is left out (design §4).
+    fn explosion(&mut self, player: PlayerId, magnitude: f32, damage: bool) {
+        let Some(p) = self.player_entity(player) else { return };
+        let (forward, _) = rcbot::bot::make_vectors(p.v_angle);
+        let src = p.origin + p.view_ofs;
+        let (_, end, _) = self.e.trace_line(src, src + forward * 4096.0, false, false, Some(player.0 as i32));
+        self.e.beam(player.0 as i32, src, end, self.s.sprite, 20, 10, [200, 1, 1], 160, 10);
+        explosion_create(self.api, self.e, end - forward * 4.0, player.0 as i32, magnitude, damage, self.s.fireball);
     }
 
     /// The squad `leader` leads (`FindSquadByLeader`).
@@ -297,13 +305,8 @@ impl CommandHost for Host<'_> {
                     b.go_to_waypoint(waypoint);
                 }
             }
-            // TODO(plugin API): `UTIL_makeTSweapon` and `ExplosionCreate` create a `ts_groundweapon`
-            // / `env_explosion` and set its keys (`DispatchKeyValue`) before spawning it; plugin
-            // API v3 can create an entity and run `Spawn`/`Use` (ham) but not set its keys, and
-            // `buy` only fills the next spawn's loadout (the bots' own loadouts use it, design §4).
-            // Needs an API addition (design §2, "Waiting for the port").
-            Effect::GiveTsWeapon { .. } => self.not_ported("givetsweapon"),
-            Effect::Explosion { .. } => self.not_ported("explo"),
+            Effect::GiveTsWeapon { player, weapon } => give_ts_weapon(self.api, self.e, player, weapon),
+            Effect::Explosion { player, magnitude, damage } => self.explosion(player, magnitude, damage),
             Effect::KillBot(p) => {
                 if let Some(b) = self.s.bots.get_mut(p.0) {
                     b.kill = true;
@@ -584,4 +587,85 @@ fn view_trace(w: &HostWorld, player: u32, dist: f32) -> Option<u32> {
     let (forward, _) = rcbot::bot::make_vectors(p.v_angle);
     let src = p.origin + p.view_ofs;
     w.trace_line(src, src + forward * dist, rcbot::nav::Monsters::DontIgnore, rcbot::nav::Glass::DontIgnore, Some(player)).hit
+}
+
+/// `UTIL_makeTSweapon(owner, id)`: a `ts_groundweapon` of TS weapon `weapon` with 200 extra
+/// rounds that doesn't respawn (`wextraclip 200`, `wduration -1`, spawnflags `1 << 30`, as keys
+/// and then set again), spawned, moved to the owner and used by them at once (`DispatchUse`), then
+/// marked `FL_KILLME`. Nothing for weapon 0.
+fn give_ts_weapon(a: Api, e: Engine, player: PlayerId, weapon: i32) {
+    if weapon == 0 {
+        return;
+    }
+    let Some(w) = a.create_entity(c"ts_groundweapon") else { return };
+    for (key, value) in
+        [("tsweaponid", weapon.to_string()), ("wextraclip", "200".into()), ("wduration", "-1".into()), ("spawnflags", "1073741824".into())]
+    {
+        a.entity_key_value(w, key, &value);
+    }
+    if let Some(ed) = e.edict(w) {
+        e.vars_mut(ed, |v| v.spawnflags = 1 << 30);
+    }
+    if a.spawn_entity(w) != ts_plugin_api::OK {
+        return;
+    }
+    let Some(origin) = e.edict(player.0 as i32).map(|p| e.vars(p, |v, _| Vector::from(v.origin))) else { return };
+    e.set_origin(w, origin);
+    a.use_entity(w, player.0 as i32);
+    if let Some(ed) = e.edict(w) {
+        e.vars_mut(ed, |v| v.flags |= goldsrc_sys::FL_KILLME as i32);
+    }
+}
+
+/// `ExplosionCreate(center, angles, owner, magnitude, doDamage)` (upstream's live branch): a
+/// `TE_EXPLOSION` of the fireball at `magnitude` / 10 scale (at most 255), and with `damage`
+/// [`radius_damage`] of `magnitude` within `magnitude / 2`, `DMG_BLAST`, by the owner.
+fn explosion_create(a: Api, e: Engine, center: Vector, owner: i32, magnitude: f32, damage: bool, fireball: i32) {
+    e.temp_explosion(center, fireball, magnitude as i32);
+    if damage {
+        radius_damage(a, e, center, owner, magnitude, magnitude / 2.0, 1 << 6);
+    }
+}
+
+/// RCBot's own `RadiusDamage(vecSrc, inflictor, attacker, damage, radius, CLASS_NONE, bits)`:
+/// every entity within `radius` that takes damage, on the source's side of the water line, that
+/// the blast sees (the trace to its `BodyTarget` reaches it), takes `damage` less `damage /
+/// radius` per unit of distance (`TakeDamage` through the API, with the plugins' hooks) and is
+/// pushed away at that speed.
+fn radius_damage(a: Api, e: Engine, mut src: Vector, owner: i32, damage: f32, radius: f32, bits: i32) {
+    const CONTENTS_WATER: i32 = -3;
+    let falloff = if radius != 0.0 { damage / radius } else { 1.0 };
+    let in_water = e.point_contents(src) == CONTENTS_WATER;
+    src.z += 1.0;
+    for i in e.entities_in_sphere(src, radius) {
+        let Some(ed) = e.edict(i) else { continue };
+        let (takes, waterlevel, origin, centre, view_ofs, client) = e.vars(ed, |v, _| {
+            let centre = (Vector::from(v.absmin) + Vector::from(v.absmax)) * 0.5;
+            (
+                v.takedamage != 0.0,
+                v.waterlevel,
+                Vector::from(v.origin),
+                centre,
+                Vector::from(v.view_ofs),
+                v.flags & goldsrc_sys::FL_CLIENT as i32 != 0,
+            )
+        });
+        if !takes || (in_water && waterlevel == 0) || (!in_water && waterlevel == 3) {
+            continue;
+        }
+        // `BodyTarget(vecSrc)`: `Center()`, a player's raised by its view offset times a random
+        // 0.5..1.1 (`CBasePlayer::BodyTarget`).
+        let spot = if client { centre + view_ofs * e.random_float(0.5, 1.1) } else { centre };
+        let (fraction, end, hit, start_solid) = e.trace_line_solid(src, spot, false, Some(owner));
+        if !(fraction == 1.0 || (!hit.is_null() && e.index_of(hit) == i)) {
+            continue;
+        }
+        // Stuck inside it: the distance is 0.
+        let end = if start_solid { src } else { end };
+        let adjusted = (damage - (src - end).length() * falloff).max(0.0);
+        a.take_damage(i, owner, owner, adjusted, bits);
+        if let Some(ed) = e.edict(i) {
+            e.vars_mut(ed, |v| v.velocity = ((origin - src).normalize() * adjusted).to_array());
+        }
+    }
 }

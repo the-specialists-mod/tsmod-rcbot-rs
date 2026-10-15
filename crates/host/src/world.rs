@@ -135,6 +135,21 @@ impl BotWorld for HostWorld {
         HostWorld::model_teams(self)
     }
 
+    /// The HUD's objective list as the bot reads it (its team's texts), the ones that can still
+    /// be completed (design §4).
+    fn ts_objectives(&self, index: u32) -> Vec<rcbot::bot::TsObjective> {
+        self.api
+            .objectives(index as i32)
+            .into_iter()
+            .filter(|o| o.active != 0)
+            .map(|o| rcbot::bot::TsObjective {
+                id: o.id,
+                origin: Vector::from(o.origin),
+                name: o.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect(),
+            })
+            .collect()
+    }
+
     fn player_model(&self, index: u32) -> String {
         self.eng.edict(index as i32).map(|e| self.eng.info_key(e, c"model")).unwrap_or_default()
     }

@@ -286,6 +286,23 @@ pub trait BotWorld: World {
         let _ = name;
         0.0
     }
+    /// The TS objectives player `index` has been told of (`m_TSObjectives`, from the `TSObjective`
+    /// messages): the HUD's objective list that can still be completed. None by default.
+    fn ts_objectives(&self, index: u32) -> Vec<TsObjective> {
+        let _ = index;
+        Vec::new()
+    }
+}
+
+/// `TSObjective`: an objective the `TSObjective` message listed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TsObjective {
+    /// `m_iId`: the message's index.
+    pub id: i32,
+    /// `m_vOrigin`: the objective's centre.
+    pub origin: Vector,
+    /// `m_szName`: its text for the bot's team.
+    pub name: String,
 }
 
 /// The string field [`BotWorld::find_entities`] matches.

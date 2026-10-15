@@ -412,6 +412,38 @@ impl Bot {
             && dst.z >= e.absmin.z
     }
 
+    /// `LookForNewTasks`' TS objectives: a random one of the objectives the bot was told of
+    /// ([`BotWorld::ts_objectives`], upstream's `m_TSObjectives.Random()`), unless the bot roams
+    /// instead (1 in 3 on team 1, 1 in 11 on team 2): the path to its nearest waypoint, then team 1
+    /// `DEFEND`s it and team 2 `USE`s a `ts_hack` / `ts_bomb` within 100 units of that waypoint for
+    /// 9 s. False when there is nothing to do (no objective, roaming, no waypoint): the end-level
+    /// waypoints come next.
+    fn objective_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random, id: i32) -> bool {
+        let objectives = w.ts_objectives(self.index);
+        if objectives.is_empty() {
+            return false;
+        }
+        let obj = &objectives[rng.random_long(0, objectives.len() as i32 - 1) as usize];
+        let wpt = self.nearest_waypoint(g, w, obj.origin, REACHABLE_RANGE, self.last_failed_waypoint, false, false, true);
+        let team = self.team_number();
+        let roam = (team == 1 && rng.random_long(0, 2) == 0) || (team == 2 && rng.random_long(0, 10) == 0);
+        if roam || wpt == -1 {
+            return false;
+        }
+        self.add_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO));
+        let at = g.waypoints.origin(wpt);
+        let target = w.entities_in_sphere(at, 100.0).into_iter().find_map(|i| {
+            let e = w.entity(i)?;
+            (e.classname == "ts_hack" || e.classname == "ts_bomb").then_some(e)
+        });
+        if team == 1 {
+            self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, Vector::ZERO));
+        } else if let Some(t) = target {
+            self.add_task(Task::new(TaskKind::Use, id, Some(t.handle()), 0, 9.0, Vector::ZERO));
+        }
+        true
+    }
+
     /// `CBot::LookForNewTasks`, TS: pick up the nearest visible weapon or power-up; in teamplay
     /// go to a random end-level waypoint; else roam (follow the squad leader; or a remembered
     /// enemy position half the time, otherwise a random goal).
@@ -444,16 +476,9 @@ impl Bot {
             self.add_task(Task::new(TaskKind::PickupItem, id, h, 0, 0.0, Vector::ZERO));
             self.add_task(Task::new(TaskKind::Use, id, h, 0, 0.0, Vector::ZERO));
             roam = false;
+        } else if w.teamplay() && self.objective_tasks(g, w, rng, id) {
+            roam = false;
         } else if w.teamplay() {
-            // TODO(the-specialistsmod-rs#117): upstream first goes for a random one of the TS
-            // objectives the `TSObjective` messages listed (`m_TSObjectives`: id, origin, name):
-            // the nearest waypoint to it, roaming instead with 1/3 chance on team 1 and 1/11 on
-            // team 2; team 1 then `DEFEND`s it, team 2 `USE`s a `ts_hack`/`ts_bomb` within 100
-            // units for 9 s. Plugin API v3 doesn't report the objectives (`entity_info`'s
-            // OBJECTIVE kind has neither id nor name), so bots only take the end-level waypoints
-            // below until #117 adds them. The list's lifetime goes with them: `SpawnInit` clears
-            // it unless a `TSObjective` came since the last weapon pick
-            // (`BOT_CONDITION_DONT_CLEAR_OBJECTIVES`, removed where `SELECTED_GUN` is set).
             let wpt = g
                 .waypoints
                 .find_random_goal_near(self.me.origin, 4096.0, -1, fl::ENDLEVEL, &self.paths.failed_goals, rng)

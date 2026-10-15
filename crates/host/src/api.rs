@@ -1,11 +1,11 @@
-//! Safe wrappers over the port's plugin API v3 (`ts_plugin_api::PluginApi`) and the engine's
+//! Safe wrappers over the port's plugin API v4 (`ts_plugin_api::PluginApi`) and the engine's
 //! function table it hands out. Every `unsafe` call here passes valid pointers for the call's
 //! duration; the tables themselves are the server's statics and live for the process.
 
 use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use ts_plugin_api::{BotBackend, BotCmd, GameState, OK, PlayerInfo, PluginApi, PluginId};
+use ts_plugin_api::{BotBackend, BotCmd, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, ham};
 
 /// The plugin API table and our plugin id.
 #[derive(Clone, Copy)]
@@ -95,6 +95,61 @@ impl Api {
         // SAFETY: `g` is writable.
         unsafe { (self.table.game_state)(&mut g) };
         g
+    }
+
+    /// `objectives(player)`: the HUD's objective list as `player` reads it.
+    pub fn objectives(&self, player: i32) -> Vec<ObjectiveInfo> {
+        let mut out = vec![ObjectiveInfo::default(); 32];
+        // SAFETY: `out` is writable for its length.
+        let n = unsafe { (self.table.objectives)(player, out.as_mut_ptr(), out.len() as c_int) };
+        out.truncate(usize::try_from(n).unwrap_or(0));
+        out
+    }
+
+    /// `create_entity(classname)`: the new, not yet spawned entity's index.
+    pub fn create_entity(&self, classname: &CStr) -> Option<i32> {
+        // SAFETY: a NUL-terminated name read during the call.
+        let e = unsafe { (self.table.create_entity)(classname.as_ptr()) };
+        (e > 0).then_some(e)
+    }
+
+    /// `entity_key_value(entity, key, value)` (`DispatchKeyValue`): 1 if handled.
+    pub fn entity_key_value(&self, entity: i32, key: &str, value: &str) -> c_int {
+        let (k, v) = (cstring(key), cstring(value));
+        // SAFETY: NUL-terminated strings read during the call.
+        unsafe { (self.table.entity_key_value)(entity, k.as_ptr(), v.as_ptr()) }
+    }
+
+    /// `spawn_entity(entity)` (`DispatchSpawn`): `OK`, or below 0 (the entity is gone).
+    pub fn spawn_entity(&self, entity: i32) -> c_int {
+        (self.table.spawn_entity)(entity)
+    }
+
+    /// `ham_execute` with the hooks (the game's call): `args` are `(kind, int, float)`.
+    fn ham_execute(&self, ham_id: c_int, this: i32, args: &[(c_int, c_int, f32)], ret: c_int) -> (c_int, HamArg) {
+        let mut call = HamCall { ham: ham_id, this, argc: args.len() as c_int, ..Default::default() };
+        for (slot, &(kind, i, f)) in call.args.iter_mut().zip(args) {
+            *slot = HamArg { kind, i, f, ..Default::default() };
+        }
+        call.ret = HamArg { kind: ret, ..Default::default() };
+        // SAFETY: a fully initialised call valid for reads and writes during it.
+        let rc = unsafe { (self.table.ham_execute)(&mut call, 1) };
+        (rc, call.ret)
+    }
+
+    /// `DispatchUse(entity, other)`: `Use(other, other, USE_TOGGLE, 0)`.
+    pub fn use_entity(&self, entity: i32, other: i32) -> c_int {
+        use ham::kind::{ENTITY, FLOAT, INT, VOID};
+        const HAM_USE: c_int = 43;
+        self.ham_execute(HAM_USE, entity, &[(ENTITY, other, 0.0), (ENTITY, other, 0.0), (INT, 3, 0.0), (FLOAT, 0, 0.0)], VOID).0
+    }
+
+    /// `pEntity->TakeDamage(pevInflictor, pevAttacker, flDamage, bitsDamageType)`.
+    pub fn take_damage(&self, victim: i32, inflictor: i32, attacker: i32, damage: f32, bits: c_int) -> c_int {
+        use ham::kind::{ENTITY, FLOAT, INT};
+        const HAM_TAKEDAMAGE: c_int = 9;
+        let args = [(ENTITY, inflictor, 0.0), (ENTITY, attacker, 0.0), (FLOAT, 0, damage), (INT, bits, 0.0)];
+        self.ham_execute(HAM_TAKEDAMAGE, victim, &args, INT).0
     }
 
     /// `create_bot`: the index, or a status below 1.
@@ -258,6 +313,52 @@ impl Engine {
         // SAFETY: the vectors and the result are valid for the call; `skip` is NULL or an edict.
         unsafe { f(s.as_ptr(), e.as_ptr(), flags, skip, &mut tr) };
         (tr.flFraction, Vector::from(tr.vecEndPos), tr.pHit)
+    }
+
+    /// [`trace_line`](Self::trace_line) that also says whether it started in a solid
+    /// (`fStartSolid`).
+    pub fn trace_line_solid(
+        &self,
+        start: Vector,
+        end: Vector,
+        no_monsters: bool,
+        ignore: Option<i32>,
+    ) -> (f32, Vector, *mut edict_t, bool) {
+        let Some(f) = self.f.pfnTraceLine else { return (1.0, end, std::ptr::null_mut(), false) };
+        let skip = ignore.and_then(|i| self.edict(i)).map_or(std::ptr::null_mut(), |e| e.0);
+        let mut tr = TraceResult::default();
+        let (s, e) = (start.to_array(), end.to_array());
+        // SAFETY: the vectors and the result are valid for the call; `skip` is NULL or an edict.
+        unsafe { f(s.as_ptr(), e.as_ptr(), c_int::from(no_monsters), skip, &mut tr) };
+        (tr.flFraction, Vector::from(tr.vecEndPos), tr.pHit, tr.fStartSolid != 0)
+    }
+
+    /// `TE_EXPLOSION` at `center` to the PAS (`ExplosionCreate`'s message): the fireball sprite,
+    /// `scale` in 0.1s (at most 255), framerate 15, no flags.
+    pub fn temp_explosion(&self, center: Vector, sprite: i32, scale: i32) {
+        let f = self.f;
+        let (Some(begin), Some(byte), Some(short), Some(coord), Some(endm)) =
+            (f.pfnMessageBegin, f.pfnWriteByte, f.pfnWriteShort, f.pfnWriteCoord, f.pfnMessageEnd)
+        else {
+            return;
+        };
+        const MSG_PAS: c_int = 4;
+        const SVC_TEMPENTITY: c_int = 23;
+        const TE_EXPLOSION: c_int = 3;
+        let o = center.to_array();
+        // SAFETY: a well-formed temp-entity message to the PAS of `o`, on the engine's thread.
+        unsafe {
+            begin(MSG_PAS, SVC_TEMPENTITY, o.as_ptr(), std::ptr::null_mut());
+            byte(TE_EXPLOSION);
+            coord(center.x);
+            coord(center.y);
+            coord(center.z);
+            short(sprite);
+            byte(scale.min(255));
+            byte(15);
+            byte(0);
+            endm();
+        }
     }
 
     /// `pfnTraceHull(start, end, no_monsters, hull, ignore)`.

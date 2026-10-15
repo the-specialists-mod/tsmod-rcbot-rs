@@ -15,7 +15,7 @@ crates/rcbot     the bot, #![deny(unsafe_code)], no FFI. Engine queries go throu
                  nav::World (traces, point contents), bot::BotWorld (entities, PVS, time),
                  Random (RANDOM_LONG / RANDOM_FLOAT) and config::CommandHost (commands' effects).
 crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe: TSRS_PluginLoad, safe
-                 wrappers over the plugin API v3 and the engine table (api.rs), the traits on
+                 wrappers over the plugin API v4 and the engine table (api.rs), the traits on
                  them (world.rs, commands.rs), RCBot's globals in one State, the per-frame bot
                  loop and the editors' display (lib.rs, editor.rs)
 xtask            build | dist | test | lint | all | e2e
@@ -29,8 +29,9 @@ Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `Way
 branches are kept and every other mod's are removed; where a branch chose between mods
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
-The host uses the port's plugin API v3 (the-specialistsmod-rs#104; `goldsrc-sys` and
-`ts-plugin-api` pinned to the port's `5a8ec94`). It registers the bot backend `rcbot`
+The host uses the port's plugin API v4 (the-specialistsmod-rs#104, #117; `goldsrc-sys` and
+`ts-plugin-api` pinned to the port's `db84e1d`, branch `fix/plugin-api`, from a local checkout
+until it is merged). It registers the bot backend `rcbot`
 (`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
 `client_command`), and the `rcbot_ver` cvar. The plugin's data directory
 (`<gamedir>/tsmod/rcbot/`) is RCBot's bot folder: `bot_weapons.ini`, `bot_config.ini`,
@@ -106,14 +107,14 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot.h` `CBotCam`; `dll.cpp` `CBotCam::Think`, `TuneIn`, `TuneOff`, `Spawn`, `Clear` | `bot/botcam.rs`, `host` | |
 | `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs` | |
 | `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config and `NON_TS_TEAMPLAY` (`tm_` maps), `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam`, `ClientCommand`'s `±rcbot_force_grip` with `CClient::Think`'s grip, `UTIL_FacingEnt`, `UTIL_getEntityInFront` | `host` | Plugin callbacks and API calls |
+| `bot.cpp` `LookForNewTasks`' TS objectives (`m_TSObjectives`: a random one, team 1 `DEFEND`s it, team 2 `USE`s its `ts_hack`/`ts_bomb` for 9 s); `bot_client.cpp` `BotClient_TS_Objective`, `BotClient_Generic_TeamScore` (`m_iTeamScores`) | `bot/think.rs` (`objective_tasks`), `host` | The plugin API's `objectives` and `GameState::team_scores` stand in for the messages (§4) |
+| `util.cpp` `UTIL_makeTSweapon`, `ExplosionCreate`'s live branch (`TE_EXPLOSION`), `RadiusDamage`; `bot_commands.cpp` `util explo` | `host/src/commands.rs` | `create_entity`/`entity_key_value`/`spawn_entity` and `ham_execute(Use, TakeDamage)` |
 
 ### Waiting for the port
 
 | Upstream | Why | Where |
 |---|---|---|
-| The TS objectives (`TSObjective` messages, `m_TSObjectives`: team 1 defends one, team 2 uses its `ts_hack`/`ts_bomb`) in `LookForNewTasks` | plugin API v3 doesn't report them (the-specialistsmod-rs#117) | `TODO(the-specialistsmod-rs#117)` in `bot/think.rs` |
-| `m_iTeamScores` (`TeamScore`) in the death fitness | plugin API v3 doesn't report team scores (the-specialistsmod-rs#117); 0 until then | `TODO(the-specialistsmod-rs#117)` in `host/src/bots.rs` |
-| `util givetsweapon` (`UTIL_makeTSweapon`: a `ts_groundweapon` with `tsweaponid`, `wextraclip`, `wduration` keys) and `util explo` (`ExplosionCreate`: an `env_explosion` with `iMagnitude`) | plugin API v3 can create an entity and run its `Spawn`/`Use` (ham) but not set its keys (`DispatchKeyValue`); not filed with the port yet | `TODO(plugin API)` in `host/src/commands.rs`; they say they aren't available |
+| (none: plugin API v4, the-specialistsmod-rs#117, added the TS objectives, the team scores and entities made from keys) | | |
 
 Upstream RCBot has no capture-the-briefcase code for TS (its `m_bHasFlag` logic is TFC's and
 Opposing Force's), so CTB maps are played as teamplay maps: end-level waypoints.
@@ -300,8 +301,12 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **The e2e log lines**: `kill "<killer>" killed "<victim>"` for a kill by an RCBot bot, and
   `weapon "<bot>" changed <a> -> <b>` for a living bot's weapon changing, are the port's
   additions (`cargo xtask e2e` checks them; the port logs no kills).
-* **`util` toys**: `explo` (the game's `ExplosionCreate`) and `givetsweapon` (a weapon given at
-  once; the port's `buy` only fills the next spawn's loadout) say they aren't available;
+* **`util` toys**: `givetsweapon` makes upstream's `ts_groundweapon` from keys through the plugin
+  API (`create_entity`, `entity_key_value`, `spawn_entity`) and has the player use it
+  (`ham_execute(Ham_Use)`). `explo` draws the beam, sends `TE_EXPLOSION` and runs RCBot's
+  `RadiusDamage` with `TakeDamage` through `ham_execute` (`BodyTarget` as the port's classes have
+  it: the centre, a player's raised by `view_ofs` × 0.5..1.1); upstream's `UTIL_BotScreenShake` is
+  left out, as a plugin can't look up the port's `ScreenShake` message id without registering it.
   `search` prints each entity's index, classname and distance (upstream's NS and TFC fields are
   dropped); `hudtext`, `send_sound` and `teleport_ent` are upstream's.
 * **The HUD menus** are one `ShowMenu` message each, as upstream's `UTIL_ShowMenu`.
@@ -310,6 +315,15 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **Bot names**: the port's quota names its bots; `rcbot addbot` and nameless `addbot` use
   RCBot's default name (`RCBot`). `addcustombot`'s skill (0-1) becomes the profile's skill
   (0-100).
+
+* **TS objectives**: upstream collects the `TSObjective` messages a bot gets into
+  `m_TSObjectives` and clears them at `SpawnInit` unless one came since the last weapon pick
+  (`BOT_CONDITION_DONT_CLEAR_OBJECTIVES`). The port asks the server for the HUD's list as the bot
+  reads it (`objectives`, plugin API v4) each time, so the list is always the current one, and
+  keeps only the objectives that can still be completed (`ObjectiveInfo::active`: not frozen,
+  a giver that hasn't fired), which the messages can't tell.
+* **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
+  (the bot's `team`); see §5 for upstream's indexing.
 
 ## 5. Upstream bugs found
 
@@ -533,6 +547,11 @@ Data: `ts_hammertime_d1.rcw` names its map `ts_hammertime2_d1`, so it never load
 The research for #104 lists RCBot's TS bugs elsewhere (weapon switching through `weaponselect`,
 model-based teams, the 2.x `WStatus` kung fu id, free weapons instead of buying). The port fixes
 those by going through the port's own code when that code is ported.
+
+* **`TeamScore` and TS's team names** (`BotClient_Generic_TeamScore`): the team index comes from
+  TFC's colour names (`Blue`, `Red`, `Green`, `Yellow`), so every TS team's score lands in slot 0
+  (the last message wins) and the death fitness compares the wrong team's score. The port reads the
+  scores by rules team.
 
 ## 6. Tests
 

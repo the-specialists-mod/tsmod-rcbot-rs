@@ -15,8 +15,8 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | `bot_weapons.ini` (TS section) and the TS weapon table | done |
 | Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Chat: MegaHAL (byte-compatible brains), `bot_chat.ini`, replies | done; checked against RCBot's own code |
-| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set and `±rcbot_force_grip` (side effects through a host trait) | done; the host runs the commands (`util givetsweapon` and `util explo` wait for a plugin API addition) |
-| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v3 |
+| Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set and `±rcbot_force_grip` (side effects through a host trait) | done; the host runs the commands |
+| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v4 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
 | Combat: what the bot sees, enemy choice and aim by reputation, best weapon, reloads and switching (upstream's TS reload bug fixed), cover, hearing (the port's `sound` callback) | done |
 | Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
@@ -40,7 +40,7 @@ crates/rcbot     the bot (no unsafe, no FFI)
   src/config/    bot_config.ini, users, profiles, reputation, menus, rcbot commands
   src/bot/       the bot: think, tasks, navigation, special waypoints, movement, aim, combat,
                  its weapons, events and hearing, squads, the bot camera
-crates/host      the tsmod_rcbot library: the plugin API v3 and the engine (the only crate allowed unsafe)
+crates/host      the tsmod_rcbot library: the plugin API v4 and the engine (the only crate allowed unsafe)
 data/rcbot       bot_weapons.ini (TS), waypoints/ts/ (44 maps)
 tools/reference  C++ harnesses that record RCBot's own results for the tests
 xtask            cargo xtask build | dist | test | lint | all

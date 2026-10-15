@@ -747,3 +747,77 @@ fn the_loadout_is_bought_before_the_spawn() {
     let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
     assert!(f.actions.iter().any(|a| matches!(a, Action::Loadout(_))));
 }
+
+/// A world that also lists TS objectives (`BotWorld::ts_objectives`).
+struct WithObjectives(Plane, Vec<TsObjective>);
+
+impl World for WithObjectives {
+    fn trace_line(&self, s: Vector, e: Vector, m: Monsters, g: Glass, i: Option<u32>) -> Trace {
+        self.0.trace_line(s, e, m, g, i)
+    }
+    fn point_contents(&self, at: Vector) -> i32 {
+        self.0.point_contents(at)
+    }
+}
+
+impl BotWorld for WithObjectives {
+    fn time(&self) -> f32 {
+        self.0.time()
+    }
+    fn max_entities(&self) -> u32 {
+        self.0.max_entities()
+    }
+    fn max_clients(&self) -> u32 {
+        self.0.max_clients()
+    }
+    fn entity(&self, index: u32) -> Option<Entity> {
+        self.0.entity(index)
+    }
+    fn in_pvs(&self, v: u32, o: Vector) -> bool {
+        self.0.in_pvs(v, o)
+    }
+    fn entities_in_sphere(&self, o: Vector, r: f32) -> Vec<u32> {
+        self.0.entities_in_sphere(o, r)
+    }
+    fn teamplay(&self) -> bool {
+        self.0.teamplay()
+    }
+    fn ts_objectives(&self, _: u32) -> Vec<TsObjective> {
+        self.1.clone()
+    }
+}
+
+/// `LookForNewTasks`' TS objectives: team 1 defends one, team 2 uses the `ts_hack` by its
+/// waypoint for 9 s, each after the path to that waypoint; sometimes they roam instead.
+#[test]
+fn teamplay_bots_go_for_the_ts_objectives() {
+    let at = Vector::new(300.0, 0.0, 0.0);
+    let mut hack = player(5, at + Vector::new(20.0, 0.0, 0.0), 0);
+    hack.classname = "ts_hack".into();
+    hack.flags = 0;
+    let objective = TsObjective { id: 0, origin: at, name: "Hack the computer".into() };
+    let mut seen = std::collections::HashSet::new();
+    for team in [1, 2] {
+        for seed in 1..40 {
+            let mut rig = Rig::new(Config::default());
+            let mut plane = plane(vec![player(1, Vector::ZERO, team), hack.clone()]);
+            plane.teamplay = true;
+            let w = WithObjectives(plane, vec![objective.clone()]);
+            let mut rng = XorShiftRandom::new(seed);
+            let kinds = rig.with(|b, g| {
+                b.me = w.entity(1).unwrap();
+                b.state = b.me.player.unwrap();
+                b.look_for_new_tasks(g, &w, &mut rng);
+                b.tasks().iter().map(|t| (t.kind, t.int, t.float, t.edict.is_some())).collect::<Vec<_>>()
+            });
+            match kinds.as_slice() {
+                [(TaskKind::FindPath, 2, -1.0, false), (TaskKind::Defend, ..)] => assert_eq!(team, 1),
+                [(TaskKind::FindPath, 2, -1.0, false), (TaskKind::Use, 0, 9.0, true)] => assert_eq!(team, 2),
+                [(TaskKind::FindPath, ..)] | [] => {} // roaming: the end-level waypoints, or none
+                other => panic!("team {team}: {other:?}"),
+            }
+            seen.insert((team, kinds.len()));
+        }
+    }
+    assert!(seen.contains(&(1, 2)) && seen.contains(&(2, 2)), "{seen:?}");
+}

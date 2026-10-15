@@ -34,9 +34,8 @@ macro_rules! globals {
             weapons: &mut $s.weapons,
             presets: &$s.presets,
             learned: &mut $s.learned,
-            // TODO(the-specialistsmod-rs#117): `m_iTeamScores` (the `TeamScore` message), for the
-            // death fitness; plugin API v3 doesn't report team scores, so they stay 0.
-            team_scores: [0; 4],
+            // `m_iTeamScores` (the `TeamScore` message), for the death fitness, by rules team.
+            team_scores: $s.team_scores,
             masters: &$s.masters,
             other_bots: Vec::new(),
             squads: &mut $s.squads,
