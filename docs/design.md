@@ -243,6 +243,8 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   profile strings, 64-byte player names) are cut to them.
 * **Commands that crash upstream without a client** (§5.39-41) do nothing or name the caller
   "Server" instead; `debug` from `bot_config.ini` on a listen server counts as the server.
+* **`mp_teamlist` teams** are cut at 63 bytes (upstream overruns its 64-byte `newteam`, §5.45);
+  the cvar is read and split as bytes, as upstream's `char` copies (#3).
 * **Missing data**: an empty `mp_teamlist` gives no TS team (upstream picks from an empty array);
   `showreps` skips reputations of players who left (upstream dereferences `NULL`).
 * **Additions**: `VisibilityTable::rows_in_file` and `work_out_rows`, so the host can rebuild only
@@ -452,7 +454,9 @@ Found while porting; not filed upstream.
     without the leak.
 45. **A trailing `;` in `mp_teamlist` stays in the last team's name** and an empty list picks from
     an empty array (`BotFunc_AddBot`, `bot_commands.cpp:2040`, `:2061`). The first is kept, the
-    second fixed (§4).
+    second fixed (§4). `newteam` isn't cleared at a `;`, so an empty team (`a;;b`) is a copy of
+    the one before it (kept), and a team of 64 bytes or more overruns `char newteam[64]` (cut at
+    63 bytes, §4).
 46. **`BotFunc_WriteProfile` writes a `NULL` string as its bare tag without a newline**
     (`dll.cpp:1636`), so the next key is lost on reading. Kept (nothing calls it).
 

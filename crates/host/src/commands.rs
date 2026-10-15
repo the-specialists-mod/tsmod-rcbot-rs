@@ -563,11 +563,13 @@ impl CommandHost for Host<'_> {
         let mut rng = EngineRandom(self.e);
         let teamplay = self.api.game_state().teamplay != 0;
         let model = if teamplay {
-            let list = self.e.cvar_string("mp_teamlist");
+            // The cvar's bytes, as upstream's `CVAR_GET_STRING` (the-specialistsmod-rs#188 keeps
+            // team names as bytes too).
+            let list = self.e.cvar_bytes("mp_teamlist");
             let force = request.team.filter(|&t| (1..5).contains(&t)).unwrap_or(self.s.config.force_team);
             cmds::ts_team_choice(&list, force, &mut rng).unwrap_or_default()
         } else {
-            String::new()
+            Vec::new()
         };
         let m = std::ffi::CString::new(model).unwrap_or_default();
         let idx = crate::create(self.s, self.api, self.e, c"", m.as_ptr(), 0.0);

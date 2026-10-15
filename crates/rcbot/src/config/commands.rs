@@ -1908,28 +1908,45 @@ pub fn run_config(ctx: &mut CommandContext<'_>, host: &mut dyn CommandHost, line
     }
 }
 
+/// `newteam`'s size in `BotFunc_AddBot` (`char newteam[64]`): 63 bytes and the NUL.
+const NEWTEAM: usize = 64;
+
 /// The TS team part of `BotFunc_AddBot` (in teamplay): `mp_teamlist` split at `;` (as
-/// upstream splits it: the last character always ends the last team, even a `;`), then team
-/// `force_team` (1-based) if there is one, else a random team (`RANDOM_LONG`). The team name
-/// becomes the bot's `model` key. `None` for an empty list (upstream picks from an empty array).
-pub fn ts_team_choice(teamlist: &str, force_team: i32, rng: &mut dyn Random) -> Option<String> {
-    let b = teamlist.as_bytes();
-    let mut teams: Vec<String> = Vec::new();
-    let mut cur: Vec<u8> = Vec::new();
-    for (i, &c) in b.iter().enumerate() {
-        if i == b.len() - 1 || c == b';' {
-            if i == b.len() - 1 {
-                cur.push(c);
-            }
-            teams.push(String::from_utf8_lossy(&cur).into_owned());
-            cur.clear();
-        } else {
-            cur.push(c);
+/// upstream splits it: the last byte always ends the last team, even a `;`), then team
+/// `force_team` (1-based) if there is one and it isn't empty, else a random team
+/// (`RANDOM_LONG`). The team name becomes the bot's `model` key. Bytes throughout, as upstream's
+/// `char` copies (a CP1252 byte stays that byte). `None` for an empty list (upstream picks from an
+/// empty array).
+///
+/// Upstream builds each team in `newteam`, NUL-terminating after every byte, and `strdup`s it at
+/// each `;` without clearing it, so an empty team (`;;`, or a `;` right after the last byte's
+/// team) repeats the team before it, and a leading `;` gives an empty team. Kept. Guard: a team of
+/// 64 bytes or more overruns `newteam` upstream; it is cut at 63 bytes here.
+pub fn ts_team_choice(teamlist: &[u8], force_team: i32, rng: &mut dyn Random) -> Option<Vec<u8>> {
+    let teamlist = &teamlist[..teamlist.iter().position(|&c| c == 0).unwrap_or(teamlist.len())];
+    let mut teams: Vec<Vec<u8>> = Vec::new();
+    // `newteam` as the C string it holds, and the write index `j`.
+    let mut newteam: Vec<u8> = Vec::new();
+    let mut j = 0usize;
+    let put = |newteam: &mut Vec<u8>, j: &mut usize, c: u8| {
+        if *j < NEWTEAM - 1 {
+            // `newteam[j++] = c; newteam[j] = 0;`
+            newteam.truncate(*j);
+            newteam.push(c);
         }
-    }
-    // newteam (64 bytes) is filled and copied unchecked upstream; names are cut to 63 here.
-    for t in &mut teams {
-        t.truncate(63);
+        *j += 1;
+    };
+    for (i, &c) in teamlist.iter().enumerate() {
+        let last = i == teamlist.len() - 1;
+        if last || c == b';' {
+            if last {
+                put(&mut newteam, &mut j, c);
+            }
+            teams.push(newteam.clone());
+            j = 0;
+        } else {
+            put(&mut newteam, &mut j, c);
+        }
     }
     if force_team > 0 && force_team as usize <= teams.len() {
         let t = &teams[force_team as usize - 1];
@@ -2311,9 +2328,62 @@ mod tests {
     #[test]
     fn ts_teams() {
         let mut r = XorShiftRandom::new(1);
-        assert_eq!(ts_team_choice("Lone Wolf;Shadow", 2, &mut r).as_deref(), Some("Shadow"));
-        assert_eq!(ts_team_choice("Lone Wolf;Shadow;", 2, &mut r).as_deref(), Some("Shadow;"));
-        assert_eq!(ts_team_choice("a;b", 3, &mut r).map(|t| t == "a" || t == "b"), Some(true));
-        assert_eq!(ts_team_choice("", 0, &mut r), None);
+        assert_eq!(ts_team_choice(b"Lone Wolf;Shadow", 2, &mut r).as_deref(), Some(&b"Shadow"[..]));
+        assert_eq!(ts_team_choice(b"Lone Wolf;Shadow;", 2, &mut r).as_deref(), Some(&b"Shadow;"[..]));
+        assert_eq!(ts_team_choice(b"a;b", 3, &mut r).map(|t| t == b"a" || t == b"b"), Some(true));
+        assert_eq!(ts_team_choice(b"", 0, &mut r), None);
+        assert_eq!(ts_team_choice(b"a\0b;c", 1, &mut r).as_deref(), Some(&b"a"[..]), "the C string ends at a NUL");
+    }
+
+    /// The team names are the cvar's bytes: a CP1252 0xE9 stays 0xE9 (#3).
+    #[test]
+    fn ts_teams_are_bytes() {
+        let mut r = XorShiftRandom::new(1);
+        assert_eq!(ts_team_choice(b"\xe9quipe;Caf\xe9", 1, &mut r).as_deref(), Some(&b"\xe9quipe"[..]));
+        assert_eq!(ts_team_choice(b"\xe9quipe;Caf\xe9", 2, &mut r).as_deref(), Some(&b"Caf\xe9"[..]));
+    }
+
+    /// `newteam` isn't cleared between teams: an empty team repeats the one before it, a leading
+    /// `;` is an empty team, and a forced empty team falls back to the random pick.
+    #[test]
+    fn ts_teams_stale_newteam() {
+        let mut r = XorShiftRandom::new(1);
+        let all = |list: &[u8], r: &mut XorShiftRandom| -> Vec<Option<Vec<u8>>> { (1..=4).map(|f| ts_team_choice(list, f, r)).collect() };
+        let t = |s: &[u8]| Some(s.to_vec());
+        let got = all(b"abc;;de;x", &mut r);
+        assert_eq!(got[..3], [t(b"abc"), t(b"abc"), t(b"de")]);
+        assert_eq!(ts_team_choice(b"abc;;de;x", 4, &mut r), t(b"x"));
+        // A shorter team after a longer one: NUL-terminated after each byte, nothing left over.
+        assert_eq!(ts_team_choice(b"abcdef;xy;", 2, &mut r), t(b"xy;"));
+        // "a;;": the second `;` is the last byte, so it is a team of its own.
+        assert_eq!(ts_team_choice(b"a;;", 2, &mut r), t(b";"));
+        assert_eq!(ts_team_choice(b";", 1, &mut r), t(b";"));
+        // A leading `;`: an empty first team; forcing it picks at random (only "b" is non-empty
+        // besides it, and the draw may give the empty one).
+        let first = ts_team_choice(b";b", 1, &mut r).unwrap();
+        assert!(first.is_empty() || first == b"b");
+    }
+
+    /// Teams are cut at 63 bytes (guard: upstream overruns `char newteam[64]`), on byte
+    /// boundaries, so no length or UTF-8 sequence can panic (#3).
+    #[test]
+    fn ts_teams_cut_at_63_bytes() {
+        let mut r = XorShiftRandom::new(1);
+        for len in [62usize, 63, 64, 65, 200] {
+            let team = vec![b'x'; len];
+            let list = [&team[..], b";b"].concat();
+            assert_eq!(ts_team_choice(&list, 1, &mut r), Some(team[..len.min(63)].to_vec()), "team of {len} bytes");
+            // The last team ends at the last byte instead of a `;`.
+            let list = [&b"b;"[..], &team[..]].concat();
+            assert_eq!(ts_team_choice(&list, 2, &mut r), Some(team[..len.min(63)].to_vec()), "last team of {len} bytes");
+        }
+        // Multi-byte UTF-8 across byte 63 (62 ASCII bytes, then "é" = C3 A9): cut mid-sequence.
+        let list = [&[b'x'; 62][..], "\u{e9}\u{e9}".as_bytes()].concat();
+        let got = ts_team_choice(&list, 1, &mut r).unwrap();
+        assert_eq!(got.len(), 63);
+        assert_eq!(got[62], 0xc3);
+        // A stale copy of a cut team is the cut team.
+        let list = [&[b'y'; 70][..], b";;b"].concat();
+        assert_eq!(ts_team_choice(&list, 2, &mut r), Some(vec![b'y'; 63]));
     }
 }

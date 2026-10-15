@@ -625,17 +625,17 @@ impl Engine {
         unsafe { f(l.as_ptr()) };
     }
 
-    /// `CVAR_GET_STRING`.
-    pub fn cvar_string(&self, name: &str) -> String {
-        let Some(f) = self.f.pfnCVarGetString else { return String::new() };
+    /// `CVAR_GET_STRING` as the engine's bytes, unconverted (empty when unset).
+    pub fn cvar_bytes(&self, name: &str) -> Vec<u8> {
+        let Some(f) = self.f.pfnCVarGetString else { return Vec::new() };
         let n = cstring(name);
         // SAFETY: the name is read during the call; the engine returns its own string.
         let p = unsafe { f(n.as_ptr()) };
         if p.is_null() {
-            return String::new();
+            return Vec::new();
         }
-        // SAFETY: a NUL-terminated engine string.
-        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        // SAFETY: a NUL-terminated engine string, copied before the engine can change it.
+        unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
     }
 
     /// `IS_DEDICATED_SERVER`.
