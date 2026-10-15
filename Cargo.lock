@@ -77,7 +77,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "goldsrc-sys"
 version = "3.0.3"
-source = "git+file:///home/mmckenzie/dev/hl/rust-hlmod-the-specialists?rev=db84e1d55765d58d60519acd5f8c0d4ad1d191db#db84e1d55765d58d60519acd5f8c0d4ad1d191db"
+source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?rev=38cd7b8bac90696415d40afe019507b9d28d42c4#38cd7b8bac90696415d40afe019507b9d28d42c4"
 dependencies = [
  "bindgen",
 ]
@@ -225,7 +225,7 @@ dependencies = [
 [[package]]
 name = "ts-plugin-api"
 version = "3.0.3"
-source = "git+file:///home/mmckenzie/dev/hl/rust-hlmod-the-specialists?rev=db84e1d55765d58d60519acd5f8c0d4ad1d191db#db84e1d55765d58d60519acd5f8c0d4ad1d191db"
+source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?rev=38cd7b8bac90696415d40afe019507b9d28d42c4#38cd7b8bac90696415d40afe019507b9d28d42c4"
 
 [[package]]
 name = "tsmod-rcbot"

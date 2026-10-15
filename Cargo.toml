@@ -11,11 +11,10 @@ repository = "https://github.com/the-specialists-mod/tsmod-rcbot-rs"
 [workspace.dependencies]
 rcbot = { path = "crates/rcbot" }
 # The port's plugin API v4 (the-specialists-mod/the-specialistsmod-rs#104, #117) and the engine's
-# tables, pinned to one rev of the port: local until that commit (branch fix/plugin-api) is on the
-# port's main; repin to the GitHub URL and the merged rev then. goldsrc-sys generates its bindings from the FWGS headers
+# tables, pinned to one rev of the port's main. goldsrc-sys generates its bindings from the FWGS headers
 # (`FWGS_DIR`, see .cargo/config.toml).
-goldsrc-sys = { git = "file:///home/mmckenzie/dev/hl/rust-hlmod-the-specialists", rev = "db84e1d55765d58d60519acd5f8c0d4ad1d191db" }
-ts-plugin-api = { git = "file:///home/mmckenzie/dev/hl/rust-hlmod-the-specialists", rev = "db84e1d55765d58d60519acd5f8c0d4ad1d191db" }
+goldsrc-sys = { git = "https://github.com/the-specialists-mod/the-specialistsmod-rs", rev = "38cd7b8bac90696415d40afe019507b9d28d42c4" }
+ts-plugin-api = { git = "https://github.com/the-specialists-mod/the-specialistsmod-rs", rev = "38cd7b8bac90696415d40afe019507b9d28d42c4" }
 # The visibility table's RCZ container is miniz's zlib stream (rc_compress.cpp); miniz_oxide is
 # the Rust port of the same deflate code.
 miniz_oxide = "0.8"
