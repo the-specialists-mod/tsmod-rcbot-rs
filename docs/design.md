@@ -645,7 +645,8 @@ those by going through the port's own code when that code is ported.
   the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
   wall jump; `.rkf` round trip and damaged files; combos bred from the best.
 
-* **Unit tests** in each module: path slots and the cursor, the searches, buckets and cover, the
+* **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
+  nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,
   `stoi`, the ini parser's quirks, weapon info, the TS table; the learning code (headers and
   `fread`/`feof` behaviour, each object's file layout and round trip, mismatched and truncated

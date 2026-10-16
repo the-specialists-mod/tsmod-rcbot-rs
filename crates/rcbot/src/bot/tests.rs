@@ -1242,3 +1242,42 @@ fn a_breakable_is_an_enemy_by_the_first_client_near_it() {
     assert!(super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(170.0, 0.0, 0.0), 200.0));
     assert!(!super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(-100.0, 0.0, 0.0), 200.0));
 }
+
+#[test]
+fn the_nearest_entity_is_upstreams() {
+    // Upstream's loop: trace every candidate nearer than the best so far.
+    fn upstream(w: &dyn BotWorld, names: &[&str], origin: Vector, mut range: f32) -> Option<u32> {
+        let mut nearest = None;
+        for name in names {
+            for i in w.find_entities(EntityKey::Classname, name) {
+                let e = w.entity(i).unwrap();
+                let d = (e.entity_origin() - origin).length();
+                if d < range {
+                    let tr = w.trace_line(origin, e.entity_origin(), Monsters::Ignore, Glass::Ignore, None);
+                    if tr.fraction >= 1.0 || tr.hit == Some(e.index) {
+                        range = d;
+                        nearest = Some(i);
+                    }
+                }
+            }
+        }
+        nearest
+    }
+    let mut rng = XorShiftRandom::new(21);
+    for _ in 0..30 {
+        // Items on both sides of the door at x = 100 (entity 5, which a trace hits).
+        let mut ents = vec![player(1, Vector::ZERO, 0), brush(5, "item_b", Vector::new(100.0, 0.0, 0.0), Vector::new(8.0, 64.0, 64.0))];
+        for i in 10..30 {
+            let c = |r: &mut XorShiftRandom| r.random_long(-8, 8) as f32 * 40.0;
+            let name = if i % 2 == 0 { "item_a" } else { "item_b" };
+            ents.push(brush(i, name, Vector::new(c(&mut rng), c(&mut rng), 0.0), Vector::new(8.0, 8.0, 8.0)));
+        }
+        let w = Doors { plane: plane(ents) };
+        for _ in 0..10 {
+            let o = Vector::new(rng.random_float(-300.0, 300.0), rng.random_float(-300.0, 300.0), 0.0);
+            let names = ["item_a", "item_b"];
+            let ours = special::find_nearest_entity(&w, &names, o, 400.0, true).map(|e| e.index);
+            assert_eq!(ours, upstream(&w, &names, o, 400.0));
+        }
+    }
+}

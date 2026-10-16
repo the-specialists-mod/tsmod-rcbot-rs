@@ -94,18 +94,23 @@ impl Waypoints {
     /// `CWaypointLocations::NearestWaypoint`: the nearest waypoint in the buckets around `origin`
     /// closer than `nearest_dist`, other than `ignore` and the `failed` ones.
     ///
+    /// Upstream traces to every candidate nearer than the best so far, in bucket order. The
+    /// candidates are traced nearest first here, stopping at the first visible one: the same
+    /// waypoint (equally near ones in bucket order, as upstream's strict `<` keeps the first),
+    /// with fewer traces.
+    ///
     /// Deviation: upstream's aiming-only search reads a global "failed" array left over from the
     /// previous search instead of `failed`; this uses `failed`.
     pub fn nearest_waypoint(
         &self,
         origin: Vector,
-        mut nearest_dist: f32,
+        nearest_dist: f32,
         ignore: Option<usize>,
         opts: NearestOptions,
         failed: &[usize],
         world: &dyn World,
     ) -> Option<usize> {
-        let mut nearest = None;
+        let mut candidates: Vec<(f32, usize)> = Vec::new();
         for i in self.locations.around(origin) {
             if Some(i) == ignore || failed.contains(&i) {
                 continue;
@@ -126,14 +131,12 @@ impl Waypoints {
             }
             let dist = (w.origin - origin).length();
             if dist < nearest_dist {
-                let add = !opts.visible || world.trace_line(origin, w.origin, Monsters::Ignore, Glass::DontIgnore, None).fraction >= 1.0;
-                if add {
-                    nearest = Some(i);
-                    nearest_dist = dist;
-                }
+                candidates.push((dist, i));
             }
         }
-        nearest
+        nearest_visible(candidates, |i| {
+            !opts.visible || world.trace_line(origin, self.wpts[i].origin, Monsters::Ignore, Glass::DontIgnore, None).fraction >= 1.0
+        })
     }
 
     /// `NearestWaypointToOrigin`: a visible, reachable waypoint within [`REACHABLE_RANGE`].
@@ -178,10 +181,74 @@ impl Waypoints {
     }
 }
 
+/// The nearest of `candidates` (distance, item; in search order) that `visible` accepts,
+/// asking nearest first: what a search that keeps every visible candidate nearer than the best
+/// so far finds (ties: the first in search order), without asking about the others.
+pub(crate) fn nearest_visible<T: Copy>(mut candidates: Vec<(f32, T)>, mut visible: impl FnMut(T) -> bool) -> Option<T> {
+    // Stable: equal distances stay in search order.
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates.into_iter().map(|(_, t)| t).find(|&t| visible(t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nav::EmptyWorld;
+    use crate::nav::{EmptyWorld, Trace};
+    use crate::{Random, XorShiftRandom};
+
+    /// Walls on planes `x = c` for each `c`.
+    struct Walls(Vec<f32>);
+
+    impl World for Walls {
+        fn trace_line(&self, start: Vector, end: Vector, _: Monsters, _: Glass, _: Option<u32>) -> Trace {
+            if self.0.iter().any(|&x| (start.x < x) != (end.x < x)) {
+                return Trace { fraction: 0.5, end_pos: start, hit: Some(0) };
+            }
+            Trace::clear(end)
+        }
+        fn point_contents(&self, _: Vector) -> i32 {
+            -1
+        }
+    }
+
+    /// Upstream's loop: trace every candidate nearer than the best so far.
+    fn upstream_nearest(w: &Waypoints, origin: Vector, mut nearest_dist: f32, world: &dyn World) -> Option<usize> {
+        let mut nearest = None;
+        for i in w.locations.around(origin) {
+            let wp = w.wpts[i];
+            if wp.flags & (fl::UNREACHABLE | fl::DELETED) != 0 {
+                continue;
+            }
+            let dist = (wp.origin - origin).length();
+            if dist < nearest_dist && world.trace_line(origin, wp.origin, Monsters::Ignore, Glass::DontIgnore, None).fraction >= 1.0 {
+                nearest = Some(i);
+                nearest_dist = dist;
+            }
+        }
+        nearest
+    }
+
+    #[test]
+    fn nearest_first_finds_what_upstream_finds() {
+        let mut rng = XorShiftRandom::new(11);
+        for round in 0..40 {
+            let mut w = Waypoints::new();
+            for _ in 0..60 {
+                // A coarse grid, so equal distances happen.
+                let c = |r: &mut XorShiftRandom| r.random_long(-12, 12) as f32 * 32.0;
+                w.add_origin(Vector::new(c(&mut rng), c(&mut rng), c(&mut rng)), 0, None);
+            }
+            let walls = Walls((0..round % 4).map(|_| rng.random_float(-300.0, 300.0)).collect());
+            for _ in 0..20 {
+                let o = Vector::new(rng.random_float(-400.0, 400.0), rng.random_float(-400.0, 400.0), rng.random_float(-400.0, 400.0));
+                let opts = NearestOptions::default();
+                assert_eq!(
+                    w.nearest_waypoint(o, REACHABLE_RANGE, None, opts, &[], &walls),
+                    upstream_nearest(&w, o, REACHABLE_RANGE, &walls)
+                );
+            }
+        }
+    }
 
     #[test]
     fn cells() {

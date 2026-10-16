@@ -48,27 +48,29 @@ pub(crate) fn acceptable_pushable_vector(p: &Entity, origin: Vector) -> bool {
 
 /// `UTIL_FindNearestEntity(classnames, origin, range, visible, ignore)`: the nearest entity of
 /// those classes within `range` (which shrinks as nearer ones are found), with a clear line to it
-/// when `visible`.
-pub(crate) fn find_nearest_entity(w: &dyn BotWorld, classnames: &[&str], origin: Vector, mut range: f32, visible: bool) -> Option<Entity> {
-    let mut nearest = None;
+/// when `visible`. The candidates are traced nearest first (`nearest_visible`): upstream's
+/// answer, with fewer traces.
+pub(crate) fn find_nearest_entity(w: &dyn BotWorld, classnames: &[&str], origin: Vector, range: f32, visible: bool) -> Option<Entity> {
+    let mut found: Vec<Entity> = Vec::new();
+    let mut candidates = Vec::new();
     for name in classnames {
         for i in w.find_entities(EntityKey::Classname, name) {
             let Some(e) = w.entity(i) else { continue };
-            let o = e.entity_origin();
-            let d = (o - origin).length();
+            let d = (e.entity_origin() - origin).length();
             if d < range {
-                let add = !visible || {
-                    let tr = w.trace_line(origin, o, Monsters::Ignore, Glass::Ignore, None);
-                    tr.fraction >= 1.0 || tr.hit == Some(e.index)
-                };
-                if add {
-                    range = d;
-                    nearest = Some(e);
-                }
+                candidates.push((d, found.len()));
+                found.push(e);
             }
         }
     }
-    nearest
+    let pick = crate::nav::locations::nearest_visible(candidates, |k| {
+        !visible || {
+            let e = &found[k];
+            let tr = w.trace_line(origin, e.entity_origin(), Monsters::Ignore, Glass::Ignore, None);
+            tr.fraction >= 1.0 || tr.hit == Some(e.index)
+        }
+    })?;
+    found.into_iter().nth(pick)
 }
 
 /// `PlayerNearVector`: the nearest living, named player within `range` of `origin`.
