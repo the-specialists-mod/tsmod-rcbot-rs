@@ -1536,3 +1536,39 @@ fn the_loadout_bought_is_credited_only_when_the_inventory_shows_it() {
     rig.with(|b, g| b.frame(g, &w, &mut rng));
     assert_eq!(rig.bot.learning.loadout.arms.iter().map(|a| a.n).sum::<f32>(), before);
 }
+
+#[test]
+fn replayed_fights_teach_the_opponent_model() {
+    use crate::learn::opponents::OpponentKey;
+    let mut rig = Rig::new(Config::default());
+    rig.extra.reps[2] = 20;
+    rig.extra.reps[3] = 30;
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(750.0, 0.0, 0.0), 0)]);
+    arm(&w, 3, 18, 5, 10);
+    arm(&w, 2, 0, 100, 0);
+    let script = [
+        (1.0, damage(1, 2, 10.0)),
+        (1.5, kill(1, 2, 1)),
+        (3.0, damage(1, 3, 100.0)),
+        (3.0, kill(3, 1, 18)),
+        // Not about a bot: the model ignores it.
+        (4.0, damage(2, 3, 50.0)),
+    ];
+    rig.replay(&mut w, &script);
+    let m = &rig.learned.opponents;
+    let sniper = m.profile(OpponentKey::Player(30)).unwrap();
+    assert_eq!((sniper.hits_on_bots, sniper.kills_of_bots, sniper.range), (1.0, 1.0, 750.0));
+    assert_eq!(sniper.favourite_weapon(), Some((18, 1.0)));
+    let brawler = m.profile(OpponentKey::Player(20)).unwrap();
+    assert_eq!((brawler.deaths_to_bots, brawler.kungfu_share), (1.0, 1.0));
+    assert!(rig.with(|b, g| b.threat(g, 3)) > rig.with(|b, g| b.threat(g, 2)));
+    assert_eq!(rig.with(|b, g| b.threat(g, 4)), 1.0);
+    // Time in the bot's sight counts as exposure, its sideways speed as dodging.
+    w.ents.borrow_mut()[2].velocity = Vector::new(0.0, 250.0, 0.0);
+    let mut rng = XorShiftRandom::new(3);
+    w.ents.borrow_mut().remove(1);
+    run(&mut rig, &mut w, &mut rng, 100, |w, _| w.ents.borrow_mut()[0].origin = Vector::ZERO);
+    let sniper = rig.learned.opponents.profile(OpponentKey::Player(30)).unwrap();
+    assert!(sniper.exposure > 0.5 && sniper.dodge > 0.5, "{sniper:?}");
+}

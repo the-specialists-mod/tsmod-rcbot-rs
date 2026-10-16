@@ -477,6 +477,18 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   perceptron) but no longer chooses the weapons. Saved as `botprofiles/<key>.rlo` and
   `loadouts.rlo` (text, `rcbot-loadout 1`, `l <value> <weight> <weapon ids>`, keyed by the weapons
   so the list can change).
+* **Opponent model** (`learn/opponents.rs`, `GlobalLearnedData::opponents`): per player, humans
+  (and other backends' bots) by reputation id, RCBot's bots by profile id (`PlayerKeys`, refreshed
+  by the manager): damage to bots and hits on them per second some bot had it in sight as its
+  enemy (exposure), kills of and deaths to bots, a weapon histogram, its usual range, its kung fu
+  share, stunts per minute (the host now subscribes to `player_stunt`), dodging (its speed across
+  the bot's view while seen), and from kung fu fights its attack mix, blocks and rhythm (a new fight
+  starts from that rhythm). Counts fade ×0.95 at each map load. API: `Bot::threat(g, player)` and
+  `OpponentModel::threat(key)` (1 for an average or unknown player, 0.25-4: its damage rate shrunk
+  toward everyone's over everyone's, times √(kills/deaths vs bots)), `OpponentModel::profile(key)`
+  (`accuracy`, `favourite_weapon`, `kf_block_rate`, the fields). Saved as
+  `botprofiles/players.rop` (text, `rcbot-players 1`, `p <rep id>` / `b <profile id>` and 56
+  numbers).
 
 ## 5. Upstream bugs found
 
@@ -747,7 +759,10 @@ those by going through the port's own code when that code is ported.
   the heatmap and the weapon tables from a scripted fight; the loadout bandit (curated loadouts
   legal and light, rewards per minute, credit only for what the inventory shows, untried first
   then the best with old lives fading, the prior guiding a new bot, file round trip) and a bot
-  crediting the loadout it bought only when the inventory shows it.
+  crediting the loadout it bought only when the inventory shows it; the opponent model (keys,
+  threat of a strong and a weak player, stunt rate, kung fu habits, file round trip, map fade) and
+  a replayed fight teaching it (hits, kills and deaths about bots only, range, weapon, kung fu
+  share, exposure and dodging from what the bot saw).
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

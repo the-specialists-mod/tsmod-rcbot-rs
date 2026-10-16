@@ -204,10 +204,46 @@ impl BotManager {
     pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
         self.refresh_player_keys(g);
         self.update_heatmap(g, w, ev);
+        self.update_opponents(g, w, ev);
         // Every bot hears it: those who dealt or took it keep it, one whose opponent died ends
         // its fight.
         for bot in self.iter_mut() {
             bot.combat_event(g, w, ev, rng);
+        }
+    }
+
+    /// The opponent model: hits on bots and kills of bots by each player, and players' deaths
+    /// to bots (any backend's bots).
+    fn update_opponents(&self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+        let is_bot = |i: u32| w.entity(i).and_then(|e| e.player).is_some_and(|p| p.is_bot) || self.get(i).is_some();
+        let keys = &g.learned.player_keys;
+        match *ev {
+            CombatEvent::Damage(d) => {
+                let (Some(key), Some(a), Some(v)) = (keys.get(d.attacker), w.entity(d.attacker), w.entity(d.victim)) else { return };
+                if d.attacker != d.victim && is_bot(d.victim) {
+                    let weapon = a.player.map_or(-1, |p| p.weapon);
+                    g.learned.opponents.observe_hit_on_bot(key, weapon, (a.origin - v.origin).length(), d.amount);
+                }
+            }
+            CombatEvent::Kill(k) => {
+                if k.killer == 0 || k.killer == k.victim {
+                    return;
+                }
+                if let Some(key) = keys.get(k.killer).filter(|_| is_bot(k.victim)) {
+                    g.learned.opponents.observe_kill_of_bot(key);
+                }
+                if let Some(key) = keys.get(k.victim).filter(|_| is_bot(k.killer)) {
+                    g.learned.opponents.observe_death_to_bot(key);
+                }
+            }
+        }
+    }
+
+    /// The host's `player_stunt`: a player started a stunt (for the opponent model).
+    pub fn player_stunt(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, player: u32) {
+        self.refresh_player_keys(g);
+        if let Some(key) = g.learned.player_keys.get(player) {
+            g.learned.opponents.observe_stunt(key, w.time());
         }
     }
 

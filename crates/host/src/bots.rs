@@ -155,6 +155,7 @@ pub(crate) fn save_globals(s: &State) {
     s.write(rcbot::learn::data::TS_WEAPONS_FILE, &s.learned.save_ts_weapons());
     s.write(rcbot::learn::weapon_stats::GLOBAL_FILE, s.learned.weapon_prior.save().as_bytes());
     s.write(rcbot::learn::loadout::GLOBAL_FILE, s.learned.loadout_prior.save().as_bytes());
+    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", rcbot::learn::opponents::PLAYERS_FILE), s.learned.opponents.save().as_bytes());
     let h = &s.learned.heatmap;
     if !h.is_empty() && h.map_name() == s.map {
         s.write(&heatmap_path(s), &h.to_bytes());
@@ -391,6 +392,15 @@ pub(crate) fn kill_scored(s: &mut State, a: Api, e: Engine, k: &ts_plugin_api::K
         kung_fu: tags & ts_plugin_api::kill::KUNG_FU != 0,
     });
     combat(s, a, e, &ev);
+}
+
+/// `player_stunt`: for the bots' opponent model.
+pub(crate) fn stunt(s: &mut State, a: Api, e: Engine, player: i32) {
+    let Ok(player) = u32::try_from(player) else { return };
+    let reps = s.rep_ids();
+    let w = HostWorld::new(a, e);
+    let mut g = globals!(s, &reps);
+    s.bots.player_stunt(&mut g, &w, player);
 }
 
 /// `sound`: `pfnEmitSound`'s part for the bots.

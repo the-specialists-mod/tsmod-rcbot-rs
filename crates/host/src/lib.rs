@@ -53,6 +53,7 @@ enum Event {
     Damaged(i32, i32, i32, f32, i32, f32),
     Killed(i32, i32),
     KillScored(KillInfo),
+    Stunt(i32),
     Sound(i32, Option<Vector>, f32, String),
     Say(i32, Vec<String>),
 }
@@ -164,6 +165,7 @@ fn drain(s: &mut State, a: Api, e: Engine) {
             }
             Event::Killed(victim, killer) => bots::killed(s, a, e, victim, killer),
             Event::KillScored(k) => bots::kill_scored(s, a, e, &k),
+            Event::Stunt(player) => bots::stunt(s, a, e, player),
             Event::Sound(entity, origin, volume, sample) => bots::sound(s, a, e, entity, origin, volume, &sample),
             Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
@@ -222,6 +224,7 @@ const DESCRIPTOR: Plugin = Plugin {
     player_killed: Some(player_killed),
     sound: Some(sound),
     kill_scored: Some(kill_scored),
+    player_stunt: Some(player_stunt),
     ..Plugin::EMPTY
 };
 
@@ -264,6 +267,10 @@ extern "C" fn game_init() {
     }
     if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::loadout::GLOBAL_FILE)) {
         learned.loadout_prior.load(&String::from_utf8_lossy(&b));
+    }
+    let players = data_dir.join(rcbot::config::BOT_PROFILES_FOLDER).join(rcbot::learn::opponents::PLAYERS_FILE);
+    if let Ok(b) = std::fs::read(players) {
+        learned.opponents.load(&String::from_utf8_lossy(&b));
     }
     config.mod_folder = "ts".into();
     let mut state = State {
@@ -339,6 +346,7 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
         s.botcam.clear();
         commands::load_waypoints(s, a, e);
         bots::load_heatmap(s);
+        s.learned.opponents.new_map();
         // `CBotGlobals::MapInit`.
         s.map_init_time = e.time();
         s.rejoin_time = e.time();
@@ -670,6 +678,14 @@ unsafe extern "C" fn kill_scored(kill: *const KillInfo) {
     // SAFETY: a non-NULL `kill` is valid for the call; it is copied out at once.
     let k = unsafe { *kill };
     with_state(Some(Event::KillScored(k)), |s, a, e| bots::kill_scored(s, a, e, &k));
+}
+
+/// `player_stunt`: a player started a stunt (for the bots' opponent model).
+extern "C" fn player_stunt(player: c_int, _stunt: c_int) {
+    if player <= 0 {
+        return;
+    }
+    with_state(Some(Event::Stunt(player)), |s, a, e| bots::stunt(s, a, e, player));
 }
 
 // ---- the bot backend -------------------------------------------------------------------------------

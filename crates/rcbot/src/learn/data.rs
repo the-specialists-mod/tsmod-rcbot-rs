@@ -16,7 +16,7 @@ use super::header::LearnedHeader;
 use super::heatmap::Heatmap;
 use super::io::Reader;
 use super::loadout::LoadoutBandit;
-use super::opponents::PlayerKeys;
+use super::opponents::{OpponentModel, PlayerKeys};
 use super::perceptron::Perceptron;
 use super::values::{BotGaValues, IntGaValues};
 use super::weapon_stats::WeaponStats;
@@ -331,6 +331,8 @@ pub struct GlobalLearnedData {
     pub heatmap: Heatmap,
     /// Every bot's loadout estimates together: the prior each bot's own shrinks toward.
     pub loadout_prior: LoadoutBandit,
+    /// What the bots know of the players they met.
+    pub opponents: OpponentModel,
 }
 
 impl Default for GlobalLearnedData {
@@ -342,6 +344,7 @@ impl Default for GlobalLearnedData {
             weapon_prior: WeaponStats::default(),
             heatmap: Heatmap::default(),
             loadout_prior: LoadoutBandit::default(),
+            opponents: OpponentModel::default(),
         }
     }
 }

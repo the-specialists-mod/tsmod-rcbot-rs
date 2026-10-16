@@ -54,6 +54,12 @@ impl Bot {
         &self.learning.ledger
     }
 
+    /// How dangerous player `index` is to bots, from what every bot saw of them across maps:
+    /// 1 for an average or unknown player, 0.25-4 ([`crate::learn::opponents::OpponentModel::threat`]).
+    pub fn threat(&self, g: &BotGlobals<'_>, index: u32) -> f32 {
+        g.learned.player_keys.get(index).map_or(1.0, |k| g.learned.opponents.threat(k))
+    }
+
     /// How dangerous `waypoint` is for the bot's team on this map (the heatmap, 0..1).
     pub fn waypoint_danger(&self, g: &BotGlobals<'_>, waypoint: usize) -> f32 {
         g.learned.heatmap.danger(waypoint, self.team)
@@ -159,12 +165,24 @@ impl Bot {
         }
         self.learning.ledger.tick(now);
 
-        let enemy_dist = self.resolve(w, self.enemy).map(|e| (e.origin - self.me.origin).length());
+        let enemy = self.resolve(w, self.enemy);
+        let enemy_dist = enemy.as_ref().map(|e| (e.origin - self.me.origin).length());
         let weapon = self.state.weapon;
+        let sees = self.conditions & cond::SEE_ENEMY != 0;
+        if let Some(e) = enemy.as_ref().filter(|_| sees)
+            && let Some(key) = g.learned.player_keys.get(e.index)
+        {
+            // Dodging: the enemy's speed across the bot's view.
+            let mut to = e.origin - self.me.origin;
+            to.z = 0.0;
+            let to = to.normalize();
+            let sideways = (e.velocity.x * -to.y + e.velocity.y * to.x).abs() / 290.0;
+            g.learned.opponents.observe_exposure(key, dt, sideways);
+        }
         let l = &mut self.learning;
         if let Some(d) = enemy_dist {
             l.last_enemy_dist = d;
-            if self.conditions & cond::SEE_ENEMY != 0 {
+            if sees {
                 l.weapons.add_exposure(weapon, d, dt);
                 g.learned.weapon_prior.add_exposure(weapon, d, dt);
             }

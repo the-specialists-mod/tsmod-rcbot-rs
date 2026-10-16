@@ -751,8 +751,10 @@ impl Bot {
             let opp_buttons = enemy.button;
             let opp_key = g.learned.player_keys.get(enemy.index);
             let opp_human = enemy.player.is_some_and(|p| !p.is_bot);
-            self.kungfu.fight =
-                Fight { opponent: Some(enemy.index), opp_key, opp_human, opp_buttons, opp_interval: 1.0, ..Fight::default() };
+            // Its rhythm from earlier fights (the opponent model), else a second.
+            let known = opp_key.and_then(|k| g.learned.opponents.profile(k)).filter(|p| p.kf_fights > 0.0);
+            let opp_interval = known.map_or(1.0, |p| p.kf_interval);
+            self.kungfu.fight = Fight { opponent: Some(enemy.index), opp_key, opp_human, opp_buttons, opp_interval, ..Fight::default() };
             self.kungfu.decay();
         }
         self.kungfu.fight.updated = now;
@@ -824,7 +826,11 @@ impl Bot {
             }
         }
         self.kf_judge_reaction(now, end == FightEnd::Death);
-        let _ = g;
+        let f = &self.kungfu.fight;
+        if let Some(key) = f.opp_key {
+            let interval = (f.opp_last_attack > 0.0).then_some(f.opp_interval);
+            g.learned.opponents.observe_kungfu(key, &f.opp_attacks, f.opp_blocks, interval);
+        }
         let f = &mut self.kungfu.fight;
         f.opp_attacks = [0; ATTACK_KINDS];
         f.opp_blocks = 0;
