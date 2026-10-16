@@ -1572,3 +1572,30 @@ fn replayed_fights_teach_the_opponent_model() {
     let sniper = rig.learned.opponents.profile(OpponentKey::Player(30)).unwrap();
     assert!(sniper.exposure > 0.5 && sniper.dodge > 0.5, "{sniper:?}");
 }
+
+#[test]
+fn learning_replays_exactly_from_the_same_seed() {
+    // The same fight and events with the same seed learn the same, to the saved text.
+    let learn = || {
+        let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch, kungfu::Move::Kick], 60.0);
+        rig.learned.heatmap = crate::learn::Heatmap::new("ts_test", rig.wp.len());
+        let mut rng = XorShiftRandom::new(12);
+        let mut n = 0;
+        run(&mut rig, &mut w, &mut rng, 400, |w, _| {
+            n += 1;
+            w.ents.borrow_mut()[1].button = if n % 25 < 2 { buttons::ATTACK2 } else { 0 };
+        });
+        let t = w.time;
+        rig.replay(&mut w, &[(t, damage(2, 1, 20.0)), (t + 0.5, damage(1, 2, 35.0)), (t + 1.0, kill(1, 2, 0))]);
+        (
+            rig.bot.kungfu.save(),
+            rig.bot.weapon_stats().save(),
+            rig.bot.learning.loadout.save(),
+            rig.learned.opponents.save(),
+            rig.learned.heatmap.to_bytes(),
+        )
+    };
+    let a = learn();
+    assert_eq!(a, learn());
+    assert!(a.0.contains("stance all"), "{}", a.0);
+}

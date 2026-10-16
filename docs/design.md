@@ -181,6 +181,15 @@ bytes alone) still load. See §5.1.
   enemy-cost `CGA()` (16 genes). `tsweaps.rld`: the TS loadout `CGA()` (8 genes), no header.
   Both uncompressed.
 
+**The port's learned files** (`learn/store.rs`; design §4 has what they hold): small text files
+whose first line is `rcbot-<kind> <version>`; loaders read the versions they know and leave their
+data as it was for anything else or a damaged line; numbers are written as Rust prints them, so
+they round-trip exactly. `botprofiles/<key>.rkf` (kung fu, version 2), `.rwr` (weapons by range),
+`.rlo` (loadouts), where `<key>` is the profile id or `default-<name>`; `weaponstats.rwr`,
+`loadouts.rlo` and `botprofiles/players.rop` (every bot's); and one binary file,
+`waypoints/ts/<map>.rhm` (the heatmap). The host writes every data file to `<file>.tmp` and
+renames it over the old one.
+
 **HAL brain** (`chat/brain.rs`), `botprofiles/<id>_hal.brn`, as the 32-bit builds write it
 (`unsigned long` is 4 bytes): `"RCBOTHAL\0"`, `u8` order (5), the forward then the backward tree
 depth first (each node `u16` symbol, `u32` usage, `u16` count, `u16` children, then the children),
@@ -762,7 +771,8 @@ those by going through the port's own code when that code is ported.
   crediting the loadout it bought only when the inventory shows it; the opponent model (keys,
   threat of a strong and a weak player, stunt rate, kung fu habits, file round trip, map fade) and
   a replayed fight teaching it (hits, kills and deaths about bots only, range, weapon, kung fu
-  share, exposure and dodging from what the bot saw).
+  share, exposure and dodging from what the bot saw); a kung fu fight and replayed events learning
+  the same tables, to the saved bytes, from the same seed.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
