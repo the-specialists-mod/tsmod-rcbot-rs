@@ -741,7 +741,8 @@ impl Bot {
     pub(crate) fn kungfu_fight(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random, enemy: &Entity, dist: f32) {
         let now = w.time();
         let origin = enemy.entity_origin();
-        self.used_melee = true;
+        // No `used_melee`: that breeds the personal genes (jump/duck/strafe in knife fights),
+        // which kung fu doesn't use (design §4).
         // A new opponent, or the fight broke off (the enemy hidden or gone, the bot on another
         // task): what is open is scored, and the fight starts afresh, so nothing of a half-done
         // move (a wall to face) lingers.

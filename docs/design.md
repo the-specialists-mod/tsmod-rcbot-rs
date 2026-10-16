@@ -306,8 +306,11 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   port's step 4 skipped bots), so bots have reputations of each other.
 * **Bots without a profile**: with no `bot_profiles.ini`, or none free, upstream adds no bot; the
   port has to (its quota asks), so the bot gets `BotFunc_InitProfile`'s defaults with id 0, a
-  MegaHAL brain in memory (pretrained from `botprofiles0_hal.trn` if there is one) and no files
-  of its own (brain, `.rld`, `.rcr`), which would be shared by every such bot.
+  MegaHAL brain in memory (pretrained from `botprofiles0_hal.trn` if there is one) and no brain or
+  `.rcr` of its own, which would be shared by every such bot. Its learned files (`.rld`, `.rkf`
+  and the port's own) are kept under `botprofiles/default-<name>.<ext>` (the name cut to letters,
+  digits, `-`, `_`; `default` if nothing is left), so it keeps what it learns (upstream would save
+  nothing).
 * **Bots kept across a level change**: upstream's `RESPAWN_NEED_TO_REJOIN` bots rejoin through
   `BotFunc_AddBot`; the port keeps its bots and hands them back (`adopt_bot`), so they get the
   profile they had again (saved at `ServerDeactivate`, as upstream saves at `ClientDisconnect`).
@@ -431,6 +434,14 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   air, back), stances per opponent class (human or bot × attacking at least every 1.2 s or not),
   each blended from this opponent (per map) into its class into the profile, shrunk by count (3
   samples); counts decay 1% a fight and human fights weigh 2.5.
+* **Harmful upstream learners gated** (their objects still load and save byte for byte): kung fu
+  lives no longer breed the personal genes (only knife and katana fights, which read them, do);
+  the learned strafe maps the sigmoid to -1..1 (`2 out - 1`, dead band |s| < 0.5), so it goes both
+  ways; the enemy-cost buckets measure from each bucket to the entity, with the gene's size only
+  (a cost repels), so the cheapest bucket is away from the danger instead of always
+  `(-192, -192)` (§5.55). The combat code decides how it moves by them.
+* **Saving**: data files are written to `<file>.tmp` and renamed over the old one, so a crash
+  mid-save leaves the last good file.
 
 ## 5. Upstream bugs found
 
@@ -596,7 +607,7 @@ Found while porting; not filed upstream.
     the bot against its own PVS. Kept.
 55. **The enemy-cost buckets all get the same cost** (`workEnemyCosts`, `bot.cpp:16873`): the
     cheapest is always the first, so `m_vLowestEnemyCostVec`, where bots back off to within 256
-    units of an enemy, is always 192 units to the -x/-y side. Kept.
+    units of an enemy, is always 192 units to the -x/-y side. **Fixed** (§4).
 56. **`WantToFollowEnemy` ignores its perceptron** (`bot.cpp:11040`, "Not required?"): the bot
     follows while above 30% health. Kept.
 57. **Auto-waypoints moved to the floor stay in their old location bucket** (`client.cpp:541`,
@@ -665,6 +676,10 @@ The research for #104 lists RCBot's TS bugs elsewhere (weapon switching through 
 model-based teams, the 2.x `WStatus` kung fu id, free weapons instead of buying). The port fixes
 those by going through the port's own code when that code is ported.
 
+* **`decideJumpDuckStrafe` only strafes right** (`bot.cpp`): the strafe is the sigmoid's output
+  (0-1) times the speed, outside 0.25-0.75, so it is never negative. **Fixed** (§4).
+* **Kung fu lives bred the personal genes**: the port's kung fu fighter set `m_bUsedMelee`, so lives
+  spent fighting with kung fu (which never reads the jump/duck/strafe genes) graded them. **Fixed**.
 * **`TeamScore` and TS's team names** (`BotClient_Generic_TeamScore`): the team index comes from
   TFC's colour names (`Blue`, `Red`, `Green`, `Yellow`), so every TS team's score lands in slot 0
   (the last message wins) and the death fitness compares the wrong team's score. The port reads the
@@ -683,7 +698,8 @@ those by going through the port's own code when that code is ported.
   best, a full pool keeping combos not yet proven worse and the best; untried fitting combos first;
   answers scored from the ledger (only the opponent's damage, a block's cost, predicted attacks
   unscored, a death -2); estimates blended opponent → class → profile with human weight and decay;
-  a fight settled +2 by a kill and -2 by a death, once.
+  a fight settled +2 by a kill and -2 by a death, once; the learned strafe going both ways, kung fu
+  lives not breeding the personal genes, the cheapest cost bucket away from the danger.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

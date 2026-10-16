@@ -1362,3 +1362,57 @@ fn the_ledger_keeps_what_passed_with_each_opponent() {
     assert!(rig.bot.ledger().open_episodes().is_empty());
     assert_eq!(rig.bot.ledger().closed_episodes().last().map(|e| e.reward()), Some(-1.5));
 }
+
+#[test]
+fn the_learned_strafe_goes_both_ways() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(60.0, 0.0, 0.0), 0)]);
+    w.time = 10.0;
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.enemy = Some(w.entity(2).unwrap().handle());
+    // Personal genes 10-14 weigh the strafe perceptron's inputs (speed, distance, height, size,
+    // on ground): strongly negative, the sigmoid is near 0, which upstream turned into a slow
+    // strafe right; now it is a full strafe left.
+    let mut genes = vec![0.0; crate::learn::data::PERSONAL_GENES];
+    genes[13] = -20.0;
+    genes[14] = -20.0;
+    rig.bot.learned.personal = crate::learn::BotGaValues::from_values(genes.clone());
+    rig.bot.decide_jump_duck_strafe(&w, 60.0, Vector::new(60.0, 0.0, 0.0));
+    assert_eq!(rig.bot.strafe_speed, -rig.bot.max_speed * (2.0 * rig.bot.learned.strafe.output() - 1.0).abs());
+    assert!(rig.bot.strafe_speed < -0.9 * rig.bot.max_speed);
+    genes[13] = 20.0;
+    genes[14] = 20.0;
+    rig.bot.learned.personal = crate::learn::BotGaValues::from_values(genes);
+    rig.bot.decide_jump_duck_strafe(&w, 60.0, Vector::new(60.0, 0.0, 0.0));
+    assert!(rig.bot.strafe_speed > 0.9 * rig.bot.max_speed);
+}
+
+#[test]
+fn kung_fu_lives_dont_breed_the_personal_genes() {
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 60.0);
+    let mut rng = XorShiftRandom::new(2);
+    run(&mut rig, &mut w, &mut rng, 50, |_, _| {});
+    assert_eq!(rig.bot.kungfu.opponent(), Some(2));
+    assert!(!rig.bot.used_melee);
+}
+
+#[test]
+fn the_cheapest_cost_bucket_is_away_from_the_danger() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(200.0, 50.0, 0.0), 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    let mut rng = XorShiftRandom::new(1);
+    rig.bot.learned.seed_survival(&mut rng);
+    rig.bot.lowest_enemy_cost = 99999.0;
+    let enemy = w.entity(2).unwrap();
+    rig.bot.work_enemy_costs(&w, &enemy, 206.0);
+    // Upstream: always origin + (-192, -192, origin.z). Now the bucket farthest from the enemy.
+    let v = rig.bot.lowest_enemy_cost_vec;
+    assert_eq!((v.x, v.y, v.z), (-192.0, -192.0, 0.0));
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(-200.0, 150.0, 0.0), 0)]);
+    let enemy = w.entity(2).unwrap();
+    rig.bot.range_costs = [[0.0; BOT_COST_BUCKETS]; BOT_COST_BUCKETS];
+    rig.bot.work_enemy_costs(&w, &enemy, 250.0);
+    let v = rig.bot.lowest_enemy_cost_vec;
+    assert_eq!((v.x, v.y), (192.0, -192.0));
+}

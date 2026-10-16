@@ -13,7 +13,6 @@ use crate::api::{Api, Engine};
 use crate::world::{EngineRandom, HostWorld};
 use crate::{State, say};
 use rcbot::Vector;
-use rcbot::bot::kungfu::kungfu_file_name;
 use rcbot::bot::{Bot, BotCam, BotWorld, NO_CLIENT};
 use rcbot::chat::bot_chat::ChatKind;
 use rcbot::chat::brain::{HalFileNames, HalFileOverrides, cookie_is_valid};
@@ -21,7 +20,7 @@ use rcbot::chat::reply::HalBot;
 use rcbot::config::profile::{ProfileChoice, choose_profile, profile_file_name};
 use rcbot::config::rep::{player_rep_id, rep_file_name};
 use rcbot::config::{BOT_PLAYER_ID_FILE, BOT_PROFILES_FILE, BOT_PROFILES_FOLDER, BotProfile, PlayerId, flags as cfg};
-use rcbot::learn::data::bot_file_name;
+use rcbot::learn::store::profile_key;
 use std::path::PathBuf;
 use ts_plugin_api::log;
 
@@ -58,12 +57,19 @@ impl State {
         std::fs::read(self.path(rel)).ok()
     }
 
-    fn write(&self, rel: &str, bytes: &[u8]) {
+    /// Writes a data file atomically: a temporary file beside it, renamed over it, so a crash
+    /// or a full disk mid-save leaves the last good file (port addition).
+    pub(crate) fn write(&self, rel: &str, bytes: &[u8]) {
         let p = self.path(rel);
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        if let Err(e) = std::fs::write(&p, bytes) {
+        let mut tmp = p.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let r = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &p));
+        if let Err(e) = r {
+            let _ = std::fs::remove_file(&tmp);
             say(log::WARNING, &format!("can't write {}: {e}", p.display()));
         }
     }
@@ -118,18 +124,25 @@ fn wake_hal(s: &State, profile: &BotProfile, name: &str) -> HalBot {
     hal
 }
 
-/// `SaveHALBrainForPersonality` and `CBot::saveLearnedData` (bots with a profile).
+/// The name of a bot's own learned files in the profiles folder: `<key>.<ext>`, the key being
+/// the profile id, or `default-<name>` for a bot without a profile (design §4: upstream saved
+/// nothing for those, so they never kept what they learned).
+fn learned_file(b: &Bot, ext: &str) -> String {
+    format!("{BOT_PROFILES_FOLDER}/{}.{ext}", profile_key(b.profile.profile_id, &b.name))
+}
+
+/// `SaveHALBrainForPersonality` (bots with a profile) and `CBot::saveLearnedData` (every bot,
+/// design §4).
 pub(crate) fn save_bot(s: &State, b: &Bot) {
     let id = b.profile.profile_id;
-    if id == 0 {
-        return;
-    }
-    if let Some(hal) = &b.hal {
+    if id != 0
+        && let Some(hal) = &b.hal
+    {
         let f = HalFileNames::new(id, &HalFileOverrides::default());
         s.write(&f.brain, &hal.save_brain());
     }
-    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id)), &b.learned.save(id));
-    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id)), b.kungfu.save().as_bytes());
+    s.write(&learned_file(b, "rld"), &b.learned.save(id));
+    s.write(&learned_file(b, "rkf"), b.kungfu.save().as_bytes());
 }
 
 /// `CBotGlobals::saveLearnedData`: the teams' enemy-cost GAs and the TS loadout GA.
@@ -180,13 +193,13 @@ pub(crate) fn new_bot(s: &mut State, e: Engine, index: u32, name: String, profil
     bot.hal = Some(hal);
     bot.join_server_time = e.time();
     let id = bot.profile.profile_id;
+    if let Some(b) = s.read(&learned_file(&bot, "rld")) {
+        bot.learned.load(&b, id);
+    }
+    if let Some(k) = s.read(&learned_file(&bot, "rkf")) {
+        bot.kungfu.load(&String::from_utf8_lossy(&k));
+    }
     if id != 0 {
-        if let Some(b) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id))) {
-            bot.learned.load(&b, id);
-        }
-        if let Some(k) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id))) {
-            bot.kungfu.load(&String::from_utf8_lossy(&k));
-        }
         let rcr = format!("{BOT_PROFILES_FOLDER}/{}", rep_file_name(id));
         for c in s.clients.iter().filter(|c| c.is_used()) {
             if let Some(new) = bot.profile.rep.add_load_rep(c.player_rep_id, s.read(&rcr).as_deref()) {
