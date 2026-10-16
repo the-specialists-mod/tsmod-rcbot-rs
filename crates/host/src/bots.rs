@@ -323,10 +323,10 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
 }
 
 /// `sound`: `pfnEmitSound`'s part for the bots.
-pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, sample: &str) {
+pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, origin: Option<Vector>, volume: f32, sample: &str) {
     let Ok(entity) = u32::try_from(entity) else { return };
     let w = HostWorld::new(a, e);
-    s.bots.sound(&w, entity, sample);
+    s.bots.sound(&w, entity, origin, volume, sample);
 }
 
 /// The view angles the game sets on a bot (`pev->fixangle`: a spawn, a teleport, a stunt), as

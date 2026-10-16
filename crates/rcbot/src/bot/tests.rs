@@ -663,7 +663,7 @@ fn sounds_are_told_apart_and_an_enemy_is_listened_to() {
     mgr.add(bot);
     let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
     mgr.get_mut(1).unwrap().me = w.entity(1).unwrap();
-    mgr.sound(&w, 2, "player/pl_step2.wav");
+    mgr.sound(&w, 2, None, 1.0, "player/pl_step2.wav");
     let t = *mgr.get(1).unwrap().tasks().current().unwrap();
     // Upstream's listen task has no entity, so it fails as soon as it runs (design §5).
     assert_eq!((t.kind, t.edict), (TaskKind::ListenToSound, None));
@@ -672,8 +672,20 @@ fn sounds_are_told_apart_and_an_enemy_is_listened_to() {
     mgr2.add(setup(false).1);
     let w2 = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(900.0, 0.0, 0.0), 0)]);
     mgr2.get_mut(1).unwrap().me = w2.entity(1).unwrap();
-    mgr2.sound(&w2, 2, "player/pl_step2.wav");
+    mgr2.sound(&w2, 2, None, 1.0, "player/pl_step2.wav");
     assert!(mgr2.get(1).unwrap().tasks().is_empty());
+    // Where the game played it counts, not where the entity is.
+    mgr2.sound(&w2, 2, Some(Vector::new(200.0, 0.0, 0.0)), 1.0, "player/pl_step2.wav");
+    let t = *mgr2.get(1).unwrap().tasks().current().unwrap();
+    assert_eq!((t.kind, t.vector), (TaskKind::ListenToSound, Vector::new(200.0, 0.0, 0.0)));
+    // Silent sounds, and kinds no bot reacts to, aren't heard.
+    let mut mgr3 = BotManager::default();
+    mgr3.add(setup(false).1);
+    mgr3.get_mut(1).unwrap().me = w.entity(1).unwrap();
+    mgr3.sound(&w, 2, None, 0.0, "player/pl_step2.wav");
+    mgr3.sound(&w, 2, None, 1.0, "weapons/glock.wav");
+    assert!(mgr3.get(1).unwrap().tasks().is_empty());
+    assert!(SoundKind::Player.is_heard() && SoundKind::PlayerPain.is_heard() && !SoundKind::Door.is_heard());
 }
 
 #[test]

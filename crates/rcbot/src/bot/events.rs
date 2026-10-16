@@ -9,11 +9,11 @@
 
 use super::remember::REMEMBER_LOST_ENEMY;
 use super::{Action, Bot, BotGlobals, BotWorld, EntRef, Entity, LookTask, Task, TaskKind, cond};
-use crate::Random;
 use crate::chat::bot_chat::{ChatContext, ChatKind, ChatPlayer, ReplyParams, bot_chat, bot_chat_reply, rep_array_num, typing_time};
 use crate::chat::text::humanize_string;
 use crate::config::flags as cfg;
 use crate::config::rep::{BOT_MID_REP, decrease_rep_roll, increase_rep_roll};
+use crate::{Random, Vector};
 
 /// `BOT_HEAR_DISTANCE`.
 pub const BOT_HEAR_DISTANCE: f32 = 650.0;
@@ -52,6 +52,13 @@ impl SoundKind {
         } else {
             SoundKind::Unknown
         }
+    }
+}
+
+impl SoundKind {
+    /// Whether a bot does anything on hearing this kind ([`Bot::hear_sound`]): players' sounds.
+    pub fn is_heard(self) -> bool {
+        matches!(self, SoundKind::Player | SoundKind::PlayerPain)
     }
 }
 
@@ -299,11 +306,11 @@ impl Bot {
         }
     }
 
-    /// `CBot::HearSound`, TS's kinds: an enemy player's sound (unless building a human tower)
-    /// makes the bot listen; pain of its task's entity is noted.
+    /// `CBot::HearSound`, TS's kinds: an enemy player's sound at `origin` (unless building a
+    /// human tower) makes the bot listen; pain of its task's entity is noted.
     ///
     /// Upstream gives the listen task no entity, so it fails at once (design §5). Kept.
-    pub fn hear_sound(&mut self, w: &dyn BotWorld, kind: SoundKind, source: &Entity) {
+    pub fn hear_sound(&mut self, w: &dyn BotWorld, kind: SoundKind, source: &Entity, origin: Vector) {
         match kind {
             SoundKind::PlayerPain => {
                 if self.tasks.current().and_then(|t| t.edict) == Some(source.handle()) {
@@ -313,7 +320,7 @@ impl Bot {
             SoundKind::Player => {
                 if self.is_enemy(w, source) && self.enemy.is_none() && self.tasks.current().is_none_or(|t| t.kind != TaskKind::HumanTower) {
                     let id = self.tasks.new_schedule_id();
-                    self.add_priority_task(Task::new(TaskKind::ListenToSound, id, None, 0, 0.0, source.entity_origin()));
+                    self.add_priority_task(Task::new(TaskKind::ListenToSound, id, None, 0, 0.0, origin));
                 }
             }
             SoundKind::Unknown | SoundKind::Door | SoundKind::Weapon | SoundKind::Button => {}

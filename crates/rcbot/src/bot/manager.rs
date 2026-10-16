@@ -6,8 +6,8 @@
 
 use super::events::BOT_HEAR_DISTANCE;
 use super::{Bot, BotEvent, BotGlobals, BotWorld, Entity, Frame, OtherBot, SoundKind, SquadOrder, cond};
-use crate::Random;
 use crate::config::MAX_PLAYERS;
+use crate::{Random, Vector};
 
 /// A bot slot: the bot and the frame it produced.
 pub type BotSlot = Option<Bot>;
@@ -193,17 +193,23 @@ impl BotManager {
     }
 
     /// `pfnEmitSound`'s loop: every bot without an enemy within [`BOT_HEAR_DISTANCE`] of the
-    /// entity (not the entity itself or its owner) hears it.
-    pub fn sound(&mut self, w: &dyn BotWorld, entity: u32, sample: &str) {
-        let Some(e) = w.entity(entity) else { return };
+    /// sound (not the entity itself or its owner) hears it. The sound is where the game played
+    /// it (`origin`; else the entity's centre, upstream's `EntityOrigin`, which for the world is
+    /// the middle of the map); a silent one (`volume` 0) isn't heard. Kinds no bot reacts to stop
+    /// here.
+    pub fn sound(&mut self, w: &dyn BotWorld, entity: u32, origin: Option<Vector>, volume: f32, sample: &str) {
         let kind = SoundKind::of_sample(sample);
-        let origin = e.entity_origin();
+        if !kind.is_heard() || volume <= 0.0 {
+            return;
+        }
+        let Some(e) = w.entity(entity) else { return };
+        let origin = origin.unwrap_or_else(|| e.entity_origin());
         for b in self.iter_mut() {
             if Some(b.index) == e.owner || b.index == e.index || b.enemy.is_some() {
                 continue;
             }
             if b.distance_from(origin, false) < BOT_HEAR_DISTANCE {
-                b.hear_sound(w, kind, &e);
+                b.hear_sound(w, kind, &e, origin);
             }
         }
     }

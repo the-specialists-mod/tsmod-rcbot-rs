@@ -52,7 +52,7 @@ enum Event {
     Disconnect(i32),
     Damaged(i32, i32),
     Killed(i32, i32),
-    Sound(i32, String),
+    Sound(i32, Option<Vector>, f32, String),
     Say(i32, Vec<String>),
 }
 
@@ -160,7 +160,7 @@ fn drain(s: &mut State, a: Api, e: Engine) {
             Event::Disconnect(i) => bots::disconnect(s, a, e, i),
             Event::Damaged(victim, attacker) => damaged(s, e, victim, attacker),
             Event::Killed(victim, killer) => bots::killed(s, a, e, victim, killer),
-            Event::Sound(entity, sample) => bots::sound(s, a, e, entity, &sample),
+            Event::Sound(entity, origin, volume, sample) => bots::sound(s, a, e, entity, origin, volume, &sample),
             Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
     }
@@ -596,14 +596,21 @@ extern "C" fn player_killed(victim: c_int, attacker: c_int, _inflictor: c_int) {
     with_state(Some(Event::Killed(victim, attacker)), |s, a, e| bots::killed(s, a, e, victim, attacker));
 }
 
-/// `pfnEmitSound` for the bots' hearing.
-unsafe extern "C" fn sound(entity: c_int, _origin: *const f32, sample: *const c_char, _volume: f32, _attenuation: f32) {
+/// `pfnEmitSound` for the bots' hearing. Sounds no bot reacts to stop here, before the state is
+/// locked or anything copied (most of a game's sounds).
+unsafe extern "C" fn sound(entity: c_int, origin: *const f32, sample: *const c_char, volume: f32, _attenuation: f32) {
     if sample.is_null() {
         return;
     }
     // SAFETY: the server's string for the call.
-    let sample = unsafe { CStr::from_ptr(sample) }.to_string_lossy().into_owned();
-    with_state(Some(Event::Sound(entity, sample.clone())), |s, a, e| bots::sound(s, a, e, entity, &sample));
+    let sample = unsafe { CStr::from_ptr(sample) }.to_string_lossy();
+    if !rcbot::bot::SoundKind::of_sample(&sample).is_heard() {
+        return;
+    }
+    let sample = sample.into_owned();
+    // SAFETY: a non-NULL origin is the server's 3 floats for the call.
+    let origin = (!origin.is_null()).then(|| Vector::from(unsafe { *origin.cast::<[f32; 3]>() }));
+    with_state(Some(Event::Sound(entity, origin, volume, sample.clone())), |s, a, e| bots::sound(s, a, e, entity, origin, volume, &sample));
 }
 
 /// `ClientCommand`'s `say`/`say_team` (bots' own, from inside `bot_command`, are queued).

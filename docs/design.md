@@ -367,6 +367,10 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
   the stuck and jump-waypoint jumps already are.
+* **Sounds** (`sound` callback): a bot hears a sound where the game played it (the callback's
+  origin; upstream's `pfnEmitSound` hook took the entity's centre, which for the world is the
+  middle of the map), not when it is silent (volume 0), and only the kinds it reacts to
+  (`player/…`) are looked at; the host drops the rest before taking the state lock.
 * **Weapons the bot owns** come from the game (`player_inventory`, `BotWorld::inventory`) at the
   first frame of a life, when the weapon in hand changes, after a drop, after a refused switch
   and every second: guns it never held are known with their rounds (upstream knew only weapons
@@ -681,7 +685,7 @@ those by going through the port's own code when that code is ported.
   waiting for a lift, `CheckLift` pressing a door's button (a world with a door and its button),
   a momentary button held while its door moves, grenade-throw waypoints failing in TS, touching
   a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation
-  (and the priority quirk), reputation after a death, sound kinds and hearing range, chat lines
+  (and the priority quirk), reputation after a death, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
   (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, `tm_` maps' model
   teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
   bought before each spawn; unit tests cover the
