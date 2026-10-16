@@ -1,10 +1,12 @@
 # Builds the four targets and publishes a GitHub release when a `v*` tag is pushed:
-#   tsmod-rcbot-rs-<tag>-<platform>.{zip,tar.gz}        optimized, stripped (cargo xtask dist)
-#   tsmod-rcbot-rs-<tag>-<platform>-debug.{zip,tar.gz}  the same libraries with debug info
-#                                                       (dist --debug-info), for symbolizing crashes
-# Each archive holds a ts/ directory to copy over the server's ts/ (dlls/tsmod_rcbot* and
-# tsmod/rcbot/, the plugin's data), with the licence files beside it. A manual run
-# (workflow_dispatch) builds the archives as a workflow artifact without publishing a release.
+#   tsmod-rcbot-rs-<tag>-linux-<arch>-glibc<ver>.tar.gz   Linux, built against glibc 2.36
+#                                                         (Debian 12) and 2.43 (Ubuntu 26.04)
+#   tsmod-rcbot-rs-<tag>-windows-<arch>.zip               Windows
+# each also as -debug (debug info, for symbolizing crashes); the others are stripped
+# (.github/package.sh). Each archive holds a ts/ directory to copy over the server's ts/
+# (dlls/tsmod_rcbot*, tsmod/rcbot/), with the licence files beside it. A Linux build runs on
+# that glibc and newer. A manual run (workflow_dispatch) builds the archives as workflow
+# artifacts without publishing a release.
 name: release
 
 on:
@@ -15,16 +17,15 @@ on:
 permissions:
   contents: write
 
+# The commit the port's release (the pinned goldsrc-sys / ts-plugin-api) is built against.
+env:
+  FWGS_REF: 51353ff8d65e58300eeb2bd014867673f1f367c6
+
 jobs:
-  build:
-    # 24.04 for its clang 18: bindgen with 22.04's clang 14 fails on the MinGW intrinsics headers.
+  version:
     runs-on: ubuntu-24.04
-    env:
-      # goldsrc-sys (the port's) generates its bindings from the FWGS headers.
-      FWGS_DIR: ${{ github.workspace }}/xash3d-fwgs
     steps:
       - uses: actions/checkout@v4
-
       - name: Check the version matches the tag
         if: github.ref_type == 'tag'
         run: |
@@ -35,52 +36,116 @@ jobs:
             exit 1
           fi
 
-      # The commit the port's release (the pinned ts-plugin-api) is built against.
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - glibc: "2.36"
+            image: debian:bookworm
+          - glibc: "2.43"
+            image: ubuntu:26.04
+    runs-on: ubuntu-24.04
+    # Built on the distribution, so the libraries need no newer glibc than its own.
+    container: ${{ matrix.image }}
+    steps:
+      - name: Packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git gcc gcc-multilib libc6-dev libclang-dev binutils zip
+
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
+            --target i686-unknown-linux-gnu,x86_64-unknown-linux-gnu
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # goldsrc-sys generates its bindings from the FWGS headers. (In a container the workspace
+      # path is only right in $GITHUB_WORKSPACE, not in the github context.)
       - name: FWGS headers
         run: |
-          git clone --filter=blob:none https://github.com/FWGS/xash3d-fwgs xash3d-fwgs
-          git -C xash3d-fwgs checkout 51353ff8d65e58300eeb2bd014867673f1f367c6
-          git -C xash3d-fwgs submodule update --init 3rdparty/library_suffix
-
-      - name: Toolchains
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib mingw-w64 libclang-dev zip
-          rustup toolchain install stable --profile minimal \
-            --target i686-unknown-linux-gnu,x86_64-unknown-linux-gnu,i686-pc-windows-gnu,x86_64-pc-windows-gnu
-          rustup default stable
+          git clone --filter=blob:none https://github.com/FWGS/xash3d-fwgs "$GITHUB_WORKSPACE/xash3d-fwgs"
+          git -C "$GITHUB_WORKSPACE/xash3d-fwgs" checkout "$FWGS_REF"
+          git -C "$GITHUB_WORKSPACE/xash3d-fwgs" submodule update --init 3rdparty/library_suffix
+          echo "FWGS_DIR=$GITHUB_WORKSPACE/xash3d-fwgs" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: glibc${{ matrix.glibc }}
 
       - name: Tests
         run: cargo xtask test
 
       - name: Package
         run: |
-          set -euo pipefail
           version="${GITHUB_REF_NAME}"
           [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
-          mkdir -p out
-          for variant in "" --debug-info; do
-            rm -rf dist
-            # dist also fails a Windows DLL that imports a MinGW runtime DLL.
-            cargo xtask dist $variant
-            suffix=""
-            [[ -n $variant ]] && suffix="-debug"
-            for dir in dist/*/; do
-              platform=$(basename "$dir")
-              name="tsmod-rcbot-rs-$version-$platform$suffix"
-              stage="stage/$name"
-              mkdir -p "$stage/ts"
-              cp -r "$dir"dlls "$dir"tsmod "$stage/ts/"
-              cp LICENSE GPL-EXCEPTION.txt README.md "$stage/"
-              case $platform in
-                windows-*) (cd "$stage" && zip -qr "$GITHUB_WORKSPACE/out/$name.zip" .) ;;
-                *) tar -C "$stage" -czf "out/$name.tar.gz" . ;;
-              esac
-            done
+          .github/package.sh "$version" "-glibc${{ matrix.glibc }}" linux
+        shell: bash
+
+      - name: Check the glibc the libraries need
+        shell: bash
+        run: |
+          set -euo pipefail
+          for lib in target/*-linux-gnu/release/libtsmod_rcbot.so; do
+            need=$(objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$lib needs glibc $need"
+            if [[ $(printf '%s\n%s\n' "$need" "${{ matrix.glibc }}" | sort -V | tail -1) != "${{ matrix.glibc }}" ]]; then
+              echo "$lib needs glibc $need, newer than ${{ matrix.glibc }}" >&2
+              exit 1
+            fi
           done
-          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-glibc${{ matrix.glibc }}
+          path: out/*
+
+  windows:
+    needs: version
+    # 24.04 for its clang 18: bindgen with 22.04's clang 14 fails on the MinGW intrinsics headers.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: FWGS headers
+        run: |
+          git clone --filter=blob:none https://github.com/FWGS/xash3d-fwgs xash3d-fwgs
+          git -C xash3d-fwgs checkout "$FWGS_REF"
+          git -C xash3d-fwgs submodule update --init 3rdparty/library_suffix
+          echo "FWGS_DIR=$GITHUB_WORKSPACE/xash3d-fwgs" >> "$GITHUB_ENV"
+
+      - name: Toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 libclang-dev zip
+          rustup toolchain install stable --profile minimal --target i686-pc-windows-gnu,x86_64-pc-windows-gnu
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
+          .github/package.sh "$version" "" windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
 
       - name: Check asset names
         run: |
@@ -89,18 +154,15 @@ jobs:
           [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
           expected=()
           for suffix in "" -debug; do
-            for platform in linux-i686 linux-x86_64; do expected+=("tsmod-rcbot-rs-$version-$platform$suffix.tar.gz"); done
-            for platform in windows-i686 windows-x86_64; do expected+=("tsmod-rcbot-rs-$version-$platform$suffix.zip"); done
+            for glibc in 2.36 2.43; do
+              for arch in i686 x86_64; do expected+=("tsmod-rcbot-rs-$version-linux-$arch-glibc$glibc$suffix.tar.gz"); done
+            done
+            for arch in i686 x86_64; do expected+=("tsmod-rcbot-rs-$version-windows-$arch$suffix.zip"); done
           done
           diff <(printf '%s\n' "${expected[@]}" | sort) <(ls out | sort)
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tsmod-rcbot-rs
-          path: out/*
 
       - name: Release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" out/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

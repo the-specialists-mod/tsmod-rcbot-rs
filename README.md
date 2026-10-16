@@ -62,10 +62,11 @@ cargo xtask e2e      # on the port's engine roots (~/games): rcbot bots join, mo
 ```
 
 Releases are built by GitHub Actions (`.github/workflows/release.yml`): pushing a `v*` tag that
-matches `Cargo.toml`'s version tests, builds and publishes `tsmod-rcbot-rs-<tag>-<platform>`
-archives (and `-debug` ones with debug info) for linux-i686, linux-x86_64, windows-i686 and
-windows-x86_64. Extract one over the server's game folder: it holds `ts/dlls/` and
-`ts/tsmod/rcbot/`.
+matches `Cargo.toml`'s version tests, builds and publishes the archives (and `-debug` ones with
+debug info): `tsmod-rcbot-rs-<tag>-linux-{i686,x86_64}-glibc{2.36,2.43}.tar.gz`, built on
+Debian 12 and Ubuntu 26.04 (pick the newest glibc your server has or exceeds), and
+`tsmod-rcbot-rs-<tag>-windows-{i686,x86_64}.zip`. Extract one over the server's game folder: it
+holds `ts/dlls/` and `ts/tsmod/rcbot/`.
 
 ## Credits
 

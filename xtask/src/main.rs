@@ -2,10 +2,13 @@
 //!
 //! ```text
 //! build [--release]   the tsmod_rcbot library for the port's four platforms
-//! dist [--debug-info] release build -> dist/<platform>/dlls/<port file name> (stripped unless
+//! dist [--debug-info] [--platform <prefix>]
+//!                     release build -> dist/<platform>/dlls/<port file name> (stripped unless
 //!                     --debug-info) + dist/<platform>/tsmod/rcbot/ (the plugin's data directory:
 //!                     bot_weapons.ini, waypoints); checks the DLLs import no MinGW runtime.
-//!                     Copy dist/<platform>/ over a port install's ts/ directory.
+//!                     Copy dist/<platform>/ over a port install's ts/ directory. --platform
+//!                     keeps the platforms starting with the prefix (`linux`, `windows-i686`): the
+//!                     release workflow builds Linux in containers of each glibc it ships.
 //! e2e [root...]       end to end on the port's engine roots (e2e.rs): installs the port, then
 //!                     tsmod_rcbot, and checks rcbot bots join, move and use waypoints
 //! test                unit tests on the host and on i686 Linux
@@ -82,8 +85,21 @@ fn cargo() -> Command {
     c
 }
 
+/// The targets whose platform starts with `prefix` (all without one).
+fn targets(prefix: Option<&str>) -> Result<Vec<&'static Target>, String> {
+    let v: Vec<_> = TARGETS.iter().filter(|t| prefix.is_none_or(|p| t.platform.starts_with(p))).collect();
+    if v.is_empty() {
+        return Err(format!("no platform starts with {:?}", prefix.unwrap_or_default()));
+    }
+    Ok(v)
+}
+
 fn build(release: bool) -> Result<(), String> {
-    for t in &TARGETS {
+    build_targets(release, &targets(None)?)
+}
+
+fn build_targets(release: bool, targets: &[&Target]) -> Result<(), String> {
+    for t in targets {
         let mut c = cargo();
         c.args(["build", "-p", "tsmod-rcbot", "--target", t.triple]);
         if release {
@@ -120,9 +136,10 @@ pub(crate) fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn dist(debug_info: bool) -> Result<(), String> {
-    build(true)?;
-    for t in &TARGETS {
+fn dist(debug_info: bool, platform: Option<&str>) -> Result<(), String> {
+    let targets = targets(platform)?;
+    build_targets(true, &targets)?;
+    for t in targets {
         let base = root().join("dist").join(t.platform);
         let dlls = base.join("dlls");
         std::fs::create_dir_all(&dlls).map_err(|e| e.to_string())?;
@@ -204,12 +221,21 @@ fn main() -> ExitCode {
     let flag = |f: &str| args.iter().any(|a| a == f);
     let result = match args.first().map(String::as_str) {
         Some("build") => build(flag("--release")),
-        Some("dist") => dist(flag("--debug-info")),
+        Some("dist") => {
+            let platform = args.iter().position(|a| a == "--platform").map(|i| args.get(i + 1).map(String::as_str));
+            match platform {
+                Some(None) => Err("--platform needs a prefix".into()),
+                p => dist(flag("--debug-info"), p.flatten()),
+            }
+        }
         Some("test") => test(),
         Some("lint") => lint(),
         Some("all") => lint().and_then(|()| test()).and_then(|()| build(false)),
-        Some("e2e") => dist(false).and_then(|()| e2e::run(&root(), &args[1..])),
-        _ => Err("usage: cargo xtask build [--release] | dist [--debug-info] | test | lint | all | e2e [root...]".into()),
+        Some("e2e") => dist(false, None).and_then(|()| e2e::run(&root(), &args[1..])),
+        _ => {
+            Err("usage: cargo xtask build [--release] | dist [--debug-info] [--platform <prefix>] | test | lint | all | e2e [root...]"
+                .into())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
