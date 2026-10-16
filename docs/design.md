@@ -41,10 +41,13 @@ reputations, HAL brains and keyword lists), `bot_playerids.ini`, `bot_chat.ini`,
 `start_frame` it runs every bot's [`Bot::frame`] (upstream's `Think` + `RunPlayerMove`) and
 passes the usercmd to `run_cmd` and the bot's actions to `bot_command`, `select_weapon`,
 `clear_loadout`/`buy` and `kick_bot` (all bots think before any of that runs, so their thinks
-share one world that reads each entity, and each player's `player_info`, once a frame; the game
-state is read once a frame too); it hears deaths (`player_killed`), damage
-(`player_damaged`), sounds (`sound`) and players' `say` (`client_command`), and draws the HUD
-menus (`ShowMenu`) and the bot camera with the engine's functions.
+share one world that reads each entity once a frame). The players and the frame's rules come from
+the snapshot the server builds at `StartFrame` (`players`, `frame_info`, read once a frame and
+shared by every world until the next, callbacks included; `player_info` only for a client that
+joined since), the team scores from `game_state` once a second. It hears deaths
+(`player_killed`), damage (`damage`), sounds (`sound`), touches (`entity_touch`), shots
+(`weapon_fired`), pickups (`item_pickup`) and players' `say` (`client_command`), and draws the
+HUD menus (`ShowMenu`) and the bot camera with the engine's functions.
 
 The state sits behind a mutex that callbacks only `try_lock`: the server calls back into the
 plugin from inside API calls (`create_bot` spawns the bot, `run_cmd` runs its think), and a
@@ -271,11 +274,14 @@ bucket search order.
   (`PlayerInfo::team`; upstream compared `model` keys, which TS 3.0's teams don't use), except on
   a `tm_` map the game doesn't run as teamplay (upstream's `NON_TS_TEAMPLAY`, which forces
   `m_bTeamPlay`): there every team is 0, so the bots compare `model` keys as upstream does. What the
-  TS user messages told the bot comes from `PlayerInfo`: `WeaponInfo` when the weapon, clip or
-  reserve changes (the weapon in hand is the current weapon every frame), `TSState` as the stunt
-  state; the fire mode, attachments, free slots, power-ups, time scale and permanent kung fu are
-  in `PlayerState` too. Damage comes from `player_damaged` (the bot
-  faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
+  TS user messages told the bot comes from the frame's `PlayerSnapshot` (plugin API v6; v5's
+  `PlayerInfo` per player and frame): `WeaponInfo` when the weapon, clip or reserve changes (the
+  weapon in hand is the current weapon every frame), `TSState` as the stunt state; the fire mode,
+  attachments, free slots, power-ups, time scale, armour, the player flags (on the ground, prone,
+  stunting, ...), the stunt bits and the close-combat and stunt timers (`CombatState`) are in
+  `PlayerState` too (the snapshot has no permanent kung fu flag, which nothing read). Damage comes
+  from `damage` (the bot faces the attacker); upstream guessed from a health drop and looked 128
+  units behind itself.
 * **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47). The
   engine copies a usercmd's angles into `pev->v_angle` only while `pev->fixangle` is 0
   (`SV_RunCmd`), and clears `fixangle` only when it sends a client `svc_setangle`/`svc_addangle`,
@@ -404,7 +410,7 @@ bucket search order.
   (`player/…`) are looked at; the host drops the rest before taking the state lock.
 * **Weapons the bot owns** come from the game (`player_inventory`, `BotWorld::inventory`) at the
   first frame of a life, when the weapon in hand changes, after a drop, after a refused switch
-  and every second: guns it never held are known with their rounds (upstream knew only weapons
+  and when the snapshot's `inventory_serial` changes (every second without one): guns it never held are known with their rounds (upstream knew only weapons
   it had held, TS sending no `WeaponList`), and weapons it lost are forgotten. A new life starts
   with no guns but kung fu (upstream kept the last life's). The current weapon is the one the
   game reports in hand; `SwitchWeapon` asks for a switch (once, until the game shows it or a
@@ -418,8 +424,12 @@ bucket search order.
   and again after each spawn (`SpawnInit` reset the clock). Under v5 the port's bot rounded and
   carried the remainder itself and sent from 9.5 ms; the skip is gone with the server's carry,
   which can't lose time to truncation.
-* **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
-  (the bot's `team`); see §5 for upstream's indexing.
+* **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` once a second, by rules
+  team (the bot's `team`); see §5 for upstream's indexing.
+* **The vision pass** (`UpdateVisibles`) stops at the frame's highest entity index in use
+  (`FrameInfo::highest_edict`, `BotWorld::highest_entity`) instead of `maxEntities`, and drops
+  what it saw above it; upstream walked every slot up to `gpGlobals->maxEntities` (usually 900 to
+  4096 on a map using a few hundred).
 * **The trigger** (`bot/fire.rs`, data in `weapons/ts_data.rs` from the port's `weapons.toml`):
   upstream held `+attack` on 90% of thinks, which in TS 3.0 fires a semi-automatic or burst gun
   once and never again while held (`CTSGun::PrimaryAttack` fires those on a fresh press). The

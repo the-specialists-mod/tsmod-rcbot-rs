@@ -86,8 +86,10 @@ pub struct State {
     pub(crate) sprite: i32,
     /// `m_sModelIndexFireball` (`sprites/zerogxplode.spr`, `util explo`).
     pub(crate) fireball: i32,
-    /// `m_iTeamScores`: the `TeamScore` values (`GameState::team_scores`), refreshed every frame.
+    /// `m_iTeamScores`: the `TeamScore` values (`GameState::team_scores`), refreshed every second.
     pub(crate) team_scores: [i32; 4],
+    /// When the team scores are read next.
+    next_scores: f32,
     pub(crate) editor: editor::Editor,
     pub(crate) squads: Squads,
     pub(crate) botcam: BotCam,
@@ -286,6 +288,7 @@ extern "C" fn game_init() {
         sprite: 0,
         fireball: 0,
         team_scores: [0; 4],
+        next_scores: 0.0,
         editor: editor::Editor::default(),
         squads: Squads::default(),
         botcam: BotCam::default(),
@@ -336,7 +339,8 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
     world::NON_TS_TEAMPLAY.store(map.starts_with("tm_"), Ordering::Relaxed);
     with_state(None, |s, a, e| {
         s.map = map;
-        world::refresh_game_state(a);
+        world::refresh_frame(a);
+        s.next_scores = 0.0;
         s.weapons.clear();
         s.bots.clear();
         s.stats.clear();
@@ -453,8 +457,14 @@ extern "C" fn shutdown() {
 /// `StartFrame`: each bot thinks and moves; the waypoint editor draws.
 extern "C" fn start_frame() {
     with_state(None, |s, a, e| {
-        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages.
-        s.team_scores = world::refresh_game_state(a).team_scores;
+        // The frame's players and rules, once for every bot and callback (plugin API v6).
+        let frame = world::refresh_frame(a);
+        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages: `FrameInfo` lacks
+        // them, and only a death's fitness reads them, so `game_state` once a second.
+        if frame.time >= s.next_scores || frame.time < s.next_scores - 2.0 {
+            s.next_scores = frame.time + 1.0;
+            s.team_scores = a.game_state().team_scores;
+        }
         editor::frame(s, a, e);
         bots::force_grip_frame(s, a, e);
         map_config_frame(s, e);

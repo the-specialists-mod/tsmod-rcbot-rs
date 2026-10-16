@@ -101,10 +101,15 @@ impl Bot {
                 self.switch_pending = None;
             }
             self.current_weapon = Some(held);
-            if self.next_inventory_sync <= now {
+            // With the game's inventory serial, the inventory is read again only when it changed
+            // (or a sync was asked for); without one, every second.
+            let serial = self.state.inventory_serial;
+            let changed = serial != 0 && serial != self.inventory_serial;
+            if changed || (self.next_inventory_sync <= now && (serial == 0 || self.next_inventory_sync == 0.0)) {
                 self.next_inventory_sync = now + INVENTORY_SYNC;
                 if let Some(owned) = w.inventory(self.index) {
                     self.weapons.sync_inventory(&owned, g.weapons, g.presets);
+                    self.inventory_serial = serial;
                 }
             }
             let info = (self.state.weapon, self.state.clip, self.state.ammo);
@@ -204,6 +209,7 @@ impl Bot {
         self.weapons.add(TsWeapon::KungFu.id(), g.weapons);
         self.switch_pending = None;
         self.next_inventory_sync = 0.0;
+        self.inventory_serial = 0;
         self.next_reload_time = 0.0;
         let now = self.now;
         self.kf_settle(g, now, super::kungfu::FightEnd::Broken, rng);

@@ -169,6 +169,92 @@ pub struct PlayerState {
     pub kungfu: bool,
     /// Carries the capture-the-briefcase case.
     pub has_flag: bool,
+    /// [`pflag`] bits (the port's `PlayerSnapshot::flags`), 0 when the world can't tell.
+    pub flags: i32,
+    /// TS's stunt bits (`pev->iuser4`, [`stunt_bits`]).
+    pub stunt_bits: i32,
+    /// `pev->armorvalue`.
+    pub armor: f32,
+    /// Changes whenever the player's inventory does (a weapon got or lost, a clip, reserve, mode
+    /// or attachment changed); 0 when the world can't tell.
+    pub inventory_serial: i32,
+    /// The close-combat and stunt timers, `None` when the world can't tell.
+    pub combat: Option<CombatState>,
+}
+
+impl PlayerState {
+    /// Lying after a dive or slide (TS's prone stunt bit).
+    pub fn prone(&self) -> bool {
+        self.flags & pflag::PRONE != 0
+    }
+
+    /// In a stunt: diving, flipping, rolling, on a wall, or ducked for one.
+    pub fn stunting(&self) -> bool {
+        self.flags & pflag::STUNTING != 0
+    }
+}
+
+/// [`PlayerState::flags`]: the plugin API's `player_flag` bits.
+pub mod pflag {
+    /// Past the team menus and not spectating.
+    pub const JOINED: i32 = 0x1;
+    /// Alive and not observing.
+    pub const ALIVE: i32 = 0x2;
+    /// A bot of any backend.
+    pub const BOT: i32 = 0x4;
+    /// `FL_ONGROUND`.
+    pub const ON_GROUND: i32 = 0x8;
+    /// `FL_DUCKING`.
+    pub const DUCKING: i32 = 0x10;
+    /// On a ladder.
+    pub const ON_LADDER: i32 = 0x20;
+    /// Waist deep in water or more.
+    pub const IN_WATER: i32 = 0x40;
+    /// Carries the capture-the-briefcase case.
+    pub const HAS_FLAG: i32 = 0x80;
+    /// Observing.
+    pub const SPECTATOR: i32 = 0x100;
+    /// Lying after a dive or slide.
+    pub const PRONE: i32 = 0x200;
+    /// In a stunt (dive, flip, roll, wall jump or climb, or ducked for one).
+    pub const STUNTING: i32 = 0x400;
+}
+
+/// TS's stunt bits ([`PlayerState::stunt_bits`], the plugin API's `stunt_bits`) the bot reads.
+pub mod stunt_bits {
+    /// Half speed while getting up.
+    pub const RECOVER: i32 = 0x1;
+    /// Diving.
+    pub const DIVING: i32 = 0x10;
+    /// Lying after a dive or slide.
+    pub const PRONE: i32 = 0x20;
+}
+
+/// A player's close-combat and stunt timers (the plugin API's `CombatState`), as game times at
+/// which they run out, 0 for one that isn't running. TS counts most of them in the player's own
+/// time, so a slowed player's run out later than they say.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CombatState {
+    /// Kung fu power, 0..100: the bar a move costs and blocks drain.
+    pub melee_power: f32,
+    /// No attack before (`m_flNextAttack`, or the gun's primary delay when later).
+    pub next_attack_at: f32,
+    /// No stunt (dive, wall jump) before.
+    pub next_stunt_at: f32,
+    /// Getting up: half speed.
+    pub recover_until: f32,
+    /// Can't get up from lying before.
+    pub prone_lock: f32,
+    /// The slow-motion dodge: bullets do x0.7 until.
+    pub dodge_until: f32,
+    /// Blows of kung fu are blocked until.
+    pub block_kungfu: f32,
+    /// Knife blows are blocked until.
+    pub block_knife: f32,
+    /// Katana blows are blocked until.
+    pub block_katana: f32,
+    /// A delayed melee hit lands until.
+    pub melee_window: f32,
 }
 
 /// What a game item is ([`ItemInfo::kind`], the plugin API's `entity_info` kinds).
@@ -340,6 +426,12 @@ pub trait BotWorld: World {
     fn max_entities(&self) -> u32;
     /// `gpGlobals->maxClients`.
     fn max_clients(&self) -> u32;
+    /// The highest entity index in use this frame (the plugin API's `FrameInfo::highest_edict`):
+    /// nothing above it exists, so entity sweeps stop there. [`max_entities`](Self::max_entities)
+    /// by default.
+    fn highest_entity(&self) -> u32 {
+        self.max_entities()
+    }
     /// The entity at `index`, `None` for a free or missing edict (`FNullEnt`).
     fn entity(&self, index: u32) -> Option<Entity>;
     /// What the vision pass looks at first: the entity's [`Entity::entity_origin`] and `effects`,
@@ -749,8 +841,11 @@ pub struct Bot {
     /// A weapon switch asked for that the game hasn't shown yet, and until when it is waited
     /// for (the switch isn't asked again meanwhile).
     pub(crate) switch_pending: Option<(i32, f32)>,
-    /// When the owned weapons are next read from the game ([`BotWorld::inventory`]).
+    /// When the owned weapons are next read from the game ([`BotWorld::inventory`]); 0 asks for
+    /// a read at the next frame.
     pub(crate) next_inventory_sync: f32,
+    /// [`PlayerState::inventory_serial`] at the last read.
+    pub(crate) inventory_serial: i32,
     /// The time of this frame.
     pub(crate) now: f32,
     /// When the reload key may be pressed again (design §4: never spammed).
@@ -903,6 +998,7 @@ impl Bot {
             last_weapon_info: None,
             switch_pending: None,
             next_inventory_sync: 0.0,
+            inventory_serial: 0,
             now: 0.0,
             next_reload_time: 0.0,
             kungfu: kungfu::KungFu::new(),

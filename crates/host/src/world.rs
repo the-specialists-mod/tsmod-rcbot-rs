@@ -3,29 +3,85 @@
 //! sequence, as upstream's `RANDOM_LONG` does).
 
 use crate::api::{Api, Engine};
-use rcbot::bot::{BotWorld, Entity, EntityKey, GameMode, ItemInfo, ItemKind, PlayerState};
+use rcbot::bot::{BotWorld, CombatState, Entity, EntityKey, GameMode, ItemInfo, ItemKind, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use ts_plugin_api::{FrameInfo, PlayerSnapshot};
 
 /// `NON_TS_TEAMPLAY`: the map's name starts with `tm_` (`CBotGlobals::MapInit`), set at
 /// `ServerActivate`.
 pub static NON_TS_TEAMPLAY: AtomicBool = AtomicBool::new(false);
 
-/// The game's teamplay (`GameState::teamplay`) as of this frame ([`refresh_game_state`]).
+/// The game's teamplay (`FrameInfo::teamplay`) as of this frame ([`refresh_frame`]).
 static GAME_TEAMPLAY: AtomicBool = AtomicBool::new(false);
 /// The game's mode, CTB and round as of this frame (`mode | ctb << 8 | round << 16`).
 static GAME_MODE: AtomicI32 = AtomicI32::new(0);
+/// The frame's highest entity index in use (`FrameInfo::highest_edict`).
+static HIGHEST_EDICT: AtomicI32 = AtomicI32::new(i32::MAX);
+/// The frame's player snapshots (`players()`, slot 1 first), shared by every world until the next
+/// refresh. Locked only to swap or clone the `Arc`, never across a call into the server.
+static PLAYERS: Mutex<Option<Arc<[PlayerSnapshot]>>> = Mutex::new(None);
 
-/// Reads the game's state once for the frame (the server scans the entities for it): the
-/// worlds made until the next refresh, callbacks included, use its teamplay and mode.
-pub fn refresh_game_state(api: Api) -> ts_plugin_api::GameState {
-    let g = api.game_state();
-    GAME_TEAMPLAY.store(g.teamplay != 0, Ordering::Relaxed);
-    GAME_MODE.store((g.mode & 0xff) | (i32::from(g.ctb != 0) << 8) | ((g.round & 0xff) << 16), Ordering::Relaxed);
-    g
+/// Reads the frame once (plugin API v6: the server builds it at `StartFrame`, before the plugins'
+/// `start_frame`): the rules and highest entity (`frame_info`) and every player slot
+/// (`players`). The worlds made until the next refresh, callbacks included, read these instead of
+/// asking the server per entity.
+pub fn refresh_frame(api: Api) -> FrameInfo {
+    let f = api.frame_info();
+    GAME_TEAMPLAY.store(f.teamplay != 0, Ordering::Relaxed);
+    GAME_MODE.store((f.mode & 0xff) | (i32::from(f.ctb != 0) << 8) | ((f.round & 0xff) << 16), Ordering::Relaxed);
+    HIGHEST_EDICT.store(if f.highest_edict > 0 { f.highest_edict } else { i32::MAX }, Ordering::Relaxed);
+    let players: Arc<[PlayerSnapshot]> = api.players().into();
+    if let Ok(mut p) = PLAYERS.lock() {
+        *p = Some(players);
+    }
+    f
+}
+
+/// The port's player flags and timers as the bot keeps them.
+fn player_state(p: &PlayerSnapshot) -> PlayerState {
+    use ts_plugin_api::player_flag as pf;
+    let c = p.combat;
+    PlayerState {
+        joined: p.flags & pf::JOINED != 0,
+        alive: p.flags & pf::ALIVE != 0,
+        is_bot: p.flags & pf::BOT != 0,
+        team: p.team,
+        weapon: p.weapon,
+        clip: p.clip,
+        ammo: p.ammo,
+        stunt_state: p.stance,
+        fire_mode: p.fire_mode,
+        attachments: p.attachments,
+        free_slots: p.free_slots,
+        active_powerup: p.active_powerup,
+        powerup_until: p.powerup_until,
+        stored_powerup: p.stored_powerup,
+        time_scale: p.time_scale,
+        // The snapshot lacks `PlayerInfo::kungfu` (permanent kung fu); nothing in the bot reads it.
+        kungfu: false,
+        has_flag: p.flags & pf::HAS_FLAG != 0,
+        flags: p.flags,
+        stunt_bits: p.stunt_bits,
+        armor: p.armor,
+        inventory_serial: p.inventory_serial,
+        combat: Some(CombatState {
+            melee_power: c.melee_power,
+            next_attack_at: c.next_attack_at,
+            next_stunt_at: c.next_stunt_at,
+            recover_until: c.recover_until,
+            prone_lock: c.prone_lock,
+            dodge_until: c.dodge_until,
+            block_kungfu: c.block_kungfu,
+            block_knife: c.block_knife,
+            block_katana: c.block_katana,
+            melee_window: c.melee_window,
+        }),
+    }
 }
 
 /// What `entity_info` says about an item, for the classes a bot looks at (`ts_*`, `weapon_*`).
@@ -69,15 +125,25 @@ pub struct HostWorld {
     cvars: RefCell<Vec<(String, f32)>>,
     /// The entities read through a [`cached`](Self::cached) world, by index.
     entities: Option<RefCell<Vec<Slot>>>,
+    /// The frame's player snapshots ([`refresh_frame`]), slot 1 first.
+    players: Option<Arc<[PlayerSnapshot]>>,
 }
 
 impl HostWorld {
     /// The world now, with the game's teamplay as of this frame.
     pub fn new(api: Api, eng: Engine) -> HostWorld {
-        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed), cvars: RefCell::new(Vec::new()), entities: None }
+        let players = PLAYERS.lock().ok().and_then(|p| p.clone());
+        HostWorld {
+            api,
+            eng,
+            game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed),
+            cvars: RefCell::new(Vec::new()),
+            entities: None,
+            players,
+        }
     }
 
-    /// A world that reads each entity (its strings, a player's `player_info`) once and hands out
+    /// A world that reads each entity (its strings, a player's snapshot) once and hands out
     /// copies: for the bots' thinks, while nothing changes the entities. Anything that writes
     /// entvars needs a world of its own made after.
     pub fn cached(api: Api, eng: Engine) -> HostWorld {
@@ -137,25 +203,32 @@ impl HostWorld {
             // a client slot's edict (and its serial) for the next player in it, who must not
             // inherit the last one's enemies, tasks or squad (`EntRef`).
             ent.serial = self.eng.user_id_of(e);
-            ent.player = self.api.player_info(index as i32).map(|p| PlayerState {
-                joined: p.joined != 0,
-                alive: p.alive != 0,
-                is_bot: p.is_bot != 0,
-                team: p.team,
-                weapon: p.weapon,
-                clip: p.clip,
-                ammo: p.ammo,
-                stunt_state: p.stunt_state,
-                fire_mode: p.fire_mode,
-                attachments: p.attachments,
-                free_slots: p.free_slots,
-                active_powerup: p.active_powerup,
-                powerup_until: p.powerup_until,
-                stored_powerup: p.stored_powerup,
-                time_scale: p.time_scale,
-                kungfu: p.kungfu != 0,
-                has_flag: p.has_flag != 0,
-            });
+            // The frame's snapshot, while it is still this client's (one that joined since
+            // `StartFrame` isn't in it yet: then `player_info`).
+            let snap = self.players.as_ref().and_then(|p| p.get(index as usize - 1)).filter(|p| p.user_id != 0 && p.user_id == ent.serial);
+            ent.player = match snap {
+                Some(p) => Some(player_state(p)),
+                None => self.api.player_info(index as i32).map(|p| PlayerState {
+                    joined: p.joined != 0,
+                    alive: p.alive != 0,
+                    is_bot: p.is_bot != 0,
+                    team: p.team,
+                    weapon: p.weapon,
+                    clip: p.clip,
+                    ammo: p.ammo,
+                    stunt_state: p.stunt_state,
+                    fire_mode: p.fire_mode,
+                    attachments: p.attachments,
+                    free_slots: p.free_slots,
+                    active_powerup: p.active_powerup,
+                    powerup_until: p.powerup_until,
+                    stored_powerup: p.stored_powerup,
+                    time_scale: p.time_scale,
+                    kungfu: p.kungfu != 0,
+                    has_flag: p.has_flag != 0,
+                    ..PlayerState::default()
+                }),
+            };
         } else {
             ent.item = item_info(self.api, index, &ent.classname);
         }
@@ -196,6 +269,10 @@ impl BotWorld for HostWorld {
 
     fn max_clients(&self) -> u32 {
         self.eng.max_clients().max(0) as u32
+    }
+
+    fn highest_entity(&self) -> u32 {
+        HIGHEST_EDICT.load(Ordering::Relaxed).max(0) as u32
     }
 
     fn entity(&self, index: u32) -> Option<Entity> {

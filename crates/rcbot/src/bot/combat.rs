@@ -223,7 +223,9 @@ impl Bot {
         let need_to_follow = !self.tasks.has_task(TaskKind::FollowLeader) && self.squad_leader.is_some();
         let mut saw_leader = false;
         let avoid_dist = self.me.size.length_2d() * 3.0;
-        let max = (self.vis_update_revs + self.profile.vision_revs.max(1) as u32).min(w.max_entities());
+        // Nothing exists above the frame's highest index: the sweep ends there (port addition).
+        let top = w.highest_entity().min(w.max_entities());
+        let max = (self.vis_update_revs + self.profile.vision_revs.max(1) as u32).min(top);
 
         // Upstream checks the bot against its own PVS, which always passes: any remembered
         // position counts as visible. Kept.
@@ -278,8 +280,12 @@ impl Bot {
                 self.work_enemy_costs(w, &e, dist);
             }
         }
-        let finished = if max >= w.max_entities() {
+        let finished = if max >= top {
             self.vis_update_revs = 0;
+            // Entities seen above the top are gone (their slots freed since).
+            for i in self.visibles.to_vec().into_iter().filter(|&i| i > top) {
+                self.set_visible(i, false);
+            }
             true
         } else {
             self.vis_update_revs = max + 1;

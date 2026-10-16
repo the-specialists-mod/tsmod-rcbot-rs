@@ -6,8 +6,8 @@ use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use ts_plugin_api::{
-    BotBackend, BotCmd, BotCmdResult, EntityInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId,
-    WeaponEntry, ham,
+    BotBackend, BotCmd, BotCmdResult, EntityInfo, FrameInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PlayerSnapshot,
+    PluginApi, PluginId, WeaponEntry, ham,
 };
 
 /// The plugin API table and our plugin id.
@@ -116,6 +116,24 @@ impl Api {
         // SAFETY: `g` is writable.
         unsafe { (self.table.game_state)(&mut g) };
         g
+    }
+
+    /// `frame_info`: the frame's time, highest entity and rules.
+    pub fn frame_info(&self) -> FrameInfo {
+        let mut f = FrameInfo::default();
+        // SAFETY: `f` is writable.
+        unsafe { (self.table.frame_info)(&mut f) };
+        f
+    }
+
+    /// `players`: every player slot's snapshot of this frame, slot 1 first (an empty slot is all
+    /// zeroes).
+    pub fn players(&self) -> Vec<PlayerSnapshot> {
+        let mut out = vec![PlayerSnapshot::default(); 64];
+        // SAFETY: `out` is writable for its length.
+        let n = unsafe { (self.table.players)(out.as_mut_ptr(), out.len() as c_int) };
+        out.truncate(usize::try_from(n).unwrap_or(0).min(64));
+        out
     }
 
     /// `objectives(player)`: the HUD's objective list as `player` reads it.

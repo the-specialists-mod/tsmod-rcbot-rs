@@ -25,6 +25,10 @@ struct Plane {
     inventory: RefCell<Option<Vec<InventoryWeapon>>>,
     /// When [`Plane::apply`] last ran: a usercmd lasts the time since (the server's `AUTO_MSEC`).
     last_cmd: std::cell::Cell<f32>,
+    /// What [`BotWorld::highest_entity`] answers (0: `max_entities`).
+    highest: std::cell::Cell<u32>,
+    /// How often [`BotWorld::inventory`] was asked.
+    inventory_reads: std::cell::Cell<u32>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -94,7 +98,14 @@ impl BotWorld for Plane {
         self.models.is_some()
     }
     fn inventory(&self, _: u32) -> Option<Vec<InventoryWeapon>> {
+        self.inventory_reads.set(self.inventory_reads.get() + 1);
         self.inventory.borrow().clone()
+    }
+    fn highest_entity(&self) -> u32 {
+        match self.highest.get() {
+            0 => self.max_entities(),
+            h => h,
+        }
     }
     fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
         let ents = self.ents.borrow();
@@ -187,6 +198,8 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
         physics: Default::default(),
         inventory: Default::default(),
         last_cmd: Default::default(),
+        highest: Default::default(),
+        inventory_reads: Default::default(),
     };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
@@ -427,6 +440,8 @@ fn plane(ents: Vec<Entity>) -> Plane {
         physics: Default::default(),
         inventory: Default::default(),
         last_cmd: Default::default(),
+        highest: Default::default(),
+        inventory_reads: Default::default(),
     }
 }
 
@@ -2335,4 +2350,58 @@ fn the_games_view_and_teleports_come_from_the_command_result() {
     rig.bot.current_waypoint = 2;
     rig.bot.command_ran(CmdOutcome { game_view: None, teleported: true });
     assert_eq!(rig.bot.current_waypoint(), -1);
+}
+
+#[test]
+fn the_inventory_is_read_again_when_its_serial_changes() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0)]);
+    let mut rng = XorShiftRandom::new(4);
+    *w.inventory.borrow_mut() = Some(vec![InventoryWeapon { weapon: 1, clip: 17, ammo: 34 }]);
+    w.ents.borrow_mut()[0].player.as_mut().unwrap().inventory_serial = 1;
+    // Only the weapon sync reads it here (not the loadout credit).
+    rig.bot.learning.credit_checked = true;
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    let first = w.inventory_reads.get();
+    assert_eq!(first, 1, "read at the first frame");
+    // Three seconds with nothing changed: no reads (v5's world read it every second).
+    run(&mut rig, &mut w, &mut rng, 150, |_, _| {});
+    assert_eq!(w.inventory_reads.get(), first);
+    // The game's inventory changed: read at the next frame.
+    *w.inventory.borrow_mut() =
+        Some(vec![InventoryWeapon { weapon: 1, clip: 17, ammo: 34 }, InventoryWeapon { weapon: 5, clip: 30, ammo: 60 }]);
+    w.ents.borrow_mut()[0].player.as_mut().unwrap().inventory_serial = 2;
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    assert_eq!(w.inventory_reads.get(), first + 1);
+    assert!(rig.bot.weapons.has(5));
+    // A world without serials: every second, as before.
+    w.ents.borrow_mut()[0].player.as_mut().unwrap().inventory_serial = 0;
+    let before = w.inventory_reads.get();
+    run(&mut rig, &mut w, &mut rng, 150, |_, _| {});
+    assert!((2..=4).contains(&(w.inventory_reads.get() - before)), "{}", w.inventory_reads.get() - before);
+}
+
+#[test]
+fn the_vision_pass_ends_at_the_highest_entity() {
+    let mut rig = Rig::new(Config::default());
+    let mut item = brush(7, "ts_powerup", Vector::new(200.0, 0.0, 0.0), Vector::new(16.0, 16.0, 16.0));
+    item.solid = 1;
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), item]);
+    let mut rng = XorShiftRandom::new(4);
+    rig.bot.profile.vision_revs = 2;
+    rig.bot.me = w.entity(1).unwrap();
+    let pass = |rig: &mut Rig, w: &Plane, rng: &mut XorShiftRandom| {
+        let mut n = 0;
+        while !rig.with(|b, g| b.update_visibles(g, w, rng)) {
+            n += 1;
+        }
+        n
+    };
+    let full = pass(&mut rig, &w, &mut rng);
+    assert!(rig.bot.is_visible(7));
+    // Nothing above index 3 is in use: a pass takes fewer calls, and what it saw above is gone.
+    w.highest.set(3);
+    let short = pass(&mut rig, &w, &mut rng);
+    assert!(short < full, "{short} {full}");
+    assert!(!rig.bot.is_visible(7));
 }
