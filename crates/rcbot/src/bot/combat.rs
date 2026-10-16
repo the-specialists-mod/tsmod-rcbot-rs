@@ -307,7 +307,9 @@ impl Bot {
             let mut best_fitness = 0.0;
             for i in self.visibles.clone() {
                 let Some(e) = w.entity(i) else { continue };
-                if Some(e.handle()) == old || !self.is_enemy(w, &e) {
+                // The visible list can be a vision pass old: check the line now, so a new enemy
+                // is never one behind a wall (design §4).
+                if Some(e.handle()) == old || !self.is_enemy(w, &e) || !self.fvisible(w, &e) {
                     continue;
                 }
                 let dist = (e.origin - self.me.origin).length();

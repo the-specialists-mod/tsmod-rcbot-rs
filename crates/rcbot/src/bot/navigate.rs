@@ -337,7 +337,8 @@ impl Bot {
         let end = w.trace_line(low, low + self.me.velocity * 2.0, Monsters::Ignore, Glass::Ignore, ignore).end_pos;
         let low_distance = self.distance_from(end, false);
         if low_distance < 64.0 && low_distance < high {
-            self.jump();
+            // A crouch jump clears what a plain jump hits with its feet (design §4).
+            self.jump_and_duck(w.time());
         }
         if positions.is_empty() {
             self.look_task = LookTask::NextWaypoint;

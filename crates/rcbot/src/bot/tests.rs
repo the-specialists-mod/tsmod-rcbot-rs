@@ -12,6 +12,11 @@ struct Plane {
     teamplay: bool,
     /// Players' `model` keys for a `tm_` map (teams by model), by index.
     models: Option<Vec<(u32, &'static str)>>,
+    /// A wall of the world on the plane `x = wall`, when set.
+    wall: std::cell::Cell<Option<f32>>,
+    /// Jumps, gravity and TS's wall jump in [`Plane::apply`] (off: the bot never leaves the
+    /// ground).
+    physics: std::cell::Cell<bool>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -38,7 +43,13 @@ fn player(index: u32, origin: Vector, team: i32) -> Entity {
 }
 
 impl World for Plane {
-    fn trace_line(&self, _: Vector, end: Vector, _: Monsters, _: Glass, _: Option<u32>) -> Trace {
+    fn trace_line(&self, start: Vector, end: Vector, _: Monsters, _: Glass, _: Option<u32>) -> Trace {
+        if let Some(x) = self.wall.get()
+            && (start.x < x) != (end.x < x)
+        {
+            let f = (x - start.x) / (end.x - start.x);
+            return Trace { fraction: f, end_pos: start + (end - start) * f, hit: Some(0) };
+        }
         Trace::clear(end)
     }
     fn point_contents(&self, _: Vector) -> i32 {
@@ -85,6 +96,36 @@ impl Plane {
         e.button = cmd.buttons;
         let (fwd, right) = make_vectors(Vector::new(0.0, cmd.angles.y, 0.0));
         let dt = f32::from(cmd.msec) / 1000.0;
+        if self.physics.get() {
+            if e.flags & entflags::ONGROUND == 0 {
+                // In the air: keep going, fall, land at z = 0.
+                e.velocity.z -= 800.0 * dt;
+                e.origin = e.origin + e.velocity * dt;
+                if e.origin.z <= 0.0 {
+                    e.origin.z = 0.0;
+                    e.velocity.z = 0.0;
+                    e.flags |= entflags::ONGROUND;
+                }
+                return;
+            }
+            // `CheckForWallJump`: a wall within 48 units ahead; `TSWallJump` throws the player
+            // back off it at 210 units/s.
+            let wall_ahead = self.wall.get().is_some_and(|x| (e.origin.x < x) != (e.origin.x + fwd.x * 48.0 < x));
+            if cmd.buttons & buttons::ALT1 != 0 && wall_ahead {
+                e.velocity = Vector::new(-fwd.x * 210.0, -fwd.y * 210.0, 300.0);
+                e.flags &= !entflags::ONGROUND;
+                e.origin = e.origin + e.velocity * dt;
+                return;
+            }
+            if cmd.buttons & buttons::JUMP != 0 {
+                let mut v = fwd * cmd.forward + right * cmd.side;
+                v.z = 270.0;
+                e.velocity = v;
+                e.flags &= !entflags::ONGROUND;
+                e.origin = e.origin + e.velocity * dt;
+                return;
+            }
+        }
         let mut v = fwd * cmd.forward + right * cmd.side;
         v.z = 0.0;
         let speed = v.length();
@@ -111,7 +152,8 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
     if enemy {
         ents.push(player(2, Vector::new(400.0, 0.0, 0.0), 0));
     }
-    let plane = Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None };
+    let plane =
+        Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None, wall: Default::default(), physics: Default::default() };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
     let profile = crate::config::BotProfile::init(&config, &mut rng);
@@ -310,7 +352,7 @@ impl Rig {
 }
 
 fn plane(ents: Vec<Entity>) -> Plane {
-    Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None }
+    Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None, wall: Default::default(), physics: Default::default() }
 }
 
 #[test]
@@ -820,4 +862,203 @@ fn teamplay_bots_go_for_the_ts_objectives() {
         }
     }
     assert!(seen.contains(&(1, 2)) && seen.contains(&(2, 2)), "{seen:?}");
+}
+
+/// Runs the rig's bot in `w` for `frames` frames of 20 ms, applying its usercmds; `each` sees
+/// the world (to move the other players) and every frame the bot made.
+fn run(rig: &mut Rig, w: &mut Plane, rng: &mut XorShiftRandom, frames: usize, mut each: impl FnMut(&Plane, &Frame)) {
+    for _ in 0..frames {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, w, rng));
+        if let Some(cmd) = f.cmd {
+            w.apply(1, &cmd);
+        }
+        each(w, &f);
+    }
+}
+
+/// Sets player `index`'s weapon, clip and reserve as the port reports them.
+fn arm(w: &Plane, index: u32, weapon: i32, clip: i32, ammo: i32) {
+    let mut ents = w.ents.borrow_mut();
+    let p = ents.iter_mut().find(|e| e.index == index).unwrap().player.as_mut().unwrap();
+    (p.weapon, p.clip, p.ammo) = (weapon, clip, ammo);
+}
+
+#[test]
+fn never_fires_at_an_enemy_behind_a_wall() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(9);
+    let mut fired = false;
+    run(&mut rig, &mut w, &mut rng, 150, |_, f| fired |= f.cmd.is_some_and(|c| c.buttons & buttons::ATTACK != 0));
+    assert!(fired, "it shoots the enemy in the open");
+    // A wall goes up between them; the enemy moves so it isn't where the bot last saw it.
+    w.wall.set(Some(150.0));
+    w.ents.borrow_mut()[1].origin.y = 120.0;
+    let mut fired_behind = 0;
+    for _ in 0..300 {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        if let Some(cmd) = f.cmd {
+            // The fake world has no walls to walk into: keep the bot on its side.
+            w.apply(1, &cmd);
+            w.ents.borrow_mut()[0].origin = Vector::ZERO;
+            fired_behind += i32::from(cmd.buttons & buttons::ATTACK != 0);
+        }
+    }
+    assert_eq!(fired_behind, 0);
+}
+
+#[test]
+fn an_empty_clip_is_reloaded_with_one_press() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(4);
+    run(&mut rig, &mut w, &mut rng, 20, |_, _| {});
+    // The clip runs dry (the fake world never reloads it).
+    arm(&w, 1, 1, 0, 34);
+    let (mut presses, mut held) = (0, false);
+    run(&mut rig, &mut w, &mut rng, 95, |_, f| {
+        let down = f.cmd.map_or(held, |c| c.buttons & buttons::RELOAD != 0);
+        if down && !held {
+            presses += 1;
+        }
+        held = down;
+    });
+    assert_eq!(presses, 1, "one press per {RELOAD_RETRY} s");
+    // A full clip, or no reserve: never.
+    for (clip, ammo) in [(17, 34), (0, 0)] {
+        arm(&w, 1, 1, clip, ammo);
+        let mut any = false;
+        run(&mut rig, &mut w, &mut rng, 150, |_, f| any |= f.cmd.is_some_and(|c| c.buttons & buttons::RELOAD != 0));
+        assert!(!any, "clip {clip} ammo {ammo}");
+    }
+}
+
+#[test]
+fn a_gun_out_of_rounds_is_dropped_for_kung_fu() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(2);
+    run(&mut rig, &mut w, &mut rng, 10, |_, _| {});
+    arm(&w, 1, 1, 0, 0);
+    let mut actions = Vec::new();
+    run(&mut rig, &mut w, &mut rng, 20, |_, f| actions.extend(f.actions.iter().cloned()));
+    assert!(actions.contains(&Action::Command("drop".into())), "{actions:?}");
+    assert!(actions.contains(&Action::SelectWeapon(0)), "{actions:?}");
+    assert_eq!(actions.iter().filter(|a| **a == Action::Command("drop".into())).count(), 1);
+}
+
+#[test]
+fn unarmed_it_takes_cover_from_a_gunman_out_of_reach() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(500.0, 0.0, 0.0), 0)]);
+    arm(&w, 1, 0, 0, 0);
+    let mut rng = XorShiftRandom::new(6);
+    let mut attacked = false;
+    let mut covered = false;
+    run(&mut rig, &mut w, &mut rng, 100, |_, f| attacked |= f.cmd.is_some_and(|c| c.buttons & (buttons::ATTACK | buttons::ATTACK2) != 0));
+    covered |= rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover) || rig.bot.tasks().has_task(TaskKind::Crouch);
+    assert!(!attacked);
+    assert!(covered, "{:?}", rig.bot.tasks().iter().map(|t| t.kind).collect::<Vec<_>>());
+}
+
+#[test]
+fn kung_fu_answers_attacks_and_strikes_back() {
+    let mut rig = Rig::new(Config::default());
+    // Kung fu both, 64 units apart, the opponent facing the bot.
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(64.0, 0.0, 0.0), 0)]);
+    arm(&w, 1, 0, 0, 0);
+    arm(&w, 2, 0, 0, 0);
+    w.ents.borrow_mut()[1].v_angle = Vector::new(0.0, 180.0, 0.0);
+    let mut rng = XorShiftRandom::new(8);
+    let (mut defended, mut attacks) = (0, 0);
+    let mut n = 0;
+    let mut last = 0;
+    run(&mut rig, &mut w, &mut rng, 1000, |w, f| {
+        n += 1;
+        // The opponent punches every 0.6 s, and stays where it is.
+        let mut ents = w.ents.borrow_mut();
+        ents[1].button = if n % 30 < 3 { buttons::ATTACK } else { 0 };
+        ents[1].origin = Vector::new(64.0, 0.0, 0.0);
+        drop(ents);
+        let Some(c) = f.cmd else { return };
+        let new = c.buttons & !last;
+        last = c.buttons;
+        if new & (buttons::RELOAD | buttons::DUCK) != 0 || c.forward < -1.0 {
+            defended += 1;
+        }
+        if new & (buttons::ATTACK | buttons::ATTACK2) != 0 {
+            attacks += 1;
+        }
+    });
+    assert!(defended > 3, "defended {defended}");
+    assert!(attacks > 3, "attacks {attacks}");
+    // It scored what it did.
+    let k = &rig.bot.kungfu;
+    assert!(k.reaction_value.iter().any(|&v| v != 0.0), "{:?}", k.reaction_value);
+    assert!(k.combos.iter().any(|c| c.uses > 0));
+}
+
+/// A kung fu bot that knows only `moves`, against a passive kung fu opponent at `x`, with the
+/// physics on.
+fn kung_fu_duel(moves: &[kungfu::Move], x: f32) -> (Rig, Plane) {
+    let mut rig = Rig::new(Config::default());
+    rig.bot.kungfu.combos = vec![kungfu::Combo { moves: moves.to_vec(), value: 0.0, uses: 0 }];
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(x, 0.0, 0.0), 0)]);
+    w.physics.set(true);
+    arm(&w, 1, 0, 0, 0);
+    arm(&w, 2, 0, 0, 0);
+    (rig, w)
+}
+
+#[test]
+fn the_fly_kick_runs_crouch_jumps_and_kicks_in_the_air() {
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::FlyKick], 220.0);
+    let mut rng = XorShiftRandom::new(3);
+    let (mut crouch_jumped, mut air_kick) = (false, false);
+    run(&mut rig, &mut w, &mut rng, 400, |w, f| {
+        let Some(c) = f.cmd else { return };
+        let grounded = w.entity(1).unwrap().flags & entflags::ONGROUND != 0;
+        crouch_jumped |= c.buttons & (buttons::JUMP | buttons::DUCK) == buttons::JUMP | buttons::DUCK;
+        air_kick |= crouch_jumped && !grounded && c.buttons & (buttons::DUCK | buttons::ATTACK2) == buttons::DUCK | buttons::ATTACK2;
+        // The opponent stays put.
+        w.ents.borrow_mut()[1].origin = Vector::new(220.0, 0.0, 0.0);
+    });
+    assert!(crouch_jumped && air_kick, "jumped {crouch_jumped} kicked {air_kick}");
+    assert!(rig.bot.kungfu.combos[0].uses > 0);
+}
+
+#[test]
+fn the_wall_kick_faces_the_wall_jumps_off_it_and_kicks_back() {
+    // The wall 60 units behind the bot, the opponent 120 in front.
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::WallKick], 120.0);
+    w.wall.set(Some(-60.0));
+    let mut rng = XorShiftRandom::new(5);
+    let (mut wall_jumped, mut kicked_flying_back) = (false, false);
+    run(&mut rig, &mut w, &mut rng, 400, |w, f| {
+        let Some(c) = f.cmd else { return };
+        let me = w.entity(1).unwrap();
+        let (fwd, _) = make_vectors(Vector::new(0.0, c.angles.y, 0.0));
+        if c.buttons & buttons::ALT1 != 0 && fwd.x < -0.7 {
+            wall_jumped = true;
+        }
+        // In the air, moving toward the opponent while looking at the wall: the back kick.
+        if wall_jumped && me.flags & entflags::ONGROUND == 0 && c.buttons & buttons::ATTACK2 != 0 && me.velocity.x > 100.0 && fwd.x < 0.0 {
+            kicked_flying_back = true;
+        }
+        w.ents.borrow_mut()[1].origin = Vector::new(120.0, 0.0, 0.0);
+    });
+    assert!(wall_jumped && kicked_flying_back, "wall jumped {wall_jumped} kicked {kicked_flying_back}");
+}
+
+#[test]
+fn obstacles_are_crouch_jumped() {
+    // `jump_and_duck`: the jump, then the duck held through the air.
+    let mut rig = Rig::new(Config::default());
+    rig.bot.jump_and_duck(1.0);
+    let cmd = rig.bot.run_player_move(1.05).unwrap();
+    assert_ne!(cmd.buttons & buttons::JUMP, 0);
+    let cmd = rig.bot.run_player_move(1.2).unwrap();
+    assert_ne!(cmd.buttons & buttons::DUCK, 0);
 }

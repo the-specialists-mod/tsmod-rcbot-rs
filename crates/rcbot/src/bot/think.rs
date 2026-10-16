@@ -49,10 +49,16 @@ impl Bot {
         if self.state.alive {
             let info = (self.state.weapon, self.state.clip, self.state.ammo);
             if self.last_weapon_info != Some(info) {
+                // A new weapon or clip: the reload key may be pressed again (design §4).
+                if self.last_weapon_info.is_none_or(|(w, c, _)| w != info.0 || c != info.1) {
+                    self.next_reload_time = 0.0;
+                }
                 self.last_weapon_info = Some(info);
                 let r = self.weapons.weapon_info(info.0, info.1, info.2, g.weapons, g.presets);
                 self.current_weapon = Some(r.current);
-                if r.drop {
+                // Kung fu reports no clip and no ammo too; there is nothing to drop then
+                // (upstream sent `drop` each time it took out kung fu).
+                if r.drop && r.current != TsWeapon::KungFu.id() {
                     self.add_priority_task(Task::simple(TaskKind::DropWeapon));
                 }
             }
@@ -100,6 +106,8 @@ impl Bot {
         self.paths.next_clear_failed_goals = 0.0;
         self.current_weapon = None;
         self.last_weapon_info = None;
+        self.next_reload_time = 0.0;
+        self.kungfu.reset_fight();
         self.last_enemy = None;
         self.last_failed_waypoint = -1;
         self.listen_to_sound_time = 0.0;
@@ -254,23 +262,29 @@ impl Bot {
             self.run_for_cover(g, w, end, true, rng);
         }
 
-        // TS: reload or switch an empty gun.
+        // TS: reload or switch an empty gun. A gun with nothing in the clip or the reserve is
+        // dropped for the next weapon with rounds, else kung fu (design §4; upstream kept
+        // dry-firing it).
         if let Some(cur) = self.current_weapon.and_then(|id| self.weapons.get(id)).cloned()
             && !cur.is_melee()
         {
-            if cur.clip_is_empty() {
+            if cur.out_of_ammo() && cur.max_clip > 0 {
+                if !self.tasks.has_task(TaskKind::DropWeapon) {
+                    self.add_priority_task(Task::simple(TaskKind::DropWeapon));
+                }
+            } else if cur.clip_is_empty() {
                 if let Some(enemy) = self.resolve(w, self.enemy) {
                     let best = self.best_weapon(w, Some(&enemy)).0;
                     if best != 0 && best != cur.id {
                         self.switch_weapon(best);
                     } else if cur.can_reload() && !cur.out_of_ammo() {
-                        self.reload();
+                        self.reload(now);
                     }
                 } else if cur.can_reload() && !cur.out_of_ammo() {
-                    self.reload();
+                    self.reload(now);
                 }
             } else if self.enemy.is_none() && cur.low_on_ammo() && cur.can_reload() {
-                self.reload();
+                self.reload(now);
             }
         }
 
@@ -573,13 +587,20 @@ impl Bot {
                         failed = true;
                         self.current_weapon = None;
                     }
+                    // Nothing to reload (a full clip, no reserve, kung fu or a blade, whose
+                    // reload key blocks): done at once instead of holding the key (design §4).
+                    Some(id)
+                        if !self.weapons.get(id).is_some_and(|wp| wp.need_to_reload() || (wp.reserve > 0 && wp.clip < wp.max_clip)) =>
+                    {
+                        done = true;
+                    }
                     Some(_) => {
                         if self.last_enemy.is_some() {
                             self.look_task = LookTask::SearchForLastEnemy;
                             self.search_enemy_time = now + 0.5;
                         }
                         if rng.random_long(0, 100) > 0 {
-                            self.reload();
+                            self.reload(now);
                         }
                         if task.int == 0 {
                             let f = now + rng.random_float(0.5, 1.5);
@@ -697,7 +718,13 @@ impl Bot {
                 done = true;
             }
             TaskKind::DropWeapon => {
-                self.actions.push(Action::Command("drop".into()));
+                // The port's `drop` drops the gun in hand; forget it so nothing picks it again.
+                if let Some(id) = self.current_weapon.filter(|&id| id != TsWeapon::KungFu.id()) {
+                    self.actions.push(Action::Command("drop".into()));
+                    self.weapons.remove(id);
+                    let next = self.best_weapon(w, self.resolve(w, self.enemy).as_ref()).0;
+                    self.switch_weapon(if next > 0 { next } else { TsWeapon::KungFu.id() });
+                }
                 done = true;
             }
             TaskKind::PushPushable => self.task_push_pushable(w, rng, task, &mut done, &mut failed),
@@ -936,6 +963,17 @@ impl Bot {
             }
         }
         let _ = to_add;
+        // `SEE_ENEMY` can be stale: set by the last-seen-position check below, by `EnemyFound`,
+        // or kept until the vision pass reaches the enemy again. Upstream then aimed and fired
+        // at the enemy's current origin through walls; the port asks for a clear line to the
+        // enemy itself every time (design §4). `FVisible` clears the condition when blocked.
+        if self.has(cond::SEE_ENEMY) {
+            self.fvisible(w, &enemy);
+        } else if self.kungfu_face().is_some() && self.fvisible(w, &enemy) {
+            // A kung fu wall jump turns the bot's back to the opponent for a moment: it still
+            // knows where the opponent is (outside the view cone the vision pass needs).
+            self.set(cond::SEE_ENEMY);
+        }
         if self.has(cond::SEE_ENEMY) {
             let enemy_origin = enemy.entity_origin();
             self.look_task = LookTask::FaceEnemy;
@@ -950,7 +988,11 @@ impl Bot {
             // TS's melee weapons: combat knife (25), katana (34), seal knife (35) and kung fu.
             // Upstream lists 36, the Contender in TS 3.0, for kung fu (design §5).
             let melee = cur.is_none() || matches!(weap_id, 25 | 34 | 35) || weap_id == TsWeapon::KungFu.id();
-            if melee {
+            if weap_id == TsWeapon::KungFu.id() || cur.is_none() {
+                // The port's kung fu fighter (design §4) in place of upstream's random punches
+                // and kicks.
+                self.kungfu_fight(g, w, rng, &enemy, dist);
+            } else if melee {
                 if !self.reachable(w, enemy_origin) {
                     self.set_move_vector(self.lowest_enemy_cost_vec);
                 } else {
@@ -988,7 +1030,7 @@ impl Bot {
                 }
                 if cur.as_ref().is_some_and(|c| c.need_to_reload()) {
                     self.run_for_cover(g, w, enemy_origin, false, rng);
-                    self.reload();
+                    self.reload(now);
                 } else if self.hold_attack_time > now || rng.random_long(0, 100) < 90 {
                     self.primary_attack();
                 }

@@ -18,7 +18,8 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set and `±rcbot_force_grip` (side effects through a host trait) | done; the host runs the commands |
 | Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v5 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
-| Combat: what the bot sees, enemy choice and aim by reputation, best weapon, reloads and switching (upstream's TS reload bug fixed), cover, hearing (the port's `sound` callback) | done |
+| Combat: what the bot sees (a fresh line of sight before every shot), enemy choice and aim by reputation, best weapon, reloads (one press per empty clip) and switching (upstream's TS reload bug fixed), empty guns dropped, cover, hearing (the port's `sound` callback) | done |
+| Kung fu (a port addition): reads the opponent, defensive or offensive stance, blocks, ducks and steps out of attacks, counters, learned and evolving combos with crouch-jump, flying and wall-jump kicks, saved in `<id>.rkf`; unarmed bots take cover from distant gunmen | done |
 | Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
 | Special waypoints: lifts and their buttons, pushables, human towers, grenade-throw waypoints | done |
 | TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals (and `tm_` maps' model teams) | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |

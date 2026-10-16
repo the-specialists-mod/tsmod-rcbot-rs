@@ -6,13 +6,14 @@
 //! touches, `say`, and the bot camera.
 //!
 //! Files live in the plugin's data directory (RCBot's bot folder): `bot_profiles.ini`,
-//! `botprofiles/<id>.ini`, `<id>.rld`, `<id>.rcr`, `<id>_hal.brn` and the keyword lists,
+//! `botprofiles/<id>.ini`, `<id>.rld`, `<id>.rkf` (the kung fu fighter), `<id>.rcr`, `<id>_hal.brn` and the keyword lists,
 //! `bot_playerids.ini`, `bot_chat.ini`, `team<n>.rld`, `tsweaps.rld`.
 
 use crate::api::{Api, Engine};
 use crate::world::{EngineRandom, HostWorld};
 use crate::{State, say};
 use rcbot::Vector;
+use rcbot::bot::kungfu::kungfu_file_name;
 use rcbot::bot::{Bot, BotCam, BotWorld, NO_CLIENT};
 use rcbot::chat::bot_chat::ChatKind;
 use rcbot::chat::brain::{HalFileNames, HalFileOverrides, cookie_is_valid};
@@ -128,6 +129,7 @@ pub(crate) fn save_bot(s: &State, b: &Bot) {
         s.write(&f.brain, &hal.save_brain());
     }
     s.write(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id)), &b.learned.save(id));
+    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id)), b.kungfu.save().as_bytes());
 }
 
 /// `CBotGlobals::saveLearnedData`: the teams' enemy-cost GAs and the TS loadout GA.
@@ -181,6 +183,9 @@ pub(crate) fn new_bot(s: &mut State, e: Engine, index: u32, name: String, profil
     if id != 0 {
         if let Some(b) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id))) {
             bot.learned.load(&b, id);
+        }
+        if let Some(k) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id))) {
+            bot.kungfu.load(&String::from_utf8_lossy(&k));
         }
         let rcr = format!("{BOT_PROFILES_FOLDER}/{}", rep_file_name(id));
         for c in s.clients.iter().filter(|c| c.is_used()) {

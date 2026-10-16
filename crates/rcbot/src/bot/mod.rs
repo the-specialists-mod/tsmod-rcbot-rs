@@ -14,6 +14,7 @@
 pub mod botcam;
 mod combat;
 pub mod events;
+pub mod kungfu;
 mod look;
 mod manager;
 mod movement;
@@ -54,6 +55,8 @@ pub mod buttons {
     pub const DUCK: i32 = 1 << 2;
     /// `IN_FORWARD`.
     pub const FORWARD: i32 = 1 << 3;
+    /// `IN_BACK`: TS's kung fu reads it for the back kick below 100 units/s.
+    pub const BACK: i32 = 1 << 4;
     /// `IN_USE`.
     pub const USE: i32 = 1 << 5;
     /// `IN_ATTACK2`.
@@ -97,6 +100,9 @@ pub const EF_NODRAW: i32 = 128;
 /// `DEAD_NO`.
 pub const DEAD_NO: i32 = 0;
 
+/// Seconds between two presses of the reload key for the same clip (TS's reloads take 1.5-3 s;
+/// a reload that started holds the gun until it ends, so one press is enough).
+pub const RELOAD_RETRY: f32 = 2.0;
 /// `BOT_DEFAULT_REACTION_TIME`.
 pub const BOT_DEFAULT_REACTION_TIME: f32 = 0.3;
 /// `BOT_DEFAULT_THINK_TIME`.
@@ -583,6 +589,10 @@ pub struct Bot {
     pub(crate) weapons: BotWeapons,
     pub(crate) current_weapon: Option<i32>,
     pub(crate) last_weapon_info: Option<(i32, i32, i32)>,
+    /// When the reload key may be pressed again (design §4: never spammed).
+    pub(crate) next_reload_time: f32,
+    /// The kung fu fighter: its learned stances, reactions and combos, and the fight now.
+    pub kungfu: kungfu::KungFu,
     pub(crate) pickup_entity: Option<EntRef>,
     pub(crate) pickup_item_time: f32,
 
@@ -714,6 +724,8 @@ impl Bot {
             weapons: BotWeapons::default(),
             current_weapon: None,
             last_weapon_info: None,
+            next_reload_time: 0.0,
+            kungfu: kungfu::KungFu::new(),
             pickup_entity: None,
             pickup_item_time: 0.0,
             spawn_time: 0.0,
@@ -787,7 +799,16 @@ impl Bot {
         self.button |= buttons::ALT1;
     }
 
-    pub(crate) fn reload(&mut self) {
+    /// `Reload`, guarded (design §4): only a gun whose clip has room and whose reserve has
+    /// rounds, and once per [`RELOAD_RETRY`] (or sooner when the clip changes), so the key is
+    /// never spammed. With kung fu or a blade TS's reload key is the block (`CCombatBlock`),
+    /// which [`kungfu`] presses on its own.
+    pub(crate) fn reload(&mut self, now: f32) {
+        let Some(wp) = self.current_weapon.and_then(|id| self.weapons.get(id)) else { return };
+        if wp.is_melee() || wp.reserve <= 0 || (wp.max_clip > 0 && wp.clip >= wp.max_clip) || self.next_reload_time > now {
+            return;
+        }
+        self.next_reload_time = now + RELOAD_RETRY;
         self.button |= buttons::RELOAD;
     }
 

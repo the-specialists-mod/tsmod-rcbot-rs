@@ -207,6 +207,8 @@ impl Bot {
                     self.turn_speed = 1.0;
                 }
                 match self.resolve(w, self.enemy) {
+                    // A kung fu wall jump faces the wall, not the enemy (design §4).
+                    Some(_) if let Some(v) = self.kungfu_face() => self.set_view_angles(v),
                     Some(e) => {
                         let aim = self.aim_vector(&e, now, rng);
                         self.set_view_angles(aim);

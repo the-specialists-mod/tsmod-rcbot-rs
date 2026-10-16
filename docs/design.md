@@ -105,6 +105,7 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot.cpp` `CBot::BotEvent` and `BotEvent_*`, `HearSound`, `BotChat`'s first half, `ReplyToMessage`, `BOT_TASK_TYPE_MESSAGE`, `havingFun`, `gettingBored`, `printBoredoms`, `WantToLeaveGame`; `engine.cpp` `pfnEmitSound`'s sound kinds | `bot/events.rs` | |
 | `bot_client.cpp` `BotClient_Generic_DeathMessage`'s events; `engine.cpp` `pfnEmitSound`'s loop; `dll.cpp` `DispatchTouch`, `ClientCommand`'s `say`; `globals.cpp` `StartFrame`'s leave-the-game part | `bot/manager.rs` | |
 | `bot.h` `CBotCam`; `dll.cpp` `CBotCam::Think`, `TuneIn`, `TuneOff`, `Spawn`, `Clear` | `bot/botcam.rs`, `host` | |
+| (none: a port addition) the kung fu fighter | `bot/kungfu.rs` | §4 |
 | `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs` | |
 | `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config and `NON_TS_TEAMPLAY` (`tm_` maps), `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam`, `ClientCommand`'s `±rcbot_force_grip` with `CClient::Think`'s grip, `UTIL_FacingEnt`, `UTIL_getEntityInFront` | `host` | Plugin callbacks and API calls |
 | `bot.cpp` `LookForNewTasks`' TS objectives (`m_TSObjectives`: a random one, team 1 `DEFEND`s it, team 2 `USE`s its `ts_hack`/`ts_bomb` for 9 s); `bot_client.cpp` `BotClient_TS_Objective`, `BotClient_Generic_TeamScore` (`m_iTeamScores`) | `bot/think.rs` (`objective_tasks`), `host` | The plugin API's `objectives` and `GameState::team_scores` stand in for the messages (§4) |
@@ -324,6 +325,38 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   reads it (`objectives`, plugin API v5) each time, so the list is always the current one, and
   keeps only the objectives that can still be completed (`ObjectiveInfo::active`: not frozen,
   a giver that hasn't fired), which the messages can't tell.
+* **No shots through walls**: `SEE_ENEMY` can outlive the line of sight (set by
+  `NORMAL_ATTACK`'s last-seen-position check, by `EnemyFound`, or kept until the vision pass
+  reaches the enemy again), and upstream then aimed and fired at the enemy's *current* origin
+  behind the wall. `NORMAL_ATTACK` re-checks `FVisible` on the enemy every time before acting on
+  the condition, and `FindEnemy` checks it on each candidate instead of trusting the visible
+  list.
+* **Reloads**: `Reload` presses the key only for a gun whose clip has room and whose reserve
+  has rounds, at most once per 2 s or until the weapon or clip changes (TS keeps a started
+  reload going, so one press is enough; with kung fu or a blade the key is `CCombatBlock`, which
+  upstream's reload task held down for up to 1.5 s). `BOT_TASK_RELOAD` ends at once with nothing
+  to reload.
+* **Empty guns**: a gun with no rounds in the clip or reserve is dropped (`drop`), forgotten,
+  and the next weapon with rounds (else kung fu) taken out; upstream kept dry-firing it. Kung fu's
+  own empty `WeaponInfo` no longer sends `drop`.
+* **Kung fu** (`bot/kungfu.rs`, no upstream counterpart): `NORMAL_ATTACK`'s random punches and
+  kicks within 72 units are replaced by a fighter built on TS 3.0's `CCombatAttack` and
+  `CCombatBlock`. It reads the opponent's weapon and new presses (`pev->button`: attacks, blocks),
+  picks a defensive or offensive stance every 2-4 s from what each earned (damage dealt less
+  taken), its health, the opponent's and its power (estimated: 100, -33 a block, +15/s); answers
+  an attack it sees, after a skill-scaled reaction time, by blocking (`+reload`), ducking,
+  stepping back or aside, scored by whether it was hit, then counters; and attacks in combos
+  (move sequences pressed as TS reads them: fresh or held `+attack`/`+attack2`, with `+duck`,
+  `+back`, crouch jumps (`+jump` `+duck`), a run-up flying kick, and wall jumps (`+alt1` facing a
+  wall with the opponent behind) into the back kick or, turning in the air, the flying kick).
+  Combos are scored the same way; every 5 the worst well-tried one is replaced by a crossover or
+  mutation of the best. What it learned is saved per profile in `botprofiles/<id>.rkf` (text:
+  `rcbot-kungfu 1`, `stance`, `reaction`, `combo <value> <uses> <move codes>`), beside the
+  byte-compatible `.rld`. While a wall jump turns its back to the opponent, the bot keeps it seen
+  if the line is clear. Unarmed against a gun more than 220 units away it takes out a gun with
+  rounds or takes cover instead of running at it.
+* **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
+  the stuck and jump-waypoint jumps already are.
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
 
@@ -540,6 +573,14 @@ Found while porting; not filed upstream.
     `UTIL_MakeVectors(pev->v_angle)`, so from whatever the previous `MakeVectors` (any bot's or
     client's) left there. **Fixed** (the player's view). `+rcbot_force_grip` also compares the
     access bit set with 9 as a number (`dll.cpp:946`); kept.
+72. **Bots shoot through walls** (`BOT_TASK_NORMAL_ATTACK`, `bot.cpp:14719`, `:15492`): the
+    task acts on `BOT_CONDITION_SEE_ENEMY`, which `HasSeenEnemy`'s `FVisible(vLastEnemyPosition)`
+    sets when the *last seen position* is in sight, `EnemyFound` sets unconditionally, and
+    `UpdateVisibles` keeps until its pass reaches the enemy again; the next think then aims and
+    fires at the enemy's current origin, behind the wall. **Fixed** (§4).
+73. **Held reload key** (`BOT_TASK_RELOAD`, `bot.cpp`): the task presses `IN_RELOAD` every think
+    for 0.5-1.5 s whatever the weapon; with TS kung fu or a blade that key is the block, so a
+    bot that switched weapons blocked over and over, draining its power. **Fixed** (§4).
 
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
@@ -560,6 +601,13 @@ those by going through the port's own code when that code is ported.
 ## 6. Tests
 
 `cargo xtask test` runs everything on x86_64 and i686 Linux.
+
+* **Combat and kung fu** (`bot/tests.rs`, `bot/kungfu.rs`): no shot at an enemy once a wall
+  stands between them (239 shots without the §5.72 fix); one reload press per empty clip and
+  none with a full clip or no reserve; an empty gun dropped once for kung fu; cover from a far
+  gunman; blocks, ducks and steps against a punching opponent, with strikes back and learning;
+  the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
+  wall jump; `.rkf` round trip and damaged files; combos bred from the best.
 
 * **Unit tests** in each module: path slots and the cursor, the searches, buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,

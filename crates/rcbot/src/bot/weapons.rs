@@ -131,6 +131,13 @@ impl BotWeapons {
         }
     }
 
+    /// The bot dropped the weapon (port addition, design §4): it no longer has it.
+    pub fn remove(&mut self, id: i32) {
+        if let Some(w) = usize::try_from(id).ok().and_then(|i| self.weapons.get_mut(i)) {
+            *w = BotWeapon::default();
+        }
+    }
+
     /// `BotClient_TS_WeaponInfo`: the game says the bot holds `game_id` (0 for kung fu) with
     /// `clip` rounds and `ammo` in reserve.
     ///
