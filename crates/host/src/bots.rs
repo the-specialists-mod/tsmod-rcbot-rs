@@ -144,6 +144,7 @@ pub(crate) fn save_bot(s: &State, b: &Bot) {
     s.write(&learned_file(b, "rld"), &b.learned.save(id));
     s.write(&learned_file(b, "rkf"), b.kungfu.save().as_bytes());
     s.write(&learned_file(b, rcbot::learn::weapon_stats::FILE_EXT), b.learning.weapons.save().as_bytes());
+    s.write(&learned_file(b, rcbot::learn::loadout::FILE_EXT), b.learning.loadout.save().as_bytes());
 }
 
 /// `CBotGlobals::saveLearnedData`: the teams' enemy-cost GAs and the TS loadout GA.
@@ -153,6 +154,7 @@ pub(crate) fn save_globals(s: &State) {
     }
     s.write(rcbot::learn::data::TS_WEAPONS_FILE, &s.learned.save_ts_weapons());
     s.write(rcbot::learn::weapon_stats::GLOBAL_FILE, s.learned.weapon_prior.save().as_bytes());
+    s.write(rcbot::learn::loadout::GLOBAL_FILE, s.learned.loadout_prior.save().as_bytes());
     let h = &s.learned.heatmap;
     if !h.is_empty() && h.map_name() == s.map {
         s.write(&heatmap_path(s), &h.to_bytes());
@@ -224,6 +226,9 @@ pub(crate) fn new_bot(s: &mut State, e: Engine, index: u32, name: String, profil
     }
     if let Some(t) = s.read(&learned_file(&bot, rcbot::learn::weapon_stats::FILE_EXT)) {
         bot.learning.weapons.load(&String::from_utf8_lossy(&t));
+    }
+    if let Some(t) = s.read(&learned_file(&bot, rcbot::learn::loadout::FILE_EXT)) {
+        bot.learning.loadout.load(&String::from_utf8_lossy(&t));
     }
     if id != 0 {
         let rcr = format!("{BOT_PROFILES_FOLDER}/{}", rep_file_name(id));

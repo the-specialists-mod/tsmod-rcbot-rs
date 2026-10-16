@@ -20,6 +20,7 @@ pub mod header;
 pub mod heatmap;
 pub mod io;
 pub mod ledger;
+pub mod loadout;
 pub mod nn;
 pub mod opponents;
 pub mod perceptron;

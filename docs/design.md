@@ -465,6 +465,18 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   same with none); `Waypoints::cover_waypoint_weighted(…, penalty)`, the cover search with a
   per-waypoint distance penalty (`cover_waypoint` passes 0). The navigation and combat code choose
   when to use them.
+* **Loadouts by a bandit** (`learn/loadout.rs`): the loadout bought before each spawn is chosen
+  among 24 curated ones (a primary and a sidearm a TS player carries, at most 60 slots so the bot
+  can still dive, within the slots it has) by discounted UCB1 (every arm's weight × 0.97 per
+  life; untried arms first, ties broken at random), each bot's estimate shrunk toward every bot's
+  (2 samples). An arm is credited only if the inventory the game reports within 3 s of the spawn
+  holds it (or is exactly another curated loadout); the reward is `(kills - 0.5 deaths + dealt /
+  200)` per minute of the life (at least half a minute), at the death. `BOT_CONFIG_TS_KUNGFU` buys
+  nothing (and credits nothing); `disable_weapon_learn` picks at random. Upstream's loadout GA
+  still picks, breeds and saves its genes byte for byte (`tsweaps.rld`; they feed the stunt
+  perceptron) but no longer chooses the weapons. Saved as `botprofiles/<key>.rlo` and
+  `loadouts.rlo` (text, `rcbot-loadout 1`, `l <value> <weight> <weapon ids>`, keyed by the weapons
+  so the list can change).
 
 ## 5. Upstream bugs found
 
@@ -699,6 +711,10 @@ The research for #104 lists RCBot's TS bugs elsewhere (weapon switching through 
 model-based teams, the 2.x `WStatus` kung fu id, free weapons instead of buying). The port fixes
 those by going through the port's own code when that code is ported.
 
+* **The TS loadout GA** (`Think`, `UTIL_makeTSweapon`): weapon ids are `(int)(gene * 35)`, so 0
+  (no weapon: an empty slot for good once bred) and 35 (the seal knife) are as likely as any gun,
+  one GA is shared by every bot, whether the weapons came is never checked, and the life fitness
+  can't tell a good loadout from a lucky life. **Replaced** by the loadout bandit (§4).
 * **`decideJumpDuckStrafe` only strafes right** (`bot.cpp`): the strafe is the sigmoid's output
   (0-1) times the speed, outside 0.25-0.75, so it is never negative. **Fixed** (§4).
 * **Kung fu lives bred the personal genes**: the port's kung fu fighter set `m_bUsedMelee`, so lives
@@ -728,7 +744,10 @@ those by going through the port's own code when that code is ported.
   team, danger and ambush value, decay, `.rhm` round trip and rejected files), the A* danger hook
   (weight 0 the plain search, a high weight going round a deadly waypoint), weighted cover; the
   event-replay harness (`Rig::replay`: host events through the bot manager) filling a bot's ledger,
-  the heatmap and the weapon tables from a scripted fight.
+  the heatmap and the weapon tables from a scripted fight; the loadout bandit (curated loadouts
+  legal and light, rewards per minute, credit only for what the inventory shows, untried first
+  then the best with old lives fading, the prior guiding a new bot, file round trip) and a bot
+  crediting the loadout it bought only when the inventory shows it.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

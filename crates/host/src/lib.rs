@@ -262,6 +262,9 @@ extern "C" fn game_init() {
     if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::weapon_stats::GLOBAL_FILE)) {
         learned.weapon_prior.load(&String::from_utf8_lossy(&b));
     }
+    if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::loadout::GLOBAL_FILE)) {
+        learned.loadout_prior.load(&String::from_utf8_lossy(&b));
+    }
     config.mod_folder = "ts".into();
     let mut state = State {
         config,

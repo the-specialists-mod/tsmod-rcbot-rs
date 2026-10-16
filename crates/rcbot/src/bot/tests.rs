@@ -1492,3 +1492,47 @@ fn replayed_fights_fill_the_ledger_heatmap_and_weapon_table() {
     assert_eq!(rig.bot.weapon_stats().cell(1, 300.0).map(|c| c.hits), Some(1.0));
     assert_eq!(rig.learned.weapon_prior.cell(1, 300.0).map(|c| c.damage), Some(50.0));
 }
+
+#[test]
+fn the_loadout_bought_is_credited_only_when_the_inventory_shows_it() {
+    use crate::learn::loadout::LOADOUTS;
+    let mut rig = Rig::new(Config::default());
+    let dead = || {
+        let mut d = player(1, Vector::ZERO, 0);
+        d.health = 0.0;
+        d.player.as_mut().unwrap().alive = false;
+        d
+    };
+    let mut w = plane(vec![dead(), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(6);
+    let bought = |f: &Frame| f.actions.iter().find_map(|a| if let Action::Loadout(l) = a { Some(l.clone()) } else { None });
+    // Dead: a curated loadout is bought.
+    let ids = rig.with(|b, g| bought(&b.frame(g, &w, &mut rng))).expect("a loadout");
+    let arm = LOADOUTS.iter().position(|l| *l == ids.as_slice()).expect("curated");
+    // Alive with it: credited; a kill and 100 damage in 30 s, then a death.
+    w.ents.borrow_mut()[0] = player(1, Vector::ZERO, 0);
+    *w.inventory.borrow_mut() = owned(&[(ids[0], 10, 10), (ids[1], 7, 7)]);
+    run(&mut rig, &mut w, &mut rng, 10, |_, _| {});
+    assert_eq!(rig.bot.learning.credited_loadout, Some(arm));
+    rig.with(|b, g| {
+        b.combat_event(g, &w, &damage(2, 1, 100.0), &mut rng);
+        b.combat_event(g, &w, &kill(1, 2, ids[0]), &mut rng);
+    });
+    w.time += 30.0;
+    w.ents.borrow_mut()[0] = dead();
+    let next = rig.with(|b, g| bought(&b.frame(g, &w, &mut rng)));
+    let a = rig.bot.learning.loadout.arms[arm];
+    // (1 kill - 0.5 death + 100/200) per minute over about half a minute.
+    assert!((a.value - 2.0).abs() < 0.05 && a.n == 1.0, "{a:?}");
+    assert_eq!(rig.learned.loadout_prior.arms[arm].n, 1.0);
+    assert!(next.is_some(), "a new pick for the next life");
+    // The buy didn't come through: no credit, nothing learned.
+    w.ents.borrow_mut()[0] = player(1, Vector::ZERO, 0);
+    *w.inventory.borrow_mut() = owned(&[(28, 10, 10)]);
+    run(&mut rig, &mut w, &mut rng, 200, |_, _| {});
+    assert_eq!(rig.bot.learning.credited_loadout, None);
+    w.ents.borrow_mut()[0] = dead();
+    let before = rig.bot.learning.loadout.arms.iter().map(|a| a.n).sum::<f32>();
+    rig.with(|b, g| b.frame(g, &w, &mut rng));
+    assert_eq!(rig.bot.learning.loadout.arms.iter().map(|a| a.n).sum::<f32>(), before);
+}

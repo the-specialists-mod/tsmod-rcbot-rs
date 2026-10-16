@@ -9,7 +9,9 @@
 use super::kungfu::FightEnd;
 use super::{Bot, BotGlobals, BotWorld, cond};
 use crate::Random;
+use crate::config::flags as cfg;
 use crate::learn::ledger::{CombatEvent, DamageEvent, KillEvent, Ledger, LedgerEntry, range_bin};
+use crate::learn::loadout::{CREDIT_WINDOW, LOADOUTS, LoadoutBandit, credited_loadout, life_reward, weapon_slots};
 use crate::learn::weapon_stats::{MIN_SAMPLES, WeaponStats};
 
 /// The longest think gap counted as exposure (a stall isn't time spent fighting).
@@ -27,6 +29,16 @@ pub struct BotLearning {
     pub ledger: Ledger,
     /// Weapon effectiveness by range: damage per second of exposure, accuracy.
     pub weapons: WeaponStats,
+    /// The loadout estimates.
+    pub loadout: LoadoutBandit,
+    /// The loadout bought for the next life, and the one the inventory showed this life (once
+    /// checked).
+    pub(crate) pending_loadout: Option<usize>,
+    pub(crate) credited_loadout: Option<usize>,
+    pub(crate) credit_checked: bool,
+    /// Kills and damage dealt this life.
+    pub(crate) life_kills: u32,
+    pub(crate) life_dealt: f32,
     /// When this life started (the first think alive), 0 while dead.
     pub(crate) life_start: f32,
     /// The last learning think (0 none this life), the weapon and clip then, and the enemy's
@@ -95,6 +107,7 @@ impl Bot {
                 if attacker == me && victim != me {
                     let e = LedgerEntry { dealt: amount, ..entry(victim, Self::blow_weapon(w, attacker, inflictor)) };
                     self.learning.ledger.record(e);
+                    self.learning.life_dealt += amount;
                     if let Some(v) = w.entity(victim) {
                         let dist = (v.origin - my_origin).length();
                         self.learning.weapons.add_hit(e.weapon, dist, amount);
@@ -108,6 +121,7 @@ impl Bot {
             CombatEvent::Kill(KillEvent { killer, victim, weapon, .. }) => {
                 if killer == me && victim != me {
                     self.learning.ledger.record(LedgerEntry { kill: true, ..entry(victim, weapon) });
+                    self.learning.life_kills += 1;
                 } else if victim == me {
                     let other = if killer == me { 0 } else { killer };
                     self.learning.ledger.record(LedgerEntry { death: true, ..entry(other, weapon) });
@@ -168,6 +182,37 @@ impl Bot {
             g.learned.weapon_prior.add_shots(weapon, l.last_enemy_dist, fired);
         }
         l.last_clip = Some(clip);
+        self.credit_loadout(w, now);
+    }
+
+    /// The loadout for the next life (`Think`'s TS weapon choice, design §4): the bandit's pick
+    /// among the loadouts that fit the slots the bot has (what is free and what it carries,
+    /// which the new loadout replaces), at random with weapon learning off.
+    pub(crate) fn choose_loadout(&mut self, g: &BotGlobals<'_>, rng: &mut dyn Random) -> Vec<i32> {
+        let carried: i32 = (1..=37).filter(|&id| self.weapons.has(id)).map(weapon_slots).sum();
+        let capacity = if self.state.free_slots > 0 { self.state.free_slots + carried } else { 100 };
+        let random = g.config.is_on(cfg::DISABLE_WEAPON_LEARN);
+        let i = self.learning.loadout.choose(&g.learned.loadout_prior, capacity, random, rng);
+        self.learning.pending_loadout = Some(i);
+        LOADOUTS[i].to_vec()
+    }
+
+    /// Early in a life: which loadout the game's inventory shows (only that is credited).
+    fn credit_loadout(&mut self, w: &dyn BotWorld, now: f32) {
+        let l = &mut self.learning;
+        if l.credit_checked || l.pending_loadout.is_none() {
+            return;
+        }
+        if now - l.life_start > CREDIT_WINDOW {
+            l.credit_checked = true;
+            return;
+        }
+        let Some(owned) = w.inventory(self.index) else { return };
+        let ids: Vec<i32> = owned.iter().map(|o| o.weapon).collect();
+        if let Some(arm) = credited_loadout(l.pending_loadout, &ids) {
+            l.credited_loadout = Some(arm);
+            l.credit_checked = true;
+        }
     }
 
     /// The bot died (its first think dead, which may come before the kill is scored): the
@@ -176,9 +221,22 @@ impl Bot {
         if self.kungfu.fighting(now, FIGHT_RECENT) {
             self.kf_settle(g, now, FightEnd::Death, rng);
         }
-        self.learning.ledger.close_all();
-        self.learning.life_start = 0.0;
-        self.learning.last_tick = 0.0;
-        self.learning.last_clip = None;
+        let l = &mut self.learning;
+        if let Some(arm) = l.credited_loadout.take()
+            && l.life_start > 0.0
+            && !g.config.is_on(cfg::DISABLE_WEAPON_LEARN)
+        {
+            let r = life_reward(l.life_kills, 1, l.life_dealt, now - l.life_start);
+            l.loadout.reward(arm, r);
+            g.learned.loadout_prior.reward(arm, r);
+        }
+        l.ledger.close_all();
+        l.life_start = 0.0;
+        l.last_tick = 0.0;
+        l.last_clip = None;
+        l.pending_loadout = None;
+        l.credit_checked = false;
+        l.life_kills = 0;
+        l.life_dealt = 0.0;
     }
 }
