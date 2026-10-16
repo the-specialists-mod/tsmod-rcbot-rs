@@ -94,9 +94,12 @@ impl Bot {
         if e.classname == "func_breakable" {
             let origin = e.entity_origin();
             let mut player = None;
-            for i in w.entities_in_sphere(origin, 200.0) {
+            // Upstream's `UTIL_FindEntityInSphere` loop looks for the first client: clients
+            // are the first entities, so the clients alone, in order, give the same one without
+            // walking every entity for every breakable.
+            for i in 1..=w.max_clients() {
                 let Some(p) = w.entity(i) else { continue };
-                if !p.is_client() {
+                if !p.is_client() || !box_in_sphere(&p, origin, 200.0) {
                     continue;
                 }
                 if i == self.index {
@@ -490,4 +493,22 @@ impl Bot {
         let _ = w;
         self.weapons.best_weapon_id(dist, too_high, self.me.waterlevel == 3)
     }
+}
+
+/// `pfnFindEntityInSphere`'s test: the entity's box (`absmin`..`absmax`) comes nearer `origin`
+/// than `radius`.
+pub(crate) fn box_in_sphere(e: &Entity, origin: Vector, radius: f32) -> bool {
+    let mut dist_sq = 0.0;
+    for (o, (lo, hi)) in [(origin.x, (e.absmin.x, e.absmax.x)), (origin.y, (e.absmin.y, e.absmax.y)), (origin.z, (e.absmin.z, e.absmax.z))]
+    {
+        let d = if o < lo {
+            o - lo
+        } else if o > hi {
+            o - hi
+        } else {
+            0.0
+        };
+        dist_sq += d * d;
+    }
+    dist_sq < radius * radius
 }

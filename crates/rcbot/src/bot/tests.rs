@@ -1219,3 +1219,26 @@ fn a_teleport_drops_the_path() {
     rig.bot.teleported();
     assert_eq!((rig.bot.current_waypoint, rig.bot.stuck_time), (-1, 0.0));
 }
+
+#[test]
+fn a_breakable_is_an_enemy_by_the_first_client_near_it() {
+    let rig = Rig::new(Config::default());
+    let breakable = |x: f32| {
+        let mut b = brush(6, "func_breakable", Vector::new(x, 0.0, 0.0), Vector::new(16.0, 16.0, 16.0));
+        (b.health, b.takedamage, b.target) = (50.0, 1.0, "t".into());
+        b
+    };
+    let mut b = rig.bot;
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(260.0, 0.0, 0.0), 0)]);
+    b.me = w.entity(1).unwrap();
+    b.state = b.me.player.unwrap();
+    // Next to the bot: in its way.
+    assert!(b.is_enemy(&w, &breakable(50.0)));
+    // Near the bot's box but not within 80 units, and no one else near: not an enemy.
+    assert!(!b.is_enemy(&w, &breakable(150.0)));
+    // An enemy the bot sees stands by it (the bot, client 1, is skipped as too far).
+    b.visibles = vec![2];
+    assert!(b.is_enemy(&w, &breakable(170.0)));
+    assert!(super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(170.0, 0.0, 0.0), 200.0));
+    assert!(!super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(-100.0, 0.0, 0.0), 200.0));
+}
