@@ -61,6 +61,12 @@ cargo xtask e2e      # on the port's engine roots (~/games): rcbot bots join, mo
                      # kill and change weapons, then the native bots take over at the next map
 ```
 
+Releases are built by GitHub Actions (`.github/workflows/release.yml`): pushing a `v*` tag that
+matches `Cargo.toml`'s version tests, builds and publishes `tsmod-rcbot-rs-<tag>-<platform>`
+archives (and `-debug` ones with debug info) for linux-i686, linux-x86_64, windows-i686 and
+windows-x86_64. Extract one over the server's game folder: it holds `ts/dlls/` and
+`ts/tsmod/rcbot/`.
+
 ## Credits
 
 * **RCBot** by Paul "Cheeseh" Murphy (rcbot.net), based on botman's **HPB bot** template;

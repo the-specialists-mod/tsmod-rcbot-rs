@@ -1,0 +1,106 @@
+# Builds the four targets and publishes a GitHub release when a `v*` tag is pushed:
+#   tsmod-rcbot-rs-<tag>-<platform>.{zip,tar.gz}        optimized, stripped (cargo xtask dist)
+#   tsmod-rcbot-rs-<tag>-<platform>-debug.{zip,tar.gz}  the same libraries with debug info
+#                                                       (dist --debug-info), for symbolizing crashes
+# Each archive holds a ts/ directory to copy over the server's ts/ (dlls/tsmod_rcbot* and
+# tsmod/rcbot/, the plugin's data), with the licence files beside it. A manual run
+# (workflow_dispatch) builds the archives as a workflow artifact without publishing a release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 24.04 for its clang 18: bindgen with 22.04's clang 14 fails on the MinGW intrinsics headers.
+    runs-on: ubuntu-24.04
+    env:
+      # goldsrc-sys (the port's) generates its bindings from the FWGS headers.
+      FWGS_DIR: ${{ github.workspace }}/xash3d-fwgs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version matches the tag
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Cargo.toml's version is $version but the tag is $GITHUB_REF_NAME: bump it in a Release commit" >&2
+            exit 1
+          fi
+
+      # The commit the port's release (the pinned ts-plugin-api) is built against.
+      - name: FWGS headers
+        run: |
+          git clone --filter=blob:none https://github.com/FWGS/xash3d-fwgs xash3d-fwgs
+          git -C xash3d-fwgs checkout 51353ff8d65e58300eeb2bd014867673f1f367c6
+          git -C xash3d-fwgs submodule update --init 3rdparty/library_suffix
+
+      - name: Toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib mingw-w64 libclang-dev zip
+          rustup toolchain install stable --profile minimal \
+            --target i686-unknown-linux-gnu,x86_64-unknown-linux-gnu,i686-pc-windows-gnu,x86_64-pc-windows-gnu
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo xtask test
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
+          mkdir -p out
+          for variant in "" --debug-info; do
+            rm -rf dist
+            # dist also fails a Windows DLL that imports a MinGW runtime DLL.
+            cargo xtask dist $variant
+            suffix=""
+            [[ -n $variant ]] && suffix="-debug"
+            for dir in dist/*/; do
+              platform=$(basename "$dir")
+              name="tsmod-rcbot-rs-$version-$platform$suffix"
+              stage="stage/$name"
+              mkdir -p "$stage/ts"
+              cp -r "$dir"dlls "$dir"tsmod "$stage/ts/"
+              cp LICENSE GPL-EXCEPTION.txt README.md "$stage/"
+              case $platform in
+                windows-*) (cd "$stage" && zip -qr "$GITHUB_WORKSPACE/out/$name.zip" .) ;;
+                *) tar -C "$stage" -czf "out/$name.tar.gz" . ;;
+              esac
+            done
+          done
+          ls -l out
+
+      - name: Check asset names
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
+          expected=()
+          for suffix in "" -debug; do
+            for platform in linux-i686 linux-x86_64; do expected+=("tsmod-rcbot-rs-$version-$platform$suffix.tar.gz"); done
+            for platform in windows-i686 windows-x86_64; do expected+=("tsmod-rcbot-rs-$version-$platform$suffix.zip"); done
+          done
+          diff <(printf '%s\n' "${expected[@]}" | sort) <(ls out | sort)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsmod-rcbot-rs
+          path: out/*
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
