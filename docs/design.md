@@ -456,7 +456,7 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   (ledger), the rounds it fired (the clip going down) and the hits, fading with exposure (half
   weight after 600 s). Score: damage per second of exposure, shrunk toward every bot's results
   (`(n v + 5 p) / (n + 5)`, `n` the exposure), themselves shrunk toward 10/s. API for the weapon
-  choice: `Bot::weapon_score(g, weapon, dist) -> Option<f32>` (`None` under 5 s of the bot's own
+  choice: `Bot::learned_weapon_score(g, weapon, dist) -> Option<f32>` (`None` under 5 s of the bot's own
   data), `Bot::weapon_stats()` (`dps`, `accuracy`, `samples`, `score`). Saved as
   `botprofiles/<key>.rwr` and the prior as `weaponstats.rwr` (text, `rcbot-weapons 1`, `w <id>
   <bin> <exposure> <damage> <shots> <hits>`).
@@ -492,7 +492,7 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   enemy (exposure), kills of and deaths to bots, a weapon histogram, its usual range, its kung fu
   share, stunts per minute (the host now subscribes to `player_stunt`), dodging (its speed across
   the bot's view while seen), and from kung fu fights its attack mix, blocks and rhythm (a new fight
-  starts from that rhythm). Counts fade ×0.95 at each map load. API: `Bot::threat(g, player)` and
+  starts from that rhythm). Counts fade ×0.95 at each map load. API: `Bot::learned_threat(g, player)` and
   `OpponentModel::threat(key)` (1 for an average or unknown player, 0.25-4: its damage rate shrunk
   toward everyone's over everyone's, times √(kills/deaths vs bots)), `OpponentModel::profile(key)`
   (`accuracy`, `favourite_weapon`, `kf_block_rate`, the fields). Saved as

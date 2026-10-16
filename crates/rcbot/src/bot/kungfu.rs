@@ -229,7 +229,7 @@ pub enum Stance {
     Offensive,
 }
 
-/// The answers to an attack: [`REACTIONS`] in order, then not reacting (the baseline every
+/// The answers to an attack: the [`Reaction`]s in order, then not reacting (the baseline every
 /// reaction is measured against).
 pub const ANSWERS: usize = REACTIONS.len() + 1;
 /// [`ANSWERS`]' index of not reacting.

@@ -19,7 +19,7 @@ pub const HALF_LIFE: f32 = 600.0;
 pub const PRIOR_WEIGHT: f32 = 5.0;
 /// Damage per second assumed with no data at all.
 pub const DEFAULT_DPS: f32 = 10.0;
-/// Seconds of exposure before a bot's own score is offered ([`crate::bot::Bot::weapon_score`]).
+/// Seconds of exposure before a bot's own score is offered ([`crate::bot::Bot::learned_weapon_score`]).
 pub const MIN_SAMPLES: f32 = 5.0;
 /// `"<key>.rwr"`, in the profiles folder: a bot's table.
 pub const FILE_EXT: &str = "rwr";

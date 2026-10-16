@@ -56,7 +56,7 @@ impl Bot {
 
     /// How dangerous player `index` is to bots, from what every bot saw of them across maps:
     /// 1 for an average or unknown player, 0.25-4 ([`crate::learn::opponents::OpponentModel::threat`]).
-    pub fn threat(&self, g: &BotGlobals<'_>, index: u32) -> f32 {
+    pub fn learned_threat(&self, g: &BotGlobals<'_>, index: u32) -> f32 {
         g.learned.player_keys.get(index).map_or(1.0, |k| g.learned.opponents.threat(k))
     }
 
@@ -73,7 +73,7 @@ impl Bot {
     /// How well `weapon` (a TS id, 0 or 38 kung fu) has worked for this bot at `dist`: damage per
     /// second with the enemy in sight, shrunk toward every bot's results; `None` until the bot
     /// has [`MIN_SAMPLES`] seconds of its own there.
-    pub fn weapon_score(&self, g: &BotGlobals<'_>, weapon: i32, dist: f32) -> Option<f32> {
+    pub fn learned_weapon_score(&self, g: &BotGlobals<'_>, weapon: i32, dist: f32) -> Option<f32> {
         let t = &self.learning.weapons;
         (t.samples(weapon, dist) >= MIN_SAMPLES).then(|| t.score(&g.learned.weapon_prior, weapon, dist))
     }

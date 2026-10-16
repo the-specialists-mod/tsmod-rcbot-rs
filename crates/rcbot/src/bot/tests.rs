@@ -1454,7 +1454,7 @@ fn time_in_sight_hits_and_rounds_go_to_the_weapon_table() {
     run(&mut rig, &mut w, &mut rng, 100, pin);
     let seen = rig.bot.weapon_stats().samples(1, 300.0);
     assert!(seen > 0.5, "{seen}");
-    assert!(rig.with(|b, g| b.weapon_score(g, 1, 300.0)).is_none());
+    assert!(rig.with(|b, g| b.learned_weapon_score(g, 1, 300.0)).is_none());
     // Two rounds fired, one hit for 24.
     arm(&w, 1, 1, 15, 34);
     run(&mut rig, &mut w, &mut rng, 3, pin);
@@ -1465,7 +1465,7 @@ fn time_in_sight_hits_and_rounds_go_to_the_weapon_table() {
     assert!(rig.learned.weapon_prior.samples(1, 300.0) >= seen);
     // A score once five seconds are in.
     run(&mut rig, &mut w, &mut rng, 250, pin);
-    let score = rig.with(|b, g| b.weapon_score(g, 1, 300.0));
+    let score = rig.with(|b, g| b.learned_weapon_score(g, 1, 300.0));
     assert!(score.is_some_and(|s| s > 0.0), "{score:?}");
 }
 
@@ -1562,8 +1562,8 @@ fn replayed_fights_teach_the_opponent_model() {
     assert_eq!(sniper.favourite_weapon(), Some((18, 1.0)));
     let brawler = m.profile(OpponentKey::Player(20)).unwrap();
     assert_eq!((brawler.deaths_to_bots, brawler.kungfu_share), (1.0, 1.0));
-    assert!(rig.with(|b, g| b.threat(g, 3)) > rig.with(|b, g| b.threat(g, 2)));
-    assert_eq!(rig.with(|b, g| b.threat(g, 4)), 1.0);
+    assert!(rig.with(|b, g| b.learned_threat(g, 3)) > rig.with(|b, g| b.learned_threat(g, 2)));
+    assert_eq!(rig.with(|b, g| b.learned_threat(g, 4)), 1.0);
     // Time in the bot's sight counts as exposure, its sideways speed as dodging.
     w.ents.borrow_mut()[2].velocity = Vector::new(0.0, 250.0, 0.0);
     let mut rng = XorShiftRandom::new(3);
