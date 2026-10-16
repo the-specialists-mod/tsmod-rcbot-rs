@@ -428,6 +428,19 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   off for 30-60 s (`AStarBot::backed_off_goals`, past upstream's clear of every failed goal 5-10 s
   after the last failure); `SearchOptions::UPSTREAM` keeps upstream's search for the reference
   tests.
+* **Goals** (`goals.rs` `choose_goal`, `items.rs` `ItemMemory`): upstream's TS bot went for the
+  nearest weapon or power-up in its 60° view, wanted or not (`CanPickup` checked only the class),
+  so it never went for one behind it and pressed use for 10 s on ones it couldn't take (no
+  inventory space, a power-up already held: `+use` on another swaps it), waited 5-10 s and went
+  back. The port knows the map's items (`BotWorld::items`: `ts_groundweapon`, `ts_powerup`, plus
+  what it sees; the host fills `Entity::item` from the plugin API's `entity_info`), sees whether
+  the ones in view are there, learns how long a taken one takes to come back (from 20 s for
+  weapons, 60 s for power-ups), and scores each as `value * 1000 / (distance * 1.3 + 200 + 300
+  danger)` against roaming (10): a gun it has room for (`TSSpace` against TS's weapon slots) by
+  `bot_weapons.ini` priority over its best loaded gun (60 + 5 priority when unarmed), its own gun
+  when low on reserve, health by what it lacks, armour, other power-ups only with none held or
+  running (more unarmed, kung fu most). `CanPickup` asks the same. An item still there 2 s after
+  the bot touched it, or after 1.5 s of pressing use on it, is left alone for 30 s.
 * **Tactical paths** (`rcbot config tactical_paths 1`, off by default: upstream's shortest
   paths; `nav::Tactics`): an edge into waypoint `w` costs its length times `1 + 2 danger(w) +
   1.5 exposure(w) + 0.5 crowded(w)`: `danger` from the learned heat map (`BotGlobals::danger`, a
@@ -693,7 +706,10 @@ those by going through the port's own code when that code is ported.
   (no index jumps) and fails that path within 3 s; blocked for good, it escalates (backing up, a
   dive or wall jump) and kills itself only after 20 s; a dive holds duck through the landing and
   jumps up from prone. A* unit tests: failed goals backed off, tactical costs (danger, exposure,
-  teammates' paths), zero tactics giving shortest paths.
+  teammates' paths), zero tactics giving shortest paths. Items: what weapons and power-ups are
+  worth (room, priority, ammo, a held power-up, health); an item at the far end of ts_dojo is gone
+  for at once; a power-up the game never hands over is tried at most twice in a minute (upstream:
+  10 s of use, then again every 5-10 s); respawn times learned; untakeable items left alone.
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,

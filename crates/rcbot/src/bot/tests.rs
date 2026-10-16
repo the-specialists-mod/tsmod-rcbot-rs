@@ -91,6 +91,15 @@ impl BotWorld for Plane {
     fn inventory(&self, _: u32) -> Option<Vec<InventoryWeapon>> {
         self.inventory.borrow().clone()
     }
+    fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
+        let ents = self.ents.borrow();
+        let hit = |e: &&Entity| match key {
+            EntityKey::Classname => e.classname == value,
+            EntityKey::Target => e.target == value,
+            EntityKey::Targetname => e.targetname == value,
+        };
+        ents.iter().filter(hit).map(|e| e.index).collect()
+    }
     fn player_model(&self, index: u32) -> String {
         self.models.iter().flatten().find(|(i, _)| *i == index).map_or(String::new(), |(_, m)| (*m).into())
     }
@@ -876,7 +885,7 @@ fn teamplay_bots_go_for_the_ts_objectives() {
     let mut hack = player(5, at + Vector::new(20.0, 0.0, 0.0), 0);
     hack.classname = "ts_hack".into();
     hack.flags = 0;
-    let objective = TsObjective { id: 0, origin: at, name: "Hack the computer".into() };
+    let objective = TsObjective { id: 0, origin: at, name: "Hack the computer".into(), ..TsObjective::default() };
     let mut seen = std::collections::HashSet::new();
     for team in [1, 2] {
         for seed in 1..40 {
@@ -1431,7 +1440,6 @@ fn a_stuck_bot_goes_back_once_then_fails_the_path_within_3_s() {
     }
     let (prev, cur) = (rig.bot.prev_waypoint, rig.bot.current_waypoint);
     assert!(prev >= 0 && cur >= 0, "never got going");
-    let edge = rig.wp.find_path_from_to(prev as usize, cur as usize, -1);
     // Something blocks the way for 3 s.
     let mut currents = Vec::new();
     let mut failed_at = None;
@@ -1443,7 +1451,10 @@ fn a_stuck_bot_goes_back_once_then_fails_the_path_within_3_s() {
         |_| true,
         |b, i| {
             currents.push(b.current_waypoint);
-            if failed_at.is_none() && edge.is_some_and(|e| b.paths.failed_paths.contains(e)) {
+            // The 2 s step: the path it was stuck on fails (A* forgets it again at once when no
+            // other way is left) and the next search starts from another waypoint.
+            if failed_at.is_none() && b.unstick.last > 0.0 {
+                assert_eq!(b.unstick.edge, (prev, cur));
                 failed_at = Some(i);
             }
         },
@@ -1515,4 +1526,103 @@ fn a_dive_holds_duck_through_the_landing_and_gets_up_if_prone() {
     let cmd = rig.bot.run_player_move(2.05, 0.02).unwrap();
     assert_ne!(cmd.buttons & buttons::JUMP, 0);
     assert_eq!(rig.bot.dive_time, 0.0);
+}
+
+/// An item lying at `at`: a `ts_powerup` with `bits` or a `ts_groundweapon` of `weapon`.
+fn item_at(index: u32, at: Vector, powerup: i32, weapon: i32) -> Entity {
+    let class = if weapon != 0 { "ts_groundweapon" } else { "ts_powerup" };
+    let mut e = brush(index, class, at, Vector::new(16.0, 16.0, 16.0));
+    e.solid = SOLID_TRIGGER;
+    let kind = if weapon != 0 { ItemKind::GroundWeapon } else { ItemKind::Powerup };
+    e.item = Some(ItemInfo { kind, weapon, powerup, available: true, ..ItemInfo::default() });
+    e
+}
+
+#[test]
+fn items_are_worth_what_the_bot_can_use() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        // Unarmed with room: any gun is worth a lot, a better one more.
+        b.state.free_slots = 81;
+        let (glock, m4) = (b.weapon_value(g, 1), b.weapon_value(g, 5));
+        assert!(glock >= 60.0 && m4 > glock, "{glock} {m4}");
+        // No room for a Barrett (70 slots).
+        b.state.free_slots = 40;
+        assert_eq!(b.weapon_value(g, 18), 0.0);
+        // Armed with a Glock: an M4 is better, another pistol isn't.
+        b.weapons.weapon_info(1, 17, 34, g.weapons, g.presets);
+        assert!(b.weapon_value(g, 5) > 0.0);
+        assert_eq!(b.weapon_value(g, 9), 0.0);
+        // Its own gun low on ammo: worth picking up for the ammo.
+        b.weapons.weapon_info(1, 17, 0, g.weapons, g.presets);
+        assert!(b.weapon_value(g, 1) > 0.0);
+        // Power-ups: none while one is held (taking one with `+use` swaps it), health when hurt.
+        assert!(b.powerup_value(1) > 0.0);
+        b.state.stored_powerup = 4;
+        assert_eq!(b.powerup_value(1), 0.0);
+        assert_eq!(b.powerup_value(64), 0.0);
+        b.me.health = 40.0;
+        assert_eq!(b.powerup_value(64), 60.0);
+    });
+}
+
+#[test]
+fn an_item_behind_the_bot_is_remembered_and_gone_for() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let me = w.entity(1).unwrap().origin;
+    // The farthest waypoint from the start: certainly not in view.
+    let far = *live.iter().max_by(|&&a, &&b| rig.wp.distance(me, a as i32).total_cmp(&rig.wp.distance(me, b as i32))).unwrap();
+    let at = rig.wp.origin(far as i32);
+    w.ents.borrow_mut().push(item_at(20, at, 2, 0));
+    let mut rng = XorShiftRandom::new(4);
+    let mut went = false;
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        50,
+        |_| false,
+        |b, _| {
+            went |= b.tasks().iter().any(|t| t.kind == TaskKind::PickupItem);
+        },
+    );
+    assert!(went, "{:?}", rig.bot.tasks().iter().map(|t| t.kind).collect::<Vec<_>>());
+}
+
+#[test]
+fn an_item_the_game_wont_give_is_tried_once_then_left_alone() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let me = w.entity(1).unwrap().origin;
+    // A power-up near the start that the fake game never hands over.
+    let live = live_waypoints(&rig.wp);
+    let near = *live
+        .iter()
+        .filter(|&&i| rig.wp.distance(me, i as i32) > 150.0)
+        .min_by(|&&a, &&b| rig.wp.distance(me, a as i32).total_cmp(&rig.wp.distance(me, b as i32)))
+        .unwrap();
+    let item = item_at(20, rig.wp.origin(near as i32), 2, 0);
+    w.ents.borrow_mut().push(item.clone());
+    let mut rng = XorShiftRandom::new(4);
+    let (mut tries, mut was_picking) = (0, false);
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        3000,
+        |_| false,
+        |b, _| {
+            let picking = b.tasks().current().is_some_and(|t| t.kind == TaskKind::PickupItem);
+            if picking && !was_picking {
+                tries += 1;
+            }
+            was_picking = picking;
+        },
+    );
+    // Upstream pressed use for 10 s, waited 5-10 s and went back, for the whole minute.
+    assert!((1..=2).contains(&tries), "{tries} tries");
+    assert!(rig.bot.items.ignored(item.handle(), w.time) || rig.bot.items.get(item.handle()).is_some_and(|k| k.ignore_until > 0.0));
 }

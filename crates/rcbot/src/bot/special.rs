@@ -315,6 +315,7 @@ impl Bot {
     pub fn touch(&mut self, g: &BotGlobals<'_>, w: &dyn BotWorld, touched: &Entity, rng: &mut dyn Random) -> bool {
         let now = w.time();
         if self.pickup_entity == Some(touched.handle()) {
+            self.items.touched(touched.handle(), now);
             if let Some(t) = self.tasks.current()
                 && t.kind == TaskKind::PickupItem
                 && t.edict == self.pickup_entity

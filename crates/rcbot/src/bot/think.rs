@@ -5,8 +5,9 @@
 //! TS only. Tasks no TS bot creates are not ported (design §2). Upstream's death-time `buy` /
 //! `menuselect 7` (marked "doesn't work") is replaced by the loadout the gun choice buys.
 
+use super::goals::Goal;
 use super::look::make_vectors;
-use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, LookTask, Task, TaskKind, buttons, cond};
+use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, ItemKind, LookTask, Task, TaskKind, buttons, cond};
 use crate::config::flags as cfg;
 use crate::learn::BotLearnedData;
 use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl};
@@ -18,6 +19,9 @@ use crate::{Random, Vector};
 const INVENTORY_SYNC: f32 = 1.0;
 /// Seconds a weapon switch waits for the game before it may be asked again.
 const SWITCH_WAIT: f32 = 1.0;
+
+/// Seconds of pressing use on an item before the bot gives it up as one the game won't give it.
+const PICKUP_TRIES: f32 = 1.5;
 
 /// Seconds to reach the first waypoint of a path found (then each touch gives 20-30 s more).
 const PATH_TIMEOUT: f32 = 30.0;
@@ -299,6 +303,7 @@ impl Bot {
 
         // A bot the port handed over alive (`adopt_bot`) picks here, as upstream.
         self.select_loadout(g, rng);
+        self.learn_items(w, now);
 
         self.ideal_move_speed = self.max_speed;
         self.want_to_find_enemy = !g.config.is_on(cfg::DONT_SHOOT);
@@ -432,6 +437,22 @@ impl Bot {
         self.enemy = if self.want_to_find_enemy { self.find_enemy(g, w, rng) } else { None };
     }
 
+    /// The map's items ([`super::items::ItemMemory`]): the list now and then, and whether the ones
+    /// in view are there.
+    fn learn_items(&mut self, w: &dyn BotWorld, now: f32) {
+        self.items.scan(w, now);
+        // Items in sight the map's list doesn't name (a weapon a player dropped, say).
+        for i in self.visibles.iter() {
+            if let Some(e) = w.entity(i).filter(|e| e.item.is_some()) {
+                self.items.learn(&e);
+            }
+        }
+        let (forward, _) = make_vectors(self.v_angle);
+        let eye = self.gun_position();
+        let in_view = move |o: Vector| super::look::dot((o - eye).normalize(), forward) > 0.5 || (o - eye).length() < 200.0;
+        self.items.look(w, eye, self.index, in_view, now);
+    }
+
     /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0). The
     /// current weapon changes when the game reports it (upstream set it at once, so a refused
     /// switch left the bot thinking it held a weapon it didn't); the switch isn't asked again
@@ -470,12 +491,24 @@ impl Bot {
         found
     }
 
-    /// `CBot::CanPickup`, TS: power-ups and ground weapons in reach.
-    fn can_pickup(&self, now: f32, e: &Entity) -> bool {
+    /// `CBot::CanPickup`, TS: power-ups and ground weapons in reach, that are there, that the bot
+    /// can take and wants ([`Bot::item_value`]: a weapon it has room for and that is better than
+    /// what it has, a power-up it doesn't have to swap for), and that it didn't just fail to take.
+    /// Upstream took any it saw, held or not, so a bot pressed use on one it couldn't take for
+    /// 10 s, waited, and did it again (design §4).
+    fn can_pickup(&self, g: &BotGlobals<'_>, now: f32, e: &Entity) -> bool {
         if self.pickup_item_time > now || e.effects & EF_NODRAW != 0 || e.origin.z > self.me.origin.z + MAX_JUMP_HEIGHT {
             return false;
         }
-        e.classname.starts_with("ts_powerup") || e.classname == "ts_groundweapon"
+        if !(e.classname.starts_with("ts_powerup") || e.classname == "ts_groundweapon") || self.items.ignored(e.handle(), now) {
+            return false;
+        }
+        match e.item {
+            Some(i) if !i.available => false,
+            Some(i) if i.kind == ItemKind::GroundWeapon => self.weapon_value(g, i.weapon) > 0.0,
+            Some(i) if i.kind == ItemKind::Powerup => self.powerup_value(i.powerup) > 0.0,
+            _ => true,
+        }
     }
 
     /// `UTIL_IsFacingEntity`: the view line at the entity's distance ends inside its box.
@@ -528,27 +561,20 @@ impl Bot {
     /// enemy position half the time, otherwise a random goal).
     pub(crate) fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
         let now = w.time();
-        self.stop_moving();
+        // Upstream stopped here, so a bot stood still for a moment at every goal it reached; the
+        // tasks below give it its next move (design §4).
         self.look_task = if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) {
             LookTask::SearchForLastEnemy
         } else {
             LookTask::LookAround
         };
-        let mut nearest_pickup: Option<(Entity, f32)> = None;
-        for i in self.visibles.iter() {
-            if i == self.index {
-                continue;
-            }
-            let Some(e) = w.entity(i) else { continue };
-            let d = self.distance_from(e.entity_origin(), false);
-            if nearest_pickup.as_ref().is_none_or(|(_, nd)| d < *nd) && self.can_pickup(now, &e) {
-                nearest_pickup = Some((e, d));
-            }
-        }
         let id = self.tasks.new_schedule_id();
         let mut roam = true;
-        if !g.config.is_on(cfg::TS_DONT_PICKUP_WEAPONS)
-            && let Some((p, _)) = nearest_pickup
+        // Upstream: the nearest pickup in sight. The port weighs every item it knows of.
+        let goal = if g.config.is_on(cfg::TS_DONT_PICKUP_WEAPONS) { Goal::Roam } else { self.choose_goal(g, w, now).0 };
+        if let Goal::Item(item) = goal
+            && let Some(p) = self.resolve(w, Some(item))
+            && self.can_pickup(g, now, &p)
         {
             let h = Some(p.handle());
             self.add_task(Task::new(TaskKind::FindPath, id, h, 0, 0.0, Vector::ZERO));
@@ -738,10 +764,20 @@ impl Bot {
                     t.set_time_to_complete(now, 10.0);
                 }
                 match self.resolve(w, self.pickup_entity) {
-                    Some(p) if self.can_pickup(now, &p) => {
+                    Some(p) if self.can_pickup(g, now, &p) => {
                         self.set_move_vector(p.entity_origin());
                         if self.distance_from(p.entity_origin(), false) < 64.0 {
                             self.use_button();
+                            // Pressing use on it for a while and it's still there: the game
+                            // won't give it (full, or a power-up held). Leave it alone instead of
+                            // trying for the rest of the 10 s, and again later (design §4).
+                            let t = self.tasks.current_mut().expect("current task");
+                            if t.float == 0.0 {
+                                t.float = now;
+                            } else if now - t.float > PICKUP_TRIES {
+                                self.items.untakeable(p.handle(), now);
+                                failed = true;
+                            }
                         }
                     }
                     _ => failed = true,

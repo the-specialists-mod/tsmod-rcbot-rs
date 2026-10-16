@@ -15,6 +15,7 @@ pub mod botcam;
 mod combat;
 pub mod events;
 mod goals;
+mod items;
 pub mod kungfu;
 mod look;
 mod manager;
@@ -160,6 +161,58 @@ pub struct PlayerState {
     pub time_scale: f32,
     /// Permanent kung fu picked up this life.
     pub kungfu: bool,
+    /// Carries the capture-the-briefcase case.
+    pub has_flag: bool,
+}
+
+/// What a game item is ([`ItemInfo::kind`], the plugin API's `entity_info` kinds).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ItemKind {
+    /// Anything else.
+    #[default]
+    Other,
+    /// A weapon lying in the map (`ts_groundweapon`): [`ItemInfo::weapon`] is its TS id.
+    GroundWeapon,
+    /// `ts_powerup`: [`ItemInfo::powerup`] is its bits.
+    Powerup,
+    /// A thrown grenade, knife or gun.
+    Projectile,
+    /// A gun a player holds or dropped.
+    Gun,
+    /// The capture-the-briefcase case lying in the map: [`ItemInfo::team`] owns it.
+    CtbFlag,
+    /// A capture point: [`ItemInfo::team`] may capture there (0 any).
+    CtbBase,
+    /// A team or score objective (`ts_wingiver`, `ts_scoregiver`).
+    Objective,
+}
+
+/// The port's `entity_info` for a game item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemInfo {
+    /// What it is.
+    pub kind: ItemKind,
+    /// TS weapon id (ground weapons, guns), else 0.
+    pub weapon: i32,
+    /// Power-up bits, else 0.
+    pub powerup: i32,
+    /// The responsible player (thrower, holder), 0 for none.
+    pub owner: u32,
+    /// Its rules team, 0 for none or any.
+    pub team: i32,
+    /// It can be picked up or used now (visible, not waiting to respawn).
+    pub available: bool,
+}
+
+/// The game's mode as the port reports it (`GameState`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GameMode {
+    /// `CTSGameRules::m_mode`: 0 deathmatch, 1 team deathmatch, 3 objective.
+    pub mode: i32,
+    /// The map has a capture-the-briefcase case.
+    pub ctb: bool,
+    /// 0 no rounds, 1 a round running, 2 a round over.
+    pub round: i32,
 }
 
 /// What [`BotWorld::entity`] says about an entity: the `entvars_t` fields the bot reads, and for
@@ -234,6 +287,8 @@ pub struct Entity {
     pub groundentity: Option<u32>,
     /// A connected player's TS state.
     pub player: Option<PlayerState>,
+    /// What a game item is (weapons, power-ups, CTB entities), from the port.
+    pub item: Option<ItemInfo>,
 }
 
 impl Entity {
@@ -325,6 +380,17 @@ pub trait BotWorld: World {
         let _ = index;
         None
     }
+    /// The items lying in the map a bot may want (`ts_groundweapon`, `ts_powerup`): an experienced
+    /// player knows where they spawn.
+    fn items(&self) -> Vec<u32> {
+        let mut out = self.find_entities(EntityKey::Classname, "ts_groundweapon");
+        out.extend(self.find_entities(EntityKey::Classname, "ts_powerup"));
+        out
+    }
+    /// The game's mode, CTB and rounds; deathmatch by default.
+    fn game_mode(&self) -> GameMode {
+        GameMode::default()
+    }
     /// The TS objectives player `index` has been told of (`m_TSObjectives`, from the `TSObjective`
     /// messages): the HUD's objective list that can still be completed. None by default.
     fn ts_objectives(&self, index: u32) -> Vec<TsObjective> {
@@ -334,10 +400,12 @@ pub trait BotWorld: World {
 }
 
 /// `TSObjective`: an objective the `TSObjective` message listed.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TsObjective {
     /// `m_iId`: the message's index.
     pub id: i32,
+    /// The objective's entity (`ts_hack`, `ts_bomb`, ...), if the port says (port addition).
+    pub entity: Option<u32>,
     /// `m_vOrigin`: the objective's centre.
     pub origin: Vector,
     /// `m_szName`: its text for the bot's team.
@@ -649,6 +717,8 @@ pub struct Bot {
     pub kungfu: kungfu::KungFu,
     pub(crate) pickup_entity: Option<EntRef>,
     pub(crate) pickup_item_time: f32,
+    /// The map's items as the bot knows them (design §4).
+    pub(crate) items: items::ItemMemory,
 
     pub(crate) spawn_time: f32,
     pub(crate) spawn_position: Vector,
@@ -789,6 +859,7 @@ impl Bot {
             kungfu: kungfu::KungFu::new(),
             pickup_entity: None,
             pickup_item_time: 0.0,
+            items: items::ItemMemory::default(),
             spawn_time: 0.0,
             spawn_position: Vector::ZERO,
             need_to_init: false,
