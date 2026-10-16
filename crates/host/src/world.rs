@@ -7,6 +7,7 @@ use rcbot::bot::{BotWorld, Entity, EntityKey, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `NON_TS_TEAMPLAY`: the map's name starts with `tm_` (`CBotGlobals::MapInit`), set at
@@ -24,6 +25,9 @@ pub fn refresh_game_state(api: Api) -> ts_plugin_api::GameState {
     g
 }
 
+/// A cached world's slot for one index: `None` not read yet, `Some(None)` no entity there.
+type Slot = Option<Option<Rc<Entity>>>;
+
 /// The world for one frame.
 pub struct HostWorld {
     pub api: Api,
@@ -33,51 +37,25 @@ pub struct HostWorld {
     /// The cvars read through this world: a world lives for a frame, and every bot asks for
     /// the same few (`sv_gravity`, `mp_timelimit`).
     cvars: RefCell<Vec<(String, f32)>>,
+    /// The entities read through a [`cached`](Self::cached) world, by index.
+    entities: Option<RefCell<Vec<Slot>>>,
 }
 
 impl HostWorld {
     /// The world now, with the game's teamplay as of this frame.
     pub fn new(api: Api, eng: Engine) -> HostWorld {
-        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed), cvars: RefCell::new(Vec::new()) }
+        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed), cvars: RefCell::new(Vec::new()), entities: None }
     }
 
-    /// Teams by `model` key: a `tm_` map the game doesn't run as teamplay.
-    fn model_teams(&self) -> bool {
-        !self.game_teamplay && NON_TS_TEAMPLAY.load(Ordering::Relaxed)
-    }
-}
-
-impl World for HostWorld {
-    fn trace_line(&self, start: Vector, end: Vector, monsters: Monsters, glass: Glass, ignore: Option<u32>) -> Trace {
-        let (fraction, end_pos, hit) =
-            self.eng.trace_line(start, end, monsters == Monsters::Ignore, glass == Glass::Ignore, ignore.map(|i| i as i32));
-        let hit = (!hit.is_null()).then(|| self.eng.index_of(hit)).and_then(|i| u32::try_from(i).ok());
-        Trace { fraction, end_pos, hit }
+    /// A world that reads each entity (its strings, a player's `player_info`) once and hands out
+    /// copies: for the bots' thinks, while nothing changes the entities. Anything that writes
+    /// entvars needs a world of its own made after.
+    pub fn cached(api: Api, eng: Engine) -> HostWorld {
+        HostWorld { entities: Some(RefCell::new(Vec::new())), ..HostWorld::new(api, eng) }
     }
 
-    fn point_contents(&self, at: Vector) -> i32 {
-        self.eng.point_contents(at)
-    }
-}
-
-impl BotWorld for HostWorld {
-    fn time(&self) -> f32 {
-        self.eng.time()
-    }
-
-    fn frame_time(&self) -> f32 {
-        self.eng.frame_time()
-    }
-
-    fn max_entities(&self) -> u32 {
-        self.eng.max_entities().max(1) as u32 - 1
-    }
-
-    fn max_clients(&self) -> u32 {
-        self.eng.max_clients().max(0) as u32
-    }
-
-    fn entity(&self, index: u32) -> Option<Entity> {
+    /// The entity at `index` as the engine and the game have it now.
+    fn read_entity(&self, index: u32) -> Option<Entity> {
         let e = self.eng.edict(index as i32)?;
         let mut ent = self.eng.vars(e, |v, serial| Entity {
             index,
@@ -123,7 +101,7 @@ impl BotWorld for HostWorld {
         ent.targetname = self.eng.string(targetname);
         ent.groundentity = (!ground.is_null()).then(|| self.eng.index_of(ground)).and_then(|i| u32::try_from(i).ok());
         ent.owner = (!owner.is_null()).then(|| self.eng.index_of(owner)).and_then(|i| u32::try_from(i).ok());
-        if index >= 1 && index <= self.max_clients() {
+        if index >= 1 && index <= BotWorld::max_clients(self) {
             // A player's handle is its user id, not the edict's serial number: the engine keeps
             // a client slot's edict (and its serial) for the next player in it, who must not
             // inherit the last one's enemies, tasks or squad (`EntRef`).
@@ -148,6 +126,57 @@ impl BotWorld for HostWorld {
             });
         }
         Some(ent)
+    }
+
+    /// Teams by `model` key: a `tm_` map the game doesn't run as teamplay.
+    fn model_teams(&self) -> bool {
+        !self.game_teamplay && NON_TS_TEAMPLAY.load(Ordering::Relaxed)
+    }
+}
+
+impl World for HostWorld {
+    fn trace_line(&self, start: Vector, end: Vector, monsters: Monsters, glass: Glass, ignore: Option<u32>) -> Trace {
+        let (fraction, end_pos, hit) =
+            self.eng.trace_line(start, end, monsters == Monsters::Ignore, glass == Glass::Ignore, ignore.map(|i| i as i32));
+        let hit = (!hit.is_null()).then(|| self.eng.index_of(hit)).and_then(|i| u32::try_from(i).ok());
+        Trace { fraction, end_pos, hit }
+    }
+
+    fn point_contents(&self, at: Vector) -> i32 {
+        self.eng.point_contents(at)
+    }
+}
+
+impl BotWorld for HostWorld {
+    fn time(&self) -> f32 {
+        self.eng.time()
+    }
+
+    fn frame_time(&self) -> f32 {
+        self.eng.frame_time()
+    }
+
+    fn max_entities(&self) -> u32 {
+        self.eng.max_entities().max(1) as u32 - 1
+    }
+
+    fn max_clients(&self) -> u32 {
+        self.eng.max_clients().max(0) as u32
+    }
+
+    fn entity(&self, index: u32) -> Option<Entity> {
+        let Some(cache) = &self.entities else { return self.read_entity(index) };
+        let i = index as usize;
+        if let Some(Some(known)) = cache.borrow().get(i) {
+            return known.as_deref().cloned();
+        }
+        let ent = self.read_entity(index);
+        let mut c = cache.borrow_mut();
+        if c.len() <= i {
+            c.resize(i + 1, None);
+        }
+        c[i] = Some(ent.clone().map(Rc::new));
+        ent
     }
 
     fn entity_glance(&self, index: u32) -> Option<(Vector, i32)> {

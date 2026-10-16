@@ -40,7 +40,9 @@ reputations, HAL brains and keyword lists), `bot_playerids.ini`, `bot_chat.ini`,
 `map_configs/ts/<map>.cfg`, `waypoints/ts/<map>.rcw`/`.rcv`, the teams' and loadout GAs. Each
 `start_frame` it runs every bot's [`Bot::frame`] (upstream's `Think` + `RunPlayerMove`) and
 passes the usercmd to `run_cmd` and the bot's actions to `bot_command`, `select_weapon`,
-`clear_loadout`/`buy` and `kick_bot`; it hears deaths (`player_killed`), damage
+`clear_loadout`/`buy` and `kick_bot` (all bots think before any of that runs, so their thinks
+share one world that reads each entity, and each player's `player_info`, once a frame; the game
+state is read once a frame too); it hears deaths (`player_killed`), damage
 (`player_damaged`), sounds (`sound`) and players' `say` (`client_command`), and draws the HUD
 menus (`ShowMenu`) and the bot camera with the engine's functions.
 

@@ -444,10 +444,12 @@ extern "C" fn start_frame() {
             return;
         }
         rejoin_frame(s, a, e);
-        let w = HostWorld::new(a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);
         bots::take_fixed_angles(s, e);
+        // Every bot thinks before any acts (the actions and usercmds run below), so they can
+        // share what they read of the entities this frame.
+        let w = HostWorld::cached(a, e);
         let reps = s.rep_ids();
         let mut g = globals!(s, &reps);
         let frames = s.bots.frame(&mut g, &w, &mut rng);
