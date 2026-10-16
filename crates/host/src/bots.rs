@@ -412,35 +412,6 @@ pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, origin: Optio
     s.bots.sound(&w, entity, origin, volume, sample);
 }
 
-/// The view angles the game sets on a bot (`pev->fixangle`: a spawn, a teleport, a stunt), as
-/// the engine hands them to a real client: `SV_WriteClientdataToMessage` sends `svc_setangle`
-/// (`pev->angles`) or `svc_addangle` (`avelocity` yaw) and clears `fixangle`. The engine skips
-/// fake clients there, so a bot's `fixangle` was never cleared, and `SV_RunCmd` copies the
-/// usercmd's angles into `pev->v_angle` only while it is 0: after its first spawn the bot's view
-/// stayed where the game put it, and it never turned or aimed. Upstream wrote `pev->v_angle`
-/// itself (`ChangeAngles`), as the port's own bots do (design §4). A set angle (1) also means
-/// the game put the bot somewhere (a spawn, a teleport): its path is dropped
-/// ([`Bot::teleported`]).
-pub(crate) fn take_fixed_angles(s: &mut State, e: Engine) {
-    for b in s.bots.iter_mut() {
-        let Some(ed) = e.edict(b.index as i32) else { continue };
-        let fixed = e.vars_mut(ed, |v| {
-            match v.fixangle {
-                1 => v.v_angle = v.angles,
-                2 => {
-                    v.v_angle[1] += v.avelocity[1];
-                    v.avelocity[1] = 0.0;
-                }
-                _ => return 0,
-            }
-            std::mem::replace(&mut v.fixangle, 0)
-        });
-        if fixed == 1 {
-            b.teleported();
-        }
-    }
-}
-
 /// `DispatchTouch` for the bots: the port has no touch callback for plugins, so a bot touches
 /// what its box meets (what the engine does for triggers; a solid it is pressed against touches
 /// within one unit). Design §4.

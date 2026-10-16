@@ -1,4 +1,4 @@
-//! Safe wrappers over the port's plugin API v5 (`ts_plugin_api::PluginApi`) and the engine's
+//! Safe wrappers over the port's plugin API v6 (`ts_plugin_api::PluginApi`) and the engine's
 //! function table it hands out. Every `unsafe` call here passes valid pointers for the call's
 //! duration; the tables themselves are the server's statics and live for the process.
 
@@ -6,7 +6,8 @@ use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use ts_plugin_api::{
-    BotBackend, BotCmd, EntityInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, WeaponEntry, ham,
+    BotBackend, BotCmd, BotCmdResult, EntityInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId,
+    WeaponEntry, ham,
 };
 
 /// The plugin API table and our plugin id.
@@ -185,10 +186,12 @@ impl Api {
         (self.table.kick_bot)(player)
     }
 
-    /// `run_cmd`.
-    pub fn run_cmd(&self, player: i32, cmd: &BotCmd) -> c_int {
-        // SAFETY: `cmd` is read during the call.
-        unsafe { (self.table.run_cmd)(player, cmd) }
+    /// `run_cmd`: what the command did, or the status when it didn't run.
+    pub fn run_cmd(&self, player: i32, cmd: &BotCmd) -> Result<BotCmdResult, c_int> {
+        let mut out = BotCmdResult::default();
+        // SAFETY: `cmd` is read and `out` written during the call.
+        let rc = unsafe { (self.table.run_cmd)(player, cmd, &mut out) };
+        if rc == OK { Ok(out) } else { Err(rc) }
     }
 
     /// `bot_command`.

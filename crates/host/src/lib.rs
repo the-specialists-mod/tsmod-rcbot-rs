@@ -1,4 +1,4 @@
-//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v5,
+//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v6,
 //! the-specialistsmod-rs#104), and the only crate in this workspace allowed `unsafe` (every other
 //! crate is `#![deny(unsafe_code)]`, which `cargo xtask lint` checks).
 //!
@@ -50,7 +50,7 @@ static PENDING: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 enum Event {
     PutInServer(i32, bool),
     Disconnect(i32),
-    Damaged(i32, i32, i32, f32, i32, f32),
+    Damaged(ts_plugin_api::DamageEvent),
     Killed(i32, i32),
     KillScored(KillInfo),
     Stunt(i32),
@@ -160,9 +160,7 @@ fn drain(s: &mut State, a: Api, e: Engine) {
         match ev {
             Event::PutInServer(i, is_bot) => bots::put_in_server(s, e, i, is_bot),
             Event::Disconnect(i) => bots::disconnect(s, a, e, i),
-            Event::Damaged(victim, attacker, inflictor, damage, bits, health) => {
-                damaged(s, a, e, victim, attacker, inflictor, damage, bits, health)
-            }
+            Event::Damaged(d) => damaged(s, a, e, &d),
             Event::Killed(victim, killer) => bots::killed(s, a, e, victim, killer),
             Event::KillScored(k) => bots::kill_scored(s, a, e, &k),
             Event::Stunt(player) => bots::stunt(s, a, e, player),
@@ -220,7 +218,7 @@ const DESCRIPTOR: Plugin = Plugin {
     client_put_in_server: Some(client_put_in_server),
     client_disconnect: Some(client_disconnect),
     client_command: Some(commands::client_command),
-    player_damaged: Some(player_damaged),
+    damage: Some(damage),
     player_killed: Some(player_killed),
     sound: Some(sound),
     kill_scored: Some(kill_scored),
@@ -466,7 +464,6 @@ extern "C" fn start_frame() {
         rejoin_frame(s, a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);
-        bots::take_fixed_angles(s, e);
         // Every bot thinks before any acts (the actions and usercmds run below), so they can
         // share what they read of the entities this frame.
         let w = HostWorld::cached(a, e);
@@ -509,6 +506,9 @@ extern "C" fn start_frame() {
                 }
             }
             if let Some(c) = f.cmd {
+                // The server turns the bot (`SET_VIEW`: v_angle, angles and the `fixangle` only a
+                // real client's update clears) and runs the frame's time (`AUTO_MSEC`, the
+                // fraction carried per bot); design §4.
                 let cmd = BotCmd {
                     angles: c.angles.to_array(),
                     forward: c.forward,
@@ -516,10 +516,19 @@ extern "C" fn start_frame() {
                     up: c.up,
                     buttons: c.buttons,
                     impulse: c.impulse,
-                    msec: i32::from(c.msec).clamp(1, 255),
+                    msec: 0,
+                    flags: ts_plugin_api::cmd::SET_VIEW | ts_plugin_api::cmd::AUTO_MSEC,
                 };
-                if a.run_cmd(i, &cmd) == OK {
+                if let Ok(r) = a.run_cmd(i, &cmd) {
                     s.check("run_cmd");
+                    let ev = r.events;
+                    let outcome = rcbot::bot::CmdOutcome {
+                        game_view: (ev & ts_plugin_api::cmd_event::FIXANGLE != 0).then(|| Vector::from(r.v_angle)),
+                        teleported: ev & ts_plugin_api::cmd_event::TELEPORTED != 0,
+                    };
+                    if let Some(b) = s.bots.get_mut(idx) {
+                        b.command_ran(outcome);
+                    }
                 }
             }
         }
@@ -622,7 +631,15 @@ extern "C" fn player_killed(victim: c_int, attacker: c_int, _inflictor: c_int) {
 
 /// `pfnEmitSound` for the bots' hearing. Sounds no bot reacts to stop here, before the state is
 /// locked or anything copied (most of a game's sounds).
-unsafe extern "C" fn sound(entity: c_int, origin: *const f32, sample: *const c_char, volume: f32, _attenuation: f32) {
+unsafe extern "C" fn sound(
+    entity: c_int,
+    origin: *const f32,
+    sample: *const c_char,
+    volume: f32,
+    _attenuation: f32,
+    _channel: c_int,
+    _source_player: c_int,
+) {
     if sample.is_null() {
         return;
     }
@@ -644,30 +661,34 @@ pub(crate) fn player_say(player: i32, args: Vec<String>) {
 
 /// `BotEvent(BOT_EVENT_HURT)`: the bot looks toward who hurt it; then every field of the
 /// damage goes to the bots' combat ledgers (design §4).
-#[allow(clippy::too_many_arguments)] // the callback's fields
-fn damaged(s: &mut State, a: Api, e: Engine, victim: i32, attacker: i32, inflictor: i32, damage: f32, bits: i32, health: f32) {
-    let from = e.edict(attacker).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin)));
-    if let (Some(b), Some(from)) = (s.bots.get_mut(victim as u32), from) {
-        b.hurt(u32::try_from(attacker).ok(), from, e.time());
+fn damaged(s: &mut State, a: Api, e: Engine, d: &ts_plugin_api::DamageEvent) {
+    let from = e.edict(d.attacker).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin)));
+    if let (Some(b), Some(from)) = (s.bots.get_mut(d.victim as u32), from) {
+        b.hurt(u32::try_from(d.attacker).ok(), from, e.time());
     }
     let ev = rcbot::learn::CombatEvent::Damage(rcbot::learn::DamageEvent {
-        victim: victim as u32,
-        attacker: attacker as u32,
-        inflictor,
-        amount: damage,
-        bits,
-        health,
+        victim: d.victim as u32,
+        attacker: d.attacker as u32,
+        inflictor: d.inflictor,
+        amount: d.damage,
+        bits: d.bits,
+        health: d.health,
     });
     bots::combat(s, a, e, &ev);
 }
 
-extern "C" fn player_damaged(victim: c_int, attacker: c_int, inflictor: c_int, damage: f32, bits: c_int, health: f32) {
-    if attacker <= 0 || attacker == victim || victim <= 0 {
+/// `damage`: a player's `TakeDamage` ran (by another player: the world's and self-inflicted
+/// damage stop here).
+unsafe extern "C" fn damage(event: *const ts_plugin_api::DamageEvent) {
+    if event.is_null() {
         return;
     }
-    with_state(Some(Event::Damaged(victim, attacker, inflictor, damage, bits, health)), |s, a, e| {
-        damaged(s, a, e, victim, attacker, inflictor, damage, bits, health)
-    });
+    // SAFETY: a non-NULL event is valid for the call; it is copied out at once.
+    let d = unsafe { *event };
+    if d.attacker <= 0 || d.attacker == d.victim || d.victim <= 0 {
+        return;
+    }
+    with_state(Some(Event::Damaged(d)), |s, a, e| damaged(s, a, e, &d));
 }
 
 /// `kill_scored`: the death as the rules scored it (killer, weapon, headshot), for the bots'

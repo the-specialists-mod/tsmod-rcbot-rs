@@ -7,7 +7,9 @@
 
 use super::goals::Goal;
 use super::look::make_vectors;
-use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, ItemKind, LookTask, Task, TaskKind, TsObjective, buttons, cond};
+use super::{
+    Action, Bot, BotGlobals, BotWorld, CmdOutcome, EF_NODRAW, Entity, Frame, ItemKind, LookTask, Task, TaskKind, TsObjective, buttons, cond,
+};
 use crate::config::flags as cfg;
 use crate::learn::BotLearnedData;
 use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl};
@@ -74,9 +76,10 @@ impl Bot {
         let Some(me) = w.entity(self.index) else { return out };
         let (was_alive, was_at) = (self.is_alive(), self.me.origin);
         self.state = me.player.unwrap_or_default();
-        // The engine sets `v_angle` from our usercmd; it differs when the game turned the
-        // player (spawn, teleport: `fixangle`).
-        self.v_angle = me.v_angle;
+        // The server sets `v_angle` from our usercmd (`SET_VIEW`), unless the game turned the
+        // player (spawn, teleport: `fixangle`); then its view is ours, so the bot doesn't turn
+        // back against the game's turn within the command (design §4).
+        self.v_angle = self.game_view.take().unwrap_or(me.v_angle);
         self.me = me;
         if was_alive && self.is_alive() && (self.me.origin - was_at).length() > TELEPORT_DISTANCE {
             self.teleported();
@@ -137,12 +140,12 @@ impl Bot {
         }
         self.think(g, w, rng);
         out.actions.append(&mut self.actions);
-        out.cmd = self.run_player_move(w.time(), w.frame_time());
+        out.cmd = Some(self.run_player_move(w.time()));
         out
     }
 
-    /// The game moved the bot elsewhere (a teleport: the host sees `fixangle` 1, or the bot
-    /// moved more than 256 units in a frame). Its waypoints, path and stuck timers belong to
+    /// The game moved the bot elsewhere (a teleport: the server reports it after the usercmd,
+    /// [`CmdOutcome::teleported`], or the bot moved more than 256 units in a frame). Its waypoints, path and stuck timers belong to
     /// where it was: they are dropped, so it finds its nearest waypoint and a path from there
     /// (port addition, design §4; upstream kept heading for the old waypoint, got stuck and
     /// failed the path).
@@ -157,6 +160,21 @@ impl Bot {
         self.last_no_move = 0.0;
         self.unstick = Default::default();
         self.ladder_angles = None;
+    }
+
+    /// What the game did with the bot's last usercmd (the host's `run_cmd` result): a view the
+    /// game set becomes the bot's (it must not fight the game's turn), and a teleport drops the
+    /// path ([`Bot::teleported`]).
+    pub fn command_ran(&mut self, r: CmdOutcome) {
+        if let Some(v) = r.game_view {
+            self.game_view = Some(v);
+            self.v_angle = v;
+            self.ideal_yaw = v.y;
+            self.ideal_pitch = v.x;
+        }
+        if r.teleported {
+            self.teleported();
+        }
     }
 
     /// `CBot::SpawnInit(false)`: forget this life (tasks, path, enemy, waypoints) and pick new

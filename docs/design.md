@@ -15,7 +15,7 @@ crates/rcbot     the bot, #![deny(unsafe_code)], no FFI. Engine queries go throu
                  nav::World (traces, point contents), bot::BotWorld (entities, PVS, time),
                  Random (RANDOM_LONG / RANDOM_FLOAT) and config::CommandHost (commands' effects).
 crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe: TSRS_PluginLoad, safe
-                 wrappers over the plugin API v5 and the engine table (api.rs), the traits on
+                 wrappers over the plugin API v6 and the engine table (api.rs), the traits on
                  them (world.rs, commands.rs), RCBot's globals in one State, the per-frame bot
                  loop and the editors' display (lib.rs, editor.rs)
 xtask            build | dist | test | lint | all | e2e
@@ -29,9 +29,9 @@ Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `Way
 branches are kept and every other mod's are removed; where a branch chose between mods
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
-The host uses the port's plugin API v5 (the-specialistsmod-rs#104, #117; `goldsrc-sys` and
-`ts-plugin-api` pinned to the port's `db84e1d`, branch `fix/plugin-api`, from a local checkout
-until it is merged). It registers the bot backend `rcbot`
+The host uses the port's plugin API v6 (the-specialistsmod-rs#104, #117, #197; `goldsrc-sys` and
+`ts-plugin-api` from the port's `plugin-api-v6` branch, `ed64e50`, through a `[patch]` on a local
+checkout until a port release has it; then the tags in the root `Cargo.toml` move to it). It registers the bot backend `rcbot`
 (`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
 `client_command`), and the `rcbot_ver` cvar. The plugin's data directory
 (`<gamedir>/tsmod/rcbot/`) is RCBot's bot folder: `bot_weapons.ini`, `bot_config.ini`,
@@ -281,9 +281,14 @@ bucket search order.
   (`SV_RunCmd`), and clears `fixangle` only when it sends a client `svc_setangle`/`svc_addangle`,
   which it never does for fake clients; TS sets `fixangle` at every spawn, so the bots' views
   stayed frozen where they spawned (they never turned or aimed). Upstream wrote `pev->v_angle`
-  itself (`ChangeAngles`). The host now does for each bot, before it thinks, what the engine does
-  for a client (`take_fixed_angles`): the game's `angles` (or the `avelocity` yaw for an add)
-  become the view and `fixangle` is cleared. `cargo xtask e2e` checks a bot turns (`turned`).
+  itself (`ChangeAngles`). Under plugin API v5 the host did for each bot, before it thought, what
+  the engine does for a client (`take_fixed_angles`: the game's `angles`, or the `avelocity` yaw
+  for an add, became the view and `fixangle` was cleared). Since v6 the server does it:
+  `run_cmd` with `SET_VIEW` writes `v_angle`/`angles` and clears `fixangle`, as the native bots'
+  `UpdateView`; when the game had set `fixangle` its angles win, and the result's `FIXANGLE` hands
+  them to the bot (`Bot::command_ran`), which takes them as its view and ideal angles for the
+  next frame instead of turning back against the game's turn. `cargo xtask e2e` checks a bot
+  turns (`turned`).
 * **A TS gun's max clip is the largest clip seen** (`checkMaxClip`'s intent; upstream resets it
   on every `WeaponInfo`, §5.49), so an empty gun needs a reload and a fighting bot reloads or
   switches as upstream's TS code says. `CanReload`/`LowOnAmmo` stay false (`m_iAmmo1`).
@@ -388,8 +393,9 @@ bucket search order.
   (`GETPLAYERUSERID`) instead of the edict's serial number, which a client slot keeps for the next
   player in it: a player joining in a slot someone left doesn't inherit bots' enemy, task,
   squad and remembered-position handles on the one before.
-* **Teleports**: when the game sets a bot's view (`fixangle` 1: a spawn or a teleport) or the bot
-  moves more than 256 units in a frame, it drops its current and previous waypoints, its path
+* **Teleports**: when the server reports a teleport after the bot's usercmd (`run_cmd`'s
+  `TELEPORTED`: moved further than it could have walked; plugin API v6) or the bot moves more
+  than 256 units in a frame, it drops its current and previous waypoints, its path
   and its stuck timers (`Bot::teleported`), and starts again from its nearest waypoint;
   upstream went on towards the old waypoint, got stuck and failed the path.
 * **Sounds** (`sound` callback): a bot hears a sound where the game played it (the callback's
@@ -404,12 +410,14 @@ bucket search order.
   game reports in hand; `SwitchWeapon` asks for a switch (once, until the game shows it or a
   second passes) instead of setting it, and a switch the game refuses (`select_weapon`'s
   `INVALID`: not owned) makes the bot forget that weapon.
-* **Usercmd `msec`** (`movement.rs` `next_msec`): rounded instead of truncated, with the
-  remainder carried to the next command, and sent from 9.5 ms (w00tguy's 10, less what `f32`
-  game time loses: a 100 Hz frame often measures 9.99 ms). The clock starts one frame back for a
-  new bot or map and keeps running through deaths. Upstream lost up to 1 ms a command (bots
-  simulated 3-5% less time than passed), at 100 Hz skipped every other frame (half speed), and
-  sent 255 ms as the first command and again after each spawn (`SpawnInit` reset the clock).
+* **Usercmd `msec`**: the server picks it (`run_cmd`'s `AUTO_MSEC`, plugin API v6): the frame
+  time in whole milliseconds with the fraction carried per bot, so a command goes every frame and
+  the commands add up to the server's time. Upstream truncated the time since the last command
+  (bots simulated 3-5% less time than passed), at 100 Hz skipped every other frame (half speed:
+  w00tguy's skip under 10 ms met frames measuring 9.99 ms), and sent 255 ms as the first command
+  and again after each spawn (`SpawnInit` reset the clock). Under v5 the port's bot rounded and
+  carried the remainder itself and sent from 9.5 ms; the skip is gone with the server's carry,
+  which can't lose time to truncation.
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
 * **The trigger** (`bot/fire.rs`, data in `weapons/ts_data.rs` from the port's `weapons.toml`):

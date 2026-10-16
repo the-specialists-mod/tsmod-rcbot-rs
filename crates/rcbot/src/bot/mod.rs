@@ -462,8 +462,17 @@ pub struct BotCmd {
     pub buttons: i32,
     /// `pev->impulse`.
     pub impulse: i32,
-    /// `m_iMsecVal`.
-    pub msec: u8,
+}
+
+/// What the game did with the bot's last usercmd (the plugin API's `BotCmdResult`), which the
+/// host hands back with [`Bot::command_ran`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CmdOutcome {
+    /// The game set the bot's view (`fixangle`: a spawn, a teleport, `ts_tp`): these are its view
+    /// angles now, and the command's were ignored.
+    pub game_view: Option<Vector>,
+    /// The game moved the bot further than it could have walked (a teleport, a respawn).
+    pub teleported: bool,
 }
 
 /// What one frame of a bot produced.
@@ -630,8 +639,9 @@ pub struct Bot {
     pub(crate) think_time: f32,
     pub(crate) last_think_time: f32,
     pub(crate) reaction_time: f32,
-    /// `m_fLastCallRunPlayerMove`, with the carried remainder (design §4).
-    pub(crate) msec_clock: movement::MsecClock,
+    /// The view the game gave the bot in its last command ([`CmdOutcome::game_view`]), taken
+    /// as the bot's own at the next frame.
+    pub(crate) game_view: Option<Vector>,
     pub(crate) last_update_conditions: f32,
 
     pub(crate) move_speed: f32,
@@ -806,7 +816,7 @@ impl Bot {
             think_time: BOT_DEFAULT_THINK_TIME,
             last_think_time: 0.0,
             reaction_time: BOT_DEFAULT_REACTION_TIME,
-            msec_clock: movement::MsecClock::default(),
+            game_view: None,
             last_update_conditions: 0.0,
             move_speed: 0.0,
             strafe_speed: 0.0,

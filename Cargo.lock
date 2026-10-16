@@ -77,7 +77,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "goldsrc-sys"
 version = "3.0.6"
-source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.6#b22a295d736f969ee4d6897445d4a0e8ae0c78bf"
 dependencies = [
  "bindgen",
 ]
@@ -225,7 +224,6 @@ dependencies = [
 [[package]]
 name = "ts-plugin-api"
 version = "3.0.6"
-source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.6#b22a295d736f969ee4d6897445d4a0e8ae0c78bf"
 
 [[package]]
 name = "tsmod-rcbot"

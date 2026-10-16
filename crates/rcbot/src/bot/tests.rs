@@ -23,6 +23,8 @@ struct Plane {
     physics: std::cell::Cell<bool>,
     /// What [`BotWorld::inventory`] answers (`None`: the world can't tell).
     inventory: RefCell<Option<Vec<InventoryWeapon>>>,
+    /// When [`Plane::apply`] last ran: a usercmd lasts the time since (the server's `AUTO_MSEC`).
+    last_cmd: std::cell::Cell<f32>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -116,7 +118,10 @@ impl Plane {
         e.v_angle = cmd.angles;
         e.button = cmd.buttons;
         let (fwd, right) = make_vectors(Vector::new(0.0, cmd.angles.y, 0.0));
-        let dt = f32::from(cmd.msec) / 1000.0;
+        // The server's `AUTO_MSEC`: the time since the last command (a frame at first), at most
+        // a byte of milliseconds.
+        let last = self.last_cmd.replace(self.time);
+        let dt = if last > 0.0 && last < self.time { (self.time - last).min(0.255) } else { 0.02 };
         if self.physics.get() {
             if e.flags & entflags::ONGROUND == 0 {
                 // In the air: keep going, fall, land at z = 0.
@@ -181,6 +186,7 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
         wall: Default::default(),
         physics: Default::default(),
         inventory: Default::default(),
+        last_cmd: Default::default(),
     };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
@@ -420,6 +426,7 @@ fn plane(ents: Vec<Entity>) -> Plane {
         wall: Default::default(),
         physics: Default::default(),
         inventory: Default::default(),
+        last_cmd: Default::default(),
     }
 }
 
@@ -1211,9 +1218,9 @@ fn obstacles_are_crouch_jumped() {
     // `jump_and_duck`: the jump, then the duck held through the air.
     let mut rig = Rig::new(Config::default());
     rig.bot.jump_and_duck(1.0);
-    let cmd = rig.bot.run_player_move(1.05, 0.05).unwrap();
+    let cmd = rig.bot.run_player_move(1.05);
     assert_ne!(cmd.buttons & buttons::JUMP, 0);
-    let cmd = rig.bot.run_player_move(1.2, 0.02).unwrap();
+    let cmd = rig.bot.run_player_move(1.2);
     assert_ne!(cmd.buttons & buttons::DUCK, 0);
 }
 
@@ -1846,13 +1853,13 @@ fn a_dive_holds_duck_through_the_landing_and_gets_up_if_prone() {
     assert_ne!(rig.bot.button & buttons::ALT1, 0);
     // Duck held from just after the dive through the landing.
     for t in [1.2, 1.8, 2.4] {
-        let cmd = rig.bot.run_player_move(t, 0.02).unwrap();
+        let cmd = rig.bot.run_player_move(t);
         assert_ne!(cmd.buttons & buttons::DUCK, 0, "{t}");
     }
     // Landed prone anyway: it jumps up.
     rig.bot.state.stunt_state = TS_STATE_STUNT;
     rig.bot.dive_landing(2.0);
-    let cmd = rig.bot.run_player_move(2.05, 0.02).unwrap();
+    let cmd = rig.bot.run_player_move(2.05);
     assert_ne!(cmd.buttons & buttons::JUMP, 0);
     assert_eq!(rig.bot.dive_time, 0.0);
 }
@@ -2307,4 +2314,25 @@ fn a_sniper_holds_a_spot_that_sees_far() {
         // Then it roams a while before holding again.
         assert!(b.hold_again >= 16.0);
     });
+}
+
+#[test]
+fn the_games_view_and_teleports_come_from_the_command_result() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0)]);
+    let mut rng = XorShiftRandom::new(4);
+    run(&mut rig, &mut w, &mut rng, 30, |_, _| {});
+    // The game turned the bot (a spawn's `fixangle`): its view is the game's from the next frame
+    // on, though the entity still shows the old one (the server writes `v_angle` at the next
+    // command), so it doesn't turn back against the game's turn.
+    rig.bot.command_ran(CmdOutcome { game_view: Some(Vector::new(0.0, 90.0, 0.0)), teleported: false });
+    w.ents.borrow_mut()[0].v_angle = Vector::ZERO;
+    w.time += 0.02;
+    let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+    let yaw = f.cmd.unwrap().angles.y;
+    assert!(yaw > 45.0, "{yaw}");
+    // A teleport drops the path.
+    rig.bot.current_waypoint = 2;
+    rig.bot.command_ran(CmdOutcome { game_view: None, teleported: true });
+    assert_eq!(rig.bot.current_waypoint(), -1);
 }

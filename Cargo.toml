@@ -10,7 +10,7 @@ repository = "https://github.com/the-specialists-mod/tsmod-rcbot-rs"
 
 [workspace.dependencies]
 rcbot = { path = "crates/rcbot" }
-# The port's plugin API v5 (the-specialists-mod/the-specialistsmod-rs#104, #117, #197) and the
+# The port's plugin API v6 (the-specialists-mod/the-specialistsmod-rs#104, #117, #197; see the patch below) and the
 # engine's tables, pinned to the port's v3.0.6 release. goldsrc-sys generates its bindings from the FWGS headers
 # (`FWGS_DIR`, see .cargo/config.toml).
 goldsrc-sys = { git = "https://github.com/the-specialists-mod/the-specialistsmod-rs", tag = "v3.0.6" }
@@ -18,6 +18,13 @@ ts-plugin-api = { git = "https://github.com/the-specialists-mod/the-specialistsm
 # The visibility table's RCZ container is miniz's zlib stream (rc_compress.cpp); miniz_oxide is
 # the Rust port of the same deflate code.
 miniz_oxide = "0.8"
+
+# Plugin API v6 isn't released yet: until it is, the port's crates come from the local
+# `plugin-api-v6` branch (the-specialistsmod-rs ed64e50). Before a release this section goes and the
+# tags above move to the port release that has v6.
+[patch."https://github.com/the-specialists-mod/the-specialistsmod-rs"]
+goldsrc-sys = { path = "/home/mmckenzie/dev/hl/wt/plugin-api-v6/crates/goldsrc-sys" }
+ts-plugin-api = { path = "/home/mmckenzie/dev/hl/wt/plugin-api-v6/crates/plugin-api" }
 
 [profile.dev]
 panic = "abort" # unwinding across the C ABI is UB; be explicit
