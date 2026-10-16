@@ -12,6 +12,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// `ServerActivate`.
 pub static NON_TS_TEAMPLAY: AtomicBool = AtomicBool::new(false);
 
+/// The game's teamplay (`GameState::teamplay`) as of this frame ([`refresh_game_state`]).
+static GAME_TEAMPLAY: AtomicBool = AtomicBool::new(false);
+
+/// Reads the game's state once for the frame (the server scans the entities for it): the
+/// worlds made until the next refresh, callbacks included, use its teamplay.
+pub fn refresh_game_state(api: Api) -> ts_plugin_api::GameState {
+    let g = api.game_state();
+    GAME_TEAMPLAY.store(g.teamplay != 0, Ordering::Relaxed);
+    g
+}
+
 /// The world for one frame.
 pub struct HostWorld {
     pub api: Api,
@@ -21,9 +32,9 @@ pub struct HostWorld {
 }
 
 impl HostWorld {
-    /// The world now, with the game's teamplay.
+    /// The world now, with the game's teamplay as of this frame.
     pub fn new(api: Api, eng: Engine) -> HostWorld {
-        HostWorld { api, eng, game_teamplay: api.game_state().teamplay != 0 }
+        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed) }
     }
 
     /// Teams by `model` key: a `tm_` map the game doesn't run as teamplay.

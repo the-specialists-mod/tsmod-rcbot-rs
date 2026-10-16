@@ -320,6 +320,7 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
     world::NON_TS_TEAMPLAY.store(map.starts_with("tm_"), Ordering::Relaxed);
     with_state(None, |s, a, e| {
         s.map = map;
+        world::refresh_game_state(a);
         s.weapons.clear();
         s.bots.clear();
         s.stats.clear();
@@ -434,6 +435,8 @@ extern "C" fn shutdown() {
 /// `StartFrame`: each bot thinks and moves; the waypoint editor draws.
 extern "C" fn start_frame() {
     with_state(None, |s, a, e| {
+        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages.
+        s.team_scores = world::refresh_game_state(a).team_scores;
         editor::frame(s, a, e);
         bots::force_grip_frame(s, a, e);
         map_config_frame(s, e);
@@ -441,8 +444,6 @@ extern "C" fn start_frame() {
             return;
         }
         rejoin_frame(s, a, e);
-        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages.
-        s.team_scores = a.game_state().team_scores;
         let w = HostWorld::new(a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);
