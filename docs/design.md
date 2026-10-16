@@ -313,13 +313,14 @@ bucket search order.
   upstream.
 * **Visibility rows** an `.rcv` doesn't hold (or all of them, without one) are worked out when
   the map's waypoints load (§5.1).
-* **What the port can't tell a plugin**, worked around: touches (`DispatchTouch`) are the
-  port's `entity_touch` (plugin API v6; under v5 the host made them up from the bot's box meeting
-  another entity's, expanded by one unit, each frame); the masters list (`master` key values from `DispatchKeyValue`) is empty, so
-  `BotFunc_FindNearestButton` goes straight to the entities targeting the door; a client's
-  `no_touch` can't stop the game's touch; a renamed player keeps the old reputation id
-  (upstream copied it in `SetClientKeyValue`). The port's entity hooks (`ham_set_hook`) would
-  give touches and key values, but there is one hook per server, which the AMX Mod X host owns.
+* **What the port can't tell a plugin**, worked around: a client's `no_touch` can't stop the
+  game's touch; a renamed player keeps the old reputation id (upstream copied it in
+  `SetClientKeyValue`). Touches (`DispatchTouch`) are the port's `entity_touch` and the masters
+  list (`CMasterEntities`, upstream's `master` key values from `DispatchKeyValue`) is read once a
+  map, at its first frame, from `entity_key(entity, "master")` (plugin API v6). Under v5 the host
+  made touches up from the bot's box meeting another entity's (expanded by one unit) each frame,
+  and the masters list was empty, so `BotFunc_FindNearestButton` went straight to the entities
+  targeting the door (a door locked by a multisource was never opened).
 * **The bot camera** is an `info_target` made with `CREATE_NAMED_ENTITY`, without
   `DispatchSpawn`/`DispatchThink` (a plugin has no game-DLL table; `info_target` does nothing in
   either), moved by writing its `entvars` as upstream does.

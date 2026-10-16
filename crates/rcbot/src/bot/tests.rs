@@ -2587,3 +2587,21 @@ fn the_map_items_are_known_from_the_start_but_taken_ones_only_when_seen() {
     assert_eq!(at(&rig, 6), 31.0);
     assert!(rig.bot.pickup_entity.is_none());
 }
+
+#[test]
+fn a_door_with_a_master_is_opened_by_the_masters_button() {
+    // The door is locked by a multisource (`master` key): its own trigger (6) doesn't open it, the
+    // button that fires the multisource (7) does.
+    let mut door = brush(5, "func_door", Vector::new(100.0, 0.0, 0.0), Vector::new(8.0, 128.0, 128.0));
+    door.targetname = "door1".into();
+    let mut trigger = brush(6, "func_button", Vector::new(50.0, 80.0, 0.0), Vector::new(8.0, 8.0, 8.0));
+    trigger.target = "door1".into();
+    let mut button = brush(7, "func_button", Vector::new(40.0, -90.0, 0.0), Vector::new(8.0, 8.0, 8.0));
+    button.target = "ms1".into();
+    let w = Doors { plane: plane(vec![player(1, Vector::ZERO, 0), door.clone(), trigger, button]) };
+    let masters = [MasterEntity { entity: 5, master: "ms1".into() }];
+    let found = special::find_nearest_button(&w, &masters, Vector::ZERO, &door).map(|(b, _)| b.index);
+    assert_eq!(found, Some(7));
+    // Without the masters list (plugin API v5), the door's own trigger.
+    assert_eq!(special::find_nearest_button(&w, &[], Vector::ZERO, &door).map(|(b, _)| b.index), Some(6));
+}

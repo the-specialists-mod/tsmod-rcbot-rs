@@ -136,6 +136,14 @@ impl Api {
         out
     }
 
+    /// `entity_key(entity, key)`: the map key value a game entity was given that isn't an
+    /// `entvars_t` field (`master`, ...), `None` when it wasn't given one (or isn't a game entity).
+    pub fn entity_key(&self, entity: i32, key: &CStr) -> Option<String> {
+        // SAFETY: `read_into` passes a writable buffer of the given length; the key is
+        // NUL-terminated for the call.
+        read_into(|b, l| unsafe { (self.table.entity_key)(entity, key.as_ptr(), b, l) })
+    }
+
     /// `items`: the items lying in the map (taken ones too), in index order.
     pub fn items(&self) -> Vec<ItemInfo> {
         let mut out = vec![ItemInfo::default(); 256];

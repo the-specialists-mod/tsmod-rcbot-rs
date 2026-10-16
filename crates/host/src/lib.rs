@@ -97,8 +97,10 @@ pub struct State {
     pub(crate) squads: Squads,
     pub(crate) botcam: BotCam,
     pub(crate) chat: BotChatMessages,
-    /// `m_Masters`: the plugin API doesn't report key values, so it stays empty (design §4).
+    /// `m_Masters`: the entities given a `master` key (`entity_key`, plugin API v6), read once a
+    /// map at its first frame.
     pub(crate) masters: Vec<MasterEntity>,
+    masters_read: bool,
     /// The profile each bot had, by player index, for the bots the port keeps across a level
     /// change (upstream's `RESPAWN_NEED_TO_REJOIN` bots rejoin with their profile).
     previous_profiles: HashMap<u32, i32>,
@@ -303,6 +305,7 @@ extern "C" fn game_init() {
         botcam: BotCam::default(),
         chat: BotChatMessages::default(),
         masters: Vec::new(),
+        masters_read: false,
         previous_profiles: HashMap::new(),
         force_grips: HashMap::new(),
         map_init_time: 0.0,
@@ -349,6 +352,8 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
     with_state(None, |s, a, e| {
         s.map = map;
         world::refresh_frame(a);
+        s.masters.clear();
+        s.masters_read = false;
         s.next_scores = 0.0;
         s.weapons.clear();
         s.bots.clear();
@@ -375,6 +380,21 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
             }
         };
     });
+}
+
+/// `CMasterEntities`, which upstream filled from every `master` key value in `DispatchKeyValue`:
+/// the entities up to `highest` the server says were given one (`entity_key`, plugin API v6), for
+/// `BotFunc_FindNearestButton`.
+fn read_masters(s: &mut State, a: Api, highest: i32) {
+    s.masters = (1..=highest)
+        .filter_map(|i| {
+            let master = a.entity_key(i, c"master").filter(|m| !m.is_empty())?;
+            Some(MasterEntity { entity: i as u32, master })
+        })
+        .collect();
+    if !s.masters.is_empty() {
+        a.log(log::DEBUG, &format!("{} entities with a master", s.masters.len()));
+    }
 }
 
 /// `ReadMapConfig`, a line a frame once the map has run 10 s: `rcbot addbot` holds the next
@@ -473,6 +493,11 @@ extern "C" fn start_frame() {
         if frame.time >= s.next_scores || frame.time < s.next_scores - 2.0 {
             s.next_scores = frame.time + 1.0;
             s.team_scores = a.game_state().team_scores;
+        }
+        if !s.masters_read {
+            s.masters_read = true;
+            let highest = if frame.highest_edict > 0 { frame.highest_edict } else { e.max_entities() - 1 };
+            read_masters(s, a, highest);
         }
         editor::frame(s, a, e);
         bots::force_grip_frame(s, a, e);

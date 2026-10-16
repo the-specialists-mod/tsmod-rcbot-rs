@@ -6,8 +6,8 @@
 //! `UTIL_IsButton`, the pushable helpers; `waypoint.cpp` `PlayerNearVector`).
 //!
 //! Upstream's masters list (`CMasterEntities`, filled from every `master` key value in
-//! `DispatchKeyValue`) comes in as [`BotGlobals::masters`]; the port's plugin API doesn't report
-//! key values, so the host passes an empty list (design §4).
+//! `DispatchKeyValue`) comes in as [`BotGlobals::masters`]; the host reads it from the plugin API's
+//! `entity_key` once a map (design §4).
 
 use super::{
     Bot, BotGlobals, BotWorld, EF_NODRAW, EntRef, Entity, EntityKey, LookTask, SOLID_TRIGGER, ScheduleDesc, Task, TaskKind, buttons,
