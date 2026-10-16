@@ -612,12 +612,12 @@ fn a_disliked_player_is_the_first_enemy_and_aimed_at_by_reputation() {
         b.me = w.entity(1).unwrap();
         // A higher priority only wins over an enemy already picked if it is also nearer (or
         // slower): seen first, the near stranger stays the enemy (design §5).
-        b.visibles = vec![2, 3];
+        b.visibles = [2, 3].into();
         assert_eq!(b.find_enemy(g, &w, &mut rng).map(|e| e.index), Some(2));
         assert_eq!(b.enemy_rep, Some(5));
         b.enemy = None;
         b.tasks.flush();
-        b.visibles = vec![3, 2];
+        b.visibles = [3, 2].into();
         let e = b.find_enemy(g, &w, &mut rng);
         assert_eq!(e.map(|e| e.index), Some(3));
         assert_eq!(b.enemy_rep, Some(1));
@@ -1237,7 +1237,7 @@ fn a_breakable_is_an_enemy_by_the_first_client_near_it() {
     // Near the bot's box but not within 80 units, and no one else near: not an enemy.
     assert!(!b.is_enemy(&w, &breakable(150.0)));
     // An enemy the bot sees stands by it (the bot, client 1, is skipped as too far).
-    b.visibles = vec![2];
+    b.visibles = [2].into();
     assert!(b.is_enemy(&w, &breakable(170.0)));
     assert!(super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(170.0, 0.0, 0.0), 200.0));
     assert!(!super::combat::box_in_sphere(&w.entity(2).unwrap(), Vector::new(-100.0, 0.0, 0.0), 200.0));
@@ -1280,4 +1280,18 @@ fn the_nearest_entity_is_upstreams() {
             assert_eq!(ours, upstream(&w, &names, o, 400.0));
         }
     }
+}
+
+#[test]
+fn the_visible_list_keeps_its_order_and_membership() {
+    let mut v = combat::Visibles::default();
+    for i in [7, 300, 2, 7] {
+        v.set(i, true);
+    }
+    assert_eq!(v.iter().collect::<Vec<_>>(), vec![7, 300, 2]);
+    v.set(300, false);
+    v.set(5, false);
+    assert!(v.contains(7) && v.contains(2) && !v.contains(300) && !v.contains(5) && !v.contains(9000));
+    v.set(300, true);
+    assert_eq!(v.to_vec(), vec![7, 2, 300]);
 }

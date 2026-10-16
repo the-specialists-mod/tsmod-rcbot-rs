@@ -20,21 +20,66 @@ const REMEMBER_1ST_SEE_ENEMY: i32 = 1 << 3;
 /// `SF_BREAK_TRIGGER_ONLY`.
 const SF_BREAK_TRIGGER_ONLY: i32 = 1;
 
+/// `CBotVisibles`: what the bot sees, in the order it came into view (what `FindEnemy` and the
+/// pickup scan walk), with a bit per entity so the vision pass asks "already in?" without a scan.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Visibles {
+    order: Vec<u32>,
+    bits: Vec<u64>,
+}
+
+impl Visibles {
+    /// `IsInVisibleList`.
+    pub(crate) fn contains(&self, index: u32) -> bool {
+        self.bits.get(index as usize / 64).is_some_and(|w| w & (1 << (index % 64)) != 0)
+    }
+
+    /// Adds `index` at the end (`AddVisible`) or removes it (`RemoveVisible`).
+    pub(crate) fn set(&mut self, index: u32, on: bool) {
+        if self.contains(index) == on {
+            return;
+        }
+        let word = index as usize / 64;
+        if word >= self.bits.len() {
+            self.bits.resize(word + 1, 0);
+        }
+        self.bits[word] ^= 1 << (index % 64);
+        if on {
+            self.order.push(index);
+        } else if let Some(p) = self.order.iter().position(|&i| i == index) {
+            self.order.remove(p);
+        }
+    }
+
+    /// The entities seen, oldest first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.order.iter().copied()
+    }
+
+    /// The list as indices (to walk it while the bot changes).
+    pub(crate) fn to_vec(&self) -> Vec<u32> {
+        self.order.clone()
+    }
+}
+
+impl<const N: usize> From<[u32; N]> for Visibles {
+    fn from(list: [u32; N]) -> Visibles {
+        let mut v = Visibles::default();
+        for i in list {
+            v.set(i, true);
+        }
+        v
+    }
+}
+
 impl Bot {
     /// `IsInVisibleList`.
     pub(crate) fn is_visible(&self, index: u32) -> bool {
-        self.visibles.contains(&index)
+        self.visibles.contains(index)
     }
 
     fn set_visible(&mut self, index: u32, on: bool) {
-        let at = self.visibles.iter().position(|&i| i == index);
-        match (at, on) {
-            (Some(p), false) => {
-                self.visibles.remove(p);
-            }
-            (None, true) => self.visibles.push(index),
-            _ => {}
-        }
+        self.visibles.set(index, on);
     }
 
     /// `CBot::FVisible(pEntity)`: a clear line to its middle or its eyes; keeps the enemy's
@@ -189,17 +234,26 @@ impl Bot {
         }
 
         for i in self.vis_update_revs..=max {
-            let Some(e) = w.entity(i) else {
+            // Upstream's tests in its order, the cheap ones on a glance at the entity: most fail
+            // the distance or the view cone, and need no full entity (names, player state).
+            let Some((origin, effects)) = w.entity_glance(i) else {
                 self.set_visible(i, false);
                 continue;
             };
-            if e.effects & EF_NODRAW != 0 {
+            if effects & EF_NODRAW != 0 {
                 self.set_visible(i, false);
                 continue;
             }
-            let origin = e.entity_origin();
             let dist = self.distance_from(origin, false);
-            if dist > BOT_VIEW_DISTANCE || !self.in_view_cone(origin) || !w.in_pvs(self.index, origin) || !self.fvisible(w, &e) {
+            if dist > BOT_VIEW_DISTANCE || !self.in_view_cone(origin) {
+                self.set_visible(i, false);
+                continue;
+            }
+            let Some(e) = w.entity(i).filter(|_| w.in_pvs(self.index, origin)) else {
+                self.set_visible(i, false);
+                continue;
+            };
+            if !self.fvisible(w, &e) {
                 self.set_visible(i, false);
                 continue;
             }
@@ -308,7 +362,7 @@ impl Bot {
         if self.enemy.is_none() {
             let mut best_priority = 0;
             let mut best_fitness = 0.0;
-            for i in self.visibles.clone() {
+            for i in self.visibles.to_vec() {
                 let Some(e) = w.entity(i) else { continue };
                 // The visible list can be a vision pass old: check the line now, so a new enemy
                 // is never one behind a wall (design §4).

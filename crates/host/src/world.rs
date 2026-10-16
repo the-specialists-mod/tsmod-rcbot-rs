@@ -150,6 +150,18 @@ impl BotWorld for HostWorld {
         Some(ent)
     }
 
+    fn entity_glance(&self, index: u32) -> Option<(Vector, i32)> {
+        let e = self.eng.edict(index as i32)?;
+        Some(self.eng.vars(e, |v, _| {
+            let origin = if v.flags & rcbot::bot::entflags::MONSTER != 0 {
+                Vector::from(v.origin) + Vector::from(v.view_ofs) * 0.5
+            } else {
+                Vector::from(v.absmin) + Vector::from(v.size) * 0.5
+            };
+            (origin, v.effects)
+        }))
+    }
+
     fn in_pvs(&self, viewer: u32, origin: Vector) -> bool {
         self.eng.in_pvs(viewer as i32, origin)
     }

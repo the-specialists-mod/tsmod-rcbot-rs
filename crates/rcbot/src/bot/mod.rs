@@ -280,6 +280,12 @@ pub trait BotWorld: World {
     fn max_clients(&self) -> u32;
     /// The entity at `index`, `None` for a free or missing edict (`FNullEnt`).
     fn entity(&self, index: u32) -> Option<Entity>;
+    /// What the vision pass looks at first: the entity's [`Entity::entity_origin`] and `effects`,
+    /// `None` like [`entity`](Self::entity). Worlds that can read these without building the
+    /// whole entity should.
+    fn entity_glance(&self, index: u32) -> Option<(Vector, i32)> {
+        self.entity(index).map(|e| (e.entity_origin(), e.effects))
+    }
     /// `ENGINE_CHECK_VISIBILITY(viewer, ENGINE_SET_PVS(origin))`: whether `viewer` is in the PVS
     /// of `origin`.
     fn in_pvs(&self, viewer: u32, origin: Vector) -> bool;
@@ -595,7 +601,7 @@ pub struct Bot {
     pub(crate) get_aim_vector_time: f32,
     pub(crate) zoom: bool,
     pub(crate) distance_from_wall: f32,
-    pub(crate) visibles: Vec<u32>,
+    pub(crate) visibles: combat::Visibles,
     pub(crate) vis_update_revs: u32,
     pub(crate) update_visibles_time: f32,
     pub(crate) nearest_avoid_dist: f32,
@@ -738,7 +744,7 @@ impl Bot {
             get_aim_vector_time: 0.0,
             zoom: false,
             distance_from_wall: 0.0,
-            visibles: Vec::new(),
+            visibles: combat::Visibles::default(),
             vis_update_revs: 0,
             update_visibles_time: 0.0,
             nearest_avoid_dist: 0.0,

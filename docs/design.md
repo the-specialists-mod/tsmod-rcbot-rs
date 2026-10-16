@@ -694,7 +694,7 @@ those by going through the port's own code when that code is ported.
   waiting for a lift, `CheckLift` pressing a door's button (a world with a door and its button),
   a momentary button held while its door moves, grenade-throw waypoints failing in TS, touching
   a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation
-  (and the priority quirk), reputation after a death, breakables as enemies by the first client near them, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
+  (and the priority quirk), reputation after a death, breakables as enemies by the first client near them, the visible list's order and membership, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
   (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, `tm_` maps' model
   teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
   bought before each spawn; unit tests cover the
