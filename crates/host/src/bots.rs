@@ -153,6 +153,27 @@ pub(crate) fn save_globals(s: &State) {
     }
     s.write(rcbot::learn::data::TS_WEAPONS_FILE, &s.learned.save_ts_weapons());
     s.write(rcbot::learn::weapon_stats::GLOBAL_FILE, s.learned.weapon_prior.save().as_bytes());
+    let h = &s.learned.heatmap;
+    if !h.is_empty() && h.map_name() == s.map {
+        s.write(&heatmap_path(s), &h.to_bytes());
+    }
+}
+
+/// `waypoints/ts/<map>.rhm`: the map's heatmap, beside its waypoints.
+fn heatmap_path(s: &State) -> String {
+    format!("waypoints/{}/{}", s.config.mod_folder, rcbot::learn::heatmap::heatmap_file_name(&s.map))
+}
+
+/// The map's heatmap, for its waypoints as loaded (a new one when the file is missing or was
+/// made for other waypoints), faded once for this load.
+pub(crate) fn load_heatmap(s: &mut State) {
+    let n = s.waypoints.len();
+    let mut h = s
+        .read(&heatmap_path(s))
+        .and_then(|b| rcbot::learn::Heatmap::from_bytes(&b, &s.map, n))
+        .unwrap_or_else(|| rcbot::learn::Heatmap::new(&s.map, n));
+    h.decay(rcbot::learn::heatmap::MAP_DECAY);
+    s.learned.heatmap = h;
 }
 
 /// A profile: `profile_id`'s `<id>.ini` (a bot coming back after a map change), else

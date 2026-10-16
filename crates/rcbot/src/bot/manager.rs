@@ -203,10 +203,48 @@ impl BotManager {
     /// §4): the bots that dealt or took it record it.
     pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
         self.refresh_player_keys(g);
+        self.update_heatmap(g, w, ev);
         // Every bot hears it: those who dealt or took it keep it, one whose opponent died ends
         // its fight.
         for bot in self.iter_mut() {
             bot.combat_event(g, w, ev, rng);
+        }
+    }
+
+    /// The waypoint a player is at (a bot's current one, else the nearest to its origin) and
+    /// its rules team.
+    fn player_waypoint(&self, g: &BotGlobals<'_>, w: &dyn BotWorld, index: u32) -> Option<(usize, i32)> {
+        let e = w.entity(index)?;
+        let team = e.player.map_or(0, |p| p.team);
+        let own = self.get(index).and_then(|b| usize::try_from(b.current_waypoint).ok());
+        let opts = crate::nav::NearestOptions { visible: false, unreachable: true, ..crate::nav::NearestOptions::default() };
+        let wpt = own.or_else(|| g.waypoints.nearest_waypoint(e.origin, crate::nav::REACHABLE_RANGE, None, opts, &[], w))?;
+        Some((wpt, team))
+    }
+
+    /// The map's heatmap: a death at the victim's waypoint, a kill at the killer's, damage taken
+    /// at the victim's.
+    fn update_heatmap(&self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+        if g.learned.heatmap.is_empty() {
+            return;
+        }
+        match *ev {
+            CombatEvent::Damage(d) => {
+                if let Some((wpt, team)) = self.player_waypoint(g, w, d.victim) {
+                    g.learned.heatmap.add_damage(wpt, team, d.amount);
+                }
+            }
+            CombatEvent::Kill(k) => {
+                if let Some((wpt, team)) = self.player_waypoint(g, w, k.victim) {
+                    g.learned.heatmap.add_death(wpt, team);
+                }
+                if k.killer != 0
+                    && k.killer != k.victim
+                    && let Some((wpt, team)) = self.player_waypoint(g, w, k.killer)
+                {
+                    g.learned.heatmap.add_kill(wpt, team);
+                }
+            }
         }
     }
 

@@ -451,6 +451,20 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   data), `Bot::weapon_stats()` (`dps`, `accuracy`, `samples`, `score`). Saved as
   `botprofiles/<key>.rwr` and the prior as `weaponstats.rwr` (text, `rcbot-weapons 1`, `w <id>
   <bin> <exposure> <damage> <shots> <hits>`).
+* **Map heatmap** (`learn/heatmap.rs`, `GlobalLearnedData::heatmap`): per waypoint and rules team
+  (0-4), deaths at, kills from and damage taken at (per 100), counted at the nearest waypoint of
+  the player concerned (a bot's current one), from the host's events; faded ×0.9 at each map load.
+  Saved as `waypoints/ts/<map>.rhm` (binary, little-endian: `"RCHM"`, `u32` version 1, `u16` name
+  length and the map name, `u32` waypoints (≤ 1024), `u32` teams (5), then per team the deaths,
+  kills and damage `f32`s); a file for another map or waypoint count starts afresh. API:
+  `Heatmap::danger(waypoint, team)` (RCBot team, -1 none: deaths + 0.3 × damage, squashed to 0..1),
+  `ambush_value(waypoint)` (kills from it, any team, 0..1), `cover_penalty(waypoint, team)` (up to
+  256 units), `Bot::waypoint_danger(g, waypoint)`. Hooks, opt-in so upstream's results stay bit for
+  bit: `nav::DangerSource` (the heatmap implements it) and `AStar::search_with_danger(…, Some((source,
+  weight)))`, which makes each edge `length × (1 + weight × danger(successor))` (`search` is the
+  same with none); `Waypoints::cover_waypoint_weighted(…, penalty)`, the cover search with a
+  per-waypoint distance penalty (`cover_waypoint` passes 0). The navigation and combat code choose
+  when to use them.
 
 ## 5. Upstream bugs found
 
@@ -710,7 +724,11 @@ those by going through the port's own code when that code is ported.
   a fight settled +2 by a kill and -2 by a death, once; the learned strafe going both ways, kung fu
   lives not breeding the personal genes, the cheapest cost bucket away from the danger; the weapon
   table (rates by range bin, accuracy, shrinkage, fading, file round trip and damaged lines) and a
-  bot filling it from time in sight, rounds fired and hits.
+  bot filling it from time in sight, rounds fired and hits; the heatmap (counts by waypoint and
+  team, danger and ambush value, decay, `.rhm` round trip and rejected files), the A* danger hook
+  (weight 0 the plain search, a high weight going round a deadly waypoint), weighted cover; the
+  event-replay harness (`Rig::replay`: host events through the bot manager) filling a bot's ledger,
+  the heatmap and the weapon tables from a scripted fight.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

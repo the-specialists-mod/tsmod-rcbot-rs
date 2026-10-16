@@ -148,6 +148,21 @@ impl Waypoints {
     /// in the buckets around it) that the visibility table says can't be seen from the waypoint
     /// nearest `cover_from`.
     pub fn cover_waypoint(&self, player_origin: Vector, cover_from: Vector, ignore: &[usize], world: &dyn World) -> Option<usize> {
+        self.cover_waypoint_weighted(player_origin, cover_from, ignore, world, &|_| 0.0)
+    }
+
+    /// [`cover_waypoint`](Self::cover_waypoint) with `penalty(waypoint)` units added to each
+    /// candidate's distance (a port addition, design §4: the learned heatmap's
+    /// [`cover_penalty`](crate::learn::heatmap::Heatmap::cover_penalty) prefers cover where the
+    /// team doesn't keep dying). A zero penalty is upstream's choice exactly.
+    pub fn cover_waypoint_weighted(
+        &self,
+        player_origin: Vector,
+        cover_from: Vector,
+        ignore: &[usize],
+        world: &dyn World,
+        penalty: &dyn Fn(usize) -> f32,
+    ) -> Option<usize> {
         let opts = NearestOptions { visible: false, unreachable: true, ..NearestOptions::default() };
         let from_wpt = self.nearest_waypoint(cover_from, REACHABLE_RANGE, None, opts, &[], world)?;
         let mut nearest_dist = 4096.0f32;
@@ -160,7 +175,7 @@ impl Waypoints {
             if w.flags & (fl::DELETED | fl::UNREACHABLE) != 0 || self.visibility.get(from_wpt, i) {
                 continue;
             }
-            let dist = (w.origin - player_origin).length();
+            let dist = (w.origin - player_origin).length() + penalty(i);
             if dist < nearest_dist {
                 nearest = Some(i);
                 nearest_dist = dist;
@@ -290,5 +305,10 @@ mod tests {
         let world = EmptyWorld;
         assert_eq!(w.cover_waypoint(Vector::new(110.0, 0.0, 0.0), Vector::ZERO, &[], &world), Some(hidden));
         assert_eq!(w.cover_waypoint(Vector::new(110.0, 0.0, 0.0), Vector::ZERO, &[hidden], &world), None);
+        // A penalty makes a farther hidden waypoint win; none is upstream's choice.
+        let far = w.add_origin(Vector::new(300.0, 0.0, 0.0), 0, None).unwrap();
+        let from = Vector::new(110.0, 0.0, 0.0);
+        assert_eq!(w.cover_waypoint_weighted(from, Vector::ZERO, &[], &world, &|_| 0.0), Some(hidden));
+        assert_eq!(w.cover_waypoint_weighted(from, Vector::ZERO, &[], &world, &|i| if i == hidden { 256.0 } else { 0.0 }), Some(far));
     }
 }

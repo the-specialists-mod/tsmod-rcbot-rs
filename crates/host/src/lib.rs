@@ -335,6 +335,7 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
         s.squads.clear();
         s.botcam.clear();
         commands::load_waypoints(s, a, e);
+        bots::load_heatmap(s);
         // `CBotGlobals::MapInit`.
         s.map_init_time = e.time();
         s.rejoin_time = e.time();

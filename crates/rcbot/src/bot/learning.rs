@@ -42,6 +42,11 @@ impl Bot {
         &self.learning.ledger
     }
 
+    /// How dangerous `waypoint` is for the bot's team on this map (the heatmap, 0..1).
+    pub fn waypoint_danger(&self, g: &BotGlobals<'_>, waypoint: usize) -> f32 {
+        g.learned.heatmap.danger(waypoint, self.team)
+    }
+
     /// The bot's weapon-by-range table.
     pub fn weapon_stats(&self) -> &WeaponStats {
         &self.learning.weapons

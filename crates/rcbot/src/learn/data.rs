@@ -13,6 +13,7 @@
 
 use super::ga::{Ga, Individual};
 use super::header::LearnedHeader;
+use super::heatmap::Heatmap;
 use super::io::Reader;
 use super::opponents::PlayerKeys;
 use super::perceptron::Perceptron;
@@ -325,6 +326,8 @@ pub struct GlobalLearnedData {
     pub player_keys: PlayerKeys,
     /// Every bot's weapon-by-range results together: the prior each bot's own shrinks toward.
     pub weapon_prior: WeaponStats,
+    /// Where players die, kill from and get hurt on this map.
+    pub heatmap: Heatmap,
 }
 
 impl Default for GlobalLearnedData {
@@ -334,6 +337,7 @@ impl Default for GlobalLearnedData {
             ts_weapon_choices: Ga::new(0),
             player_keys: PlayerKeys::default(),
             weapon_prior: WeaponStats::default(),
+            heatmap: Heatmap::default(),
         }
     }
 }

@@ -365,6 +365,34 @@ impl Rig {
         };
         f(&mut self.bot, &mut g)
     }
+
+    /// The event-replay harness: the host's damage and kill events, each at its game time, go
+    /// through a bot manager holding the rig's bot (so the globals' learners see them too).
+    fn replay(&mut self, w: &mut Plane, script: &[(f32, crate::learn::CombatEvent)]) {
+        let mut mgr = BotManager::default();
+        mgr.add(self.bot.clone());
+        let mut rng = XorShiftRandom::new(1);
+        for (t, ev) in script {
+            w.time = *t;
+            let mut g = BotGlobals {
+                config: &self.config,
+                waypoints: &mut self.wp,
+                weapons: &mut self.weapons,
+                presets: &self.presets,
+                learned: &mut self.learned,
+                team_scores: [0; 4],
+                masters: &[],
+                other_bots: Vec::new(),
+                squads: &mut self.extra.squads,
+                botcam: &mut self.extra.cam,
+                rep_ids: &self.extra.reps,
+                chat: &self.extra.chat,
+                map_name: "ts_test",
+            };
+            mgr.combat_event(&mut g, w, ev, &mut rng);
+        }
+        self.bot = mgr.remove(self.bot.index).expect("the bot");
+    }
 }
 
 fn plane(ents: Vec<Entity>) -> Plane {
@@ -1439,4 +1467,28 @@ fn time_in_sight_hits_and_rounds_go_to_the_weapon_table() {
     run(&mut rig, &mut w, &mut rng, 250, pin);
     let score = rig.with(|b, g| b.weapon_score(g, 1, 300.0));
     assert!(score.is_some_and(|s| s > 0.0), "{score:?}");
+}
+
+#[test]
+fn replayed_fights_fill_the_ledger_heatmap_and_weapon_table() {
+    let mut rig = Rig::new(Config::default());
+    rig.learned.heatmap = crate::learn::Heatmap::new("ts_test", rig.wp.len());
+    // The bot at waypoint 0, a player at waypoint 2 (300 units), another at 5 (750).
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(750.0, 0.0, 0.0), 0)]);
+    arm(&w, 3, 18, 5, 10);
+    let script =
+        [(1.0, damage(1, 2, 30.0)), (1.2, damage(2, 1, 50.0)), (1.5, kill(1, 2, 1)), (3.0, damage(1, 3, 100.0)), (3.0, kill(3, 1, 18))];
+    rig.replay(&mut w, &script);
+    let l = rig.bot.ledger();
+    assert_eq!(l.entries().count(), 5);
+    assert!((l.reward_since(0.0, 2) - 1.2).abs() < 1e-6);
+    assert_eq!(l.reward_since(0.0, 3), -2.0);
+    assert!(l.open_episodes().is_empty());
+    let h = &rig.learned.heatmap;
+    assert_eq!((h.deaths_at(2, 0), h.kills_from(0, 0), h.deaths_at(0, 0), h.kills_from(5, 0)), (1.0, 1.0, 1.0, 1.0));
+    assert!((h.damage_taken_at(0, 0) - 1.3).abs() < 1e-6 && (h.damage_taken_at(2, 0) - 0.5).abs() < 1e-6);
+    assert!(h.danger(0, -1) > h.danger(1, -1));
+    assert_eq!(rig.bot.weapon_stats().cell(1, 300.0).map(|c| c.hits), Some(1.0));
+    assert_eq!(rig.learned.weapon_prior.cell(1, 300.0).map(|c| c.damage), Some(50.0));
 }

@@ -137,6 +137,15 @@ impl AStarBot {
     }
 }
 
+/// An extra, opt-in cost per waypoint for A* (a port addition, design §4): how dangerous a
+/// waypoint is for a team, 0..1. [`AStar::search_with_danger`] multiplies each edge's length
+/// by `1 + weight * danger(successor)`; [`AStar::search`] adds nothing, so upstream's searches
+/// stay bit for bit what they were.
+pub trait DangerSource {
+    /// The danger of `waypoint` for RCBot team `team` (`GetTeam()`, -1 none), 0..1.
+    fn danger(&self, waypoint: usize, team: i32) -> f32;
+}
+
 /// One search request.
 #[derive(Clone, Copy, Debug)]
 pub struct AStarQuery {
@@ -218,6 +227,26 @@ impl AStar {
         world: &dyn World,
         rng: &mut dyn Random,
     ) -> AStarResult {
+        self.search_with_danger(bot, q, continue_search, waypoints, world, rng, None)
+    }
+
+    /// [`search`](Self::search) with an extra cost: each edge's length times `1 + weight *
+    /// danger(successor, q.team)` (port addition, design §4). `None` (or a weight of 0) is
+    /// upstream's search exactly. The heuristic is upstream's either way (it already
+    /// overestimates; a danger cost only makes edges dearer). A search continued over several
+    /// frames should keep the same source and weight.
+    #[allow(clippy::too_many_arguments)] // upstream's arguments and the hook
+    pub fn search_with_danger(
+        &mut self,
+        bot: &mut AStarBot,
+        q: &AStarQuery,
+        continue_search: bool,
+        waypoints: &mut Waypoints,
+        world: &dyn World,
+        rng: &mut dyn Random,
+        danger: Option<(&dyn DangerSource, f32)>,
+    ) -> AStarResult {
+        let danger = danger.filter(|&(_, weight)| weight != 0.0);
         let (Some(from), Some(to)) = (q.from, q.to) else { return AStarResult::NoPath };
         if from >= MAX_WAYPOINTS || to >= MAX_WAYPOINTS {
             return AStarResult::NoPath;
@@ -291,7 +320,11 @@ impl AStar {
                 let mut cur_cost = self.nodes[current].cost;
                 let teleport = cur_wpt.flags & fl::TELEPORT == fl::TELEPORT;
                 if !teleport {
-                    cur_cost += (succ_origin - cur_wpt.origin).length();
+                    let len = (succ_origin - cur_wpt.origin).length();
+                    cur_cost += len;
+                    if let Some((source, weight)) = danger {
+                        cur_cost += len * weight * source.danger(succ, q.team).max(0.0);
+                    }
                 }
 
                 let node = &mut self.nodes[succ];
@@ -470,6 +503,36 @@ mod tests {
         w.set_flags(3, fl::FLY | fl::STUNT);
         assert_eq!(run(&mut w, &mut bot, query(0, 5)), AStarResult::Next(3));
         assert!(!w.successors(4, -1).contains(&4));
+    }
+
+    /// Danger on one waypoint, for the hook.
+    struct Hot(usize);
+
+    impl DangerSource for Hot {
+        fn danger(&self, waypoint: usize, _team: i32) -> f32 {
+            if waypoint == self.0 { 1.0 } else { 0.0 }
+        }
+    }
+
+    #[test]
+    fn the_danger_hook_is_opt_in() {
+        // 0 -> 2 across the top row goes through 1; a dangerous 1 sends it round by 3, 4, 5.
+        let mut w = grid();
+        let mut bot = AStarBot::default();
+        assert_eq!(run(&mut w, &mut bot, query(0, 2)), AStarResult::Next(1));
+        let plain = bot.bot_paths.clone();
+        let mut rng = XorShiftRandom::new(1);
+        for weight in [0.0, 1.0, 5.0] {
+            let mut b = AStarBot::default();
+            let r = AStar::new().search_with_danger(&mut b, &query(0, 2), false, &mut w, &EmptyWorld, &mut rng, Some((&Hot(1), weight)));
+            if weight < 2.0 {
+                // A weight of 0 is the plain search; 1 isn't enough to pay for two more edges.
+                assert_eq!((r, &b.bot_paths), (AStarResult::Next(1), &plain), "weight {weight}");
+            } else {
+                assert_eq!(r, AStarResult::Next(3), "weight {weight}");
+                assert!(!b.bot_paths.contains(&1));
+            }
+        }
     }
 
     #[test]
