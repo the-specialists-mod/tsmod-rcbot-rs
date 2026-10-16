@@ -1401,15 +1401,15 @@ fn the_visible_list_keeps_its_order_and_membership() {
     assert_eq!(v.to_vec(), vec![7, 2, 300]);
 }
 
-/// A damage event from the host (`player_damaged`), the attacker its own inflictor.
+/// A damage event from the host (`damage`), the attacker its own inflictor.
 fn damage(victim: u32, attacker: u32, amount: f32) -> crate::learn::CombatEvent {
     crate::learn::CombatEvent::Damage(crate::learn::DamageEvent {
         victim,
         attacker,
         inflictor: attacker as i32,
         amount,
-        bits: 0,
-        health: 0.0,
+        weapon: -1,
+        ..Default::default()
     })
 }
 
@@ -2485,4 +2485,37 @@ fn dives_wait_for_the_stunt_cooldown_and_get_up_when_the_game_allows() {
     rig.bot.dive_landing(5.45);
     assert_eq!(rig.bot.dive_time, 0.0);
     assert_ne!(rig.bot.run_player_move(5.46).buttons & buttons::JUMP, 0);
+}
+
+#[test]
+fn a_shot_from_out_of_sight_turns_the_bot_along_it_and_headshots_are_counted() {
+    let mut rig = Rig::new(Config::default());
+    // The shooter stands behind the bot, out of its view.
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(-600.0, 300.0, 0.0), 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.look_task = LookTask::NextWaypoint;
+    rig.extra.reps[2] = 5;
+    // Travelling from the shooter to the bot, hitting its head.
+    let dir = (Vector::ZERO - Vector::new(-600.0, 300.0, 0.0)).normalize();
+    let shot = crate::learn::CombatEvent::Damage(crate::learn::DamageEvent {
+        victim: 1,
+        attacker: 2,
+        inflictor: 2,
+        amount: 40.0,
+        hitgroup: crate::learn::ledger::HITGROUP_HEAD,
+        weapon: 27,
+        dir,
+        pos: Vector::new(0.0, 0.0, 17.0),
+        ..Default::default()
+    });
+    rig.replay(&mut w, &[(2.0, shot)]);
+    // It faces back along the shot: toward the shooter's side, not where it stands exactly.
+    assert_eq!(rig.bot.look_task, LookTask::FaceHurtOrigin);
+    let to = (rig.bot.hurt_origin - rig.bot.gun_position()).normalize();
+    assert!(super::look::dot(to, -dir) > 0.99, "{to:?}");
+    assert_eq!(rig.bot.ledger().taken_since(0.0, Some(2)), 40.0);
+    // The opponent model has the rules' weapon and the headshot.
+    let key = crate::learn::opponents::OpponentKey::Player(5);
+    let p = rig.learned.opponents.profile(key).unwrap();
+    assert_eq!((p.headshots_on_bots, p.favourite_weapon()), (1.0, Some((27, 1.0))));
 }

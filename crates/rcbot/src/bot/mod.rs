@@ -1235,7 +1235,22 @@ impl Bot {
         self.next_inventory_sync = 0.0;
     }
 
-    /// `BotEvent(BOT_EVENT_HURT, attacker, origin)`: the port reports damage (`player_damaged`)
+    /// `BotEvent(BOT_EVENT_HURT)` for the port's damage report ([`crate::learn::DamageEvent`]): the
+    /// bot turns to where the shot came from, along the shot's direction (`dir`, what a player hit
+    /// by an unseen shooter can tell; it doesn't learn where the shooter stands), else toward the
+    /// attacker (damage without a trace: a grenade, a blow).
+    pub fn hurt_by(&mut self, w: &dyn BotWorld, d: &crate::learn::DamageEvent) {
+        let from = if d.dir != Vector::ZERO {
+            Some(self.gun_position() - d.dir.normalize() * 512.0)
+        } else {
+            w.entity(d.attacker).map(|a| a.origin)
+        };
+        if let Some(from) = from {
+            self.hurt(Some(d.attacker), from, w.time());
+        }
+    }
+
+    /// `BotEvent(BOT_EVENT_HURT, attacker, origin)`: the port reports damage (`damage`)
     /// instead of upstream's "health went down" guess in `Think`'s TS block (design §4). Hurt by
     /// someone other than its enemy, the bot weighs its enemy again at once, the attacker scoring
     /// higher, in sight or not (design §4; upstream ignored damage while it had an enemy).

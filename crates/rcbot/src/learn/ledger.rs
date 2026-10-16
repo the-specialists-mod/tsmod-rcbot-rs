@@ -1,5 +1,5 @@
 //! The combat ledger (a port addition, design §4): what passed between a bot and each player,
-//! from the port's damage and kill callbacks (`player_damaged`, `kill_scored`), so the bot's
+//! from the port's damage and kill callbacks (`damage`, `kill_scored`), so the bot's
 //! learners score their choices by what they did to *that* opponent and what it did back, not
 //! by health deltas that mix in every other source of damage.
 //!
@@ -29,8 +29,9 @@ pub fn range_bin(dist: f32) -> usize {
     RANGE_BIN_LIMITS.iter().position(|&b| dist < b).unwrap_or(NUM_RANGE_BINS - 1)
 }
 
-/// `player_damaged`: `attacker` hurt `victim` (entity indices; 0 the world).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The port's `damage` callback (plugin API v6's `DamageEvent`): `attacker` hurt `victim` (entity
+/// indices; 0 the world).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DamageEvent {
     /// The player hurt.
     pub victim: u32,
@@ -44,7 +45,21 @@ pub struct DamageEvent {
     pub bits: i32,
     /// The victim's health left.
     pub health: f32,
+    /// The victim's armour left.
+    pub armor: f32,
+    /// Where the blow landed (1 head, 2 chest, 3 stomach, 4/5 arms, 6/7 legs), 0 for damage that
+    /// didn't come through a trace (falls, explosions).
+    pub hitgroup: i32,
+    /// The blow's TS weapon id as the rules count it (0 kung fu, 24 a grenade), -1 unknown.
+    pub weapon: i32,
+    /// The shot's direction of travel (unit) and where it hit, zero without a trace.
+    pub dir: crate::Vector,
+    /// See [`dir`](Self::dir).
+    pub pos: crate::Vector,
 }
+
+/// [`DamageEvent::hitgroup`] of a headshot.
+pub const HITGROUP_HEAD: i32 = 1;
 
 /// `kill_scored`: the rules scored a death.
 #[derive(Clone, Copy, Debug, PartialEq)]

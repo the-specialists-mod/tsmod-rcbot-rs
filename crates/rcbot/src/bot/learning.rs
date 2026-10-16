@@ -109,9 +109,11 @@ impl Bot {
             }
         };
         match *ev {
-            CombatEvent::Damage(DamageEvent { victim, attacker, inflictor, amount, .. }) => {
+            CombatEvent::Damage(DamageEvent { victim, attacker, inflictor, amount, weapon, .. }) => {
+                // The rules' weapon for the blow when the port gives it, else a guess.
+                let weapon = if weapon >= 0 { weapon } else { Self::blow_weapon(w, attacker, inflictor) };
                 if attacker == me && victim != me {
-                    let e = LedgerEntry { dealt: amount, ..entry(victim, Self::blow_weapon(w, attacker, inflictor)) };
+                    let e = LedgerEntry { dealt: amount, ..entry(victim, weapon) };
                     self.learning.ledger.record(e);
                     self.learning.life_dealt += amount;
                     if let Some(v) = w.entity(victim) {
@@ -120,7 +122,7 @@ impl Bot {
                         g.learned.weapon_prior.add_hit(e.weapon, dist, amount);
                     }
                 } else if victim == me && attacker != me {
-                    let e = LedgerEntry { taken: amount, ..entry(attacker, Self::blow_weapon(w, attacker, inflictor)) };
+                    let e = LedgerEntry { taken: amount, ..entry(attacker, weapon) };
                     self.learning.ledger.record(e);
                 }
             }

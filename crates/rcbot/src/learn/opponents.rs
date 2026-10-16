@@ -56,7 +56,7 @@ const THREAT_PRIOR: f32 = 10.0;
 pub const PLAYERS_FILE: &str = "players.rop";
 
 const FILE_KIND: &str = "players";
-const FILE_VERSION: u32 = 1;
+const FILE_VERSION: u32 = 2;
 
 /// What the bots saw of one player.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +67,8 @@ pub struct OpponentProfile {
     pub damage_to_bots: f32,
     /// Hits on bots.
     pub hits_on_bots: f32,
+    /// Of those, headshots (the port's hitgroup; version 2 of the file).
+    pub headshots_on_bots: f32,
     /// Bots it killed.
     pub kills_of_bots: f32,
     /// Its deaths to bots.
@@ -102,6 +104,7 @@ impl Default for OpponentProfile {
             exposure: 0.0,
             damage_to_bots: 0.0,
             hits_on_bots: 0.0,
+            headshots_on_bots: 0.0,
             kills_of_bots: 0.0,
             deaths_to_bots: 0.0,
             weapons: [0.0; WEAPON_IDS],
@@ -141,6 +144,11 @@ impl OpponentProfile {
         (n > 0.0).then(|| (i as i32, n / total))
     }
 
+    /// The share of its hits on bots that were headshots (a marksman), once it hit a few times.
+    pub fn headshot_share(&self) -> Option<f32> {
+        (self.hits_on_bots >= 3.0).then(|| self.headshots_on_bots / self.hits_on_bots)
+    }
+
     /// Its kung fu block rate: blocks per attack.
     pub fn kf_block_rate(&self) -> Option<f32> {
         let attacks: f32 = self.kf_attacks.iter().sum();
@@ -165,11 +173,15 @@ impl OpponentProfile {
         ];
         v.extend_from_slice(&self.kf_attacks);
         v.extend_from_slice(&self.weapons);
+        v.push(self.headshots_on_bots);
         v
     }
 
-    fn from_fields(v: &[f32]) -> Option<OpponentProfile> {
-        if v.len() != 13 + KF_KINDS + WEAPON_IDS || v.iter().any(|&x| x < 0.0) {
+    /// A line's fields: version 1's 56, or version 2's with the headshots after them.
+    fn from_fields(v: &[f32], version: u32) -> Option<OpponentProfile> {
+        let base = 13 + KF_KINDS + WEAPON_IDS;
+        let len = if version >= 2 { base + 1 } else { base };
+        if v.len() != len || v.iter().any(|&x| x < 0.0) {
             return None;
         }
         let mut p = OpponentProfile {
@@ -189,7 +201,8 @@ impl OpponentProfile {
             ..OpponentProfile::default()
         };
         p.kf_attacks.copy_from_slice(&v[13..13 + KF_KINDS]);
-        p.weapons.copy_from_slice(&v[13 + KF_KINDS..]);
+        p.weapons.copy_from_slice(&v[13 + KF_KINDS..base]);
+        p.headshots_on_bots = v.get(base).copied().unwrap_or(0.0);
         Some(p)
     }
 }
@@ -210,12 +223,13 @@ impl OpponentModel {
         self.players.entry(key).or_default()
     }
 
-    /// `key` hit a bot for `damage` with `weapon` (TS id) from `dist`.
-    pub fn observe_hit_on_bot(&mut self, key: OpponentKey, weapon: i32, dist: f32, damage: f32) {
+    /// `key` hit a bot for `damage` with `weapon` (TS id) from `dist`, in the head or not.
+    pub fn observe_hit_on_bot(&mut self, key: OpponentKey, weapon: i32, dist: f32, damage: f32, headshot: bool) {
         let p = self.entry(key);
         let first = p.hits_on_bots == 0.0;
         p.damage_to_bots += damage.max(0.0);
         p.hits_on_bots += 1.0;
+        p.headshots_on_bots += f32::from(u8::from(headshot));
         let melee = matches!(weapon, 0 | 25 | 34 | 35 | 38);
         let slot = if weapon == 38 { 0 } else { weapon };
         if let Some(w) = usize::try_from(slot).ok().and_then(|w| p.weapons.get_mut(w)) {
@@ -295,9 +309,15 @@ impl OpponentModel {
     /// A new map: counts fade, stunt timing restarts.
     pub fn new_map(&mut self) {
         for p in self.players.values_mut() {
-            for v in
-                [&mut p.exposure, &mut p.damage_to_bots, &mut p.hits_on_bots, &mut p.kills_of_bots, &mut p.deaths_to_bots, &mut p.stunts]
-            {
+            for v in [
+                &mut p.exposure,
+                &mut p.damage_to_bots,
+                &mut p.hits_on_bots,
+                &mut p.headshots_on_bots,
+                &mut p.kills_of_bots,
+                &mut p.deaths_to_bots,
+                &mut p.stunts,
+            ] {
                 *v *= MAP_DECAY;
             }
             for v in p.weapons.iter_mut().chain(p.kf_attacks.iter_mut()) {
@@ -309,9 +329,10 @@ impl OpponentModel {
         }
     }
 
-    /// The file: `rcbot-players 1`, then per player `p <rep id>` or `b <profile id>` and its
+    /// The file: `rcbot-players 2`, then per player `p <rep id>` or `b <profile id>` and its
     /// fields (exposure, damage, hits, kills, deaths, range, kung fu share, stunts, stunt rate,
-    /// dodge, kung fu fights, blocks, interval, the 5 attack kinds, the 38 weapons).
+    /// dodge, kung fu fights, blocks, interval, the 5 attack kinds, the 38 weapons, headshots;
+    /// version 1 lines, without the headshots, still load).
     pub fn save(&self) -> String {
         let mut s = store::header(FILE_KIND, FILE_VERSION);
         for (k, p) in &self.players {
@@ -326,7 +347,7 @@ impl OpponentModel {
 
     /// Reads [`save`](Self::save)'s text; other versions and damaged lines are skipped.
     pub fn load(&mut self, text: &str) {
-        let Some((FILE_VERSION, lines)) = store::read_header(text, FILE_KIND) else { return };
+        let Some((version @ 1..=FILE_VERSION, lines)) = store::read_header(text, FILE_KIND) else { return };
         for line in lines {
             let mut f = line.split_whitespace();
             let key = match (f.next(), f.next().and_then(|v| v.parse::<i32>().ok())) {
@@ -334,7 +355,7 @@ impl OpponentModel {
                 (Some("b"), Some(id)) => OpponentKey::Bot(id),
                 _ => continue,
             };
-            if let Some(p) = store::floats(f).and_then(|v| OpponentProfile::from_fields(&v)) {
+            if let Some(p) = store::floats(f).and_then(|v| OpponentProfile::from_fields(&v, version)) {
                 self.players.insert(key, p);
             }
         }
@@ -366,9 +387,9 @@ mod tests {
         for _ in 0..20 {
             m.observe_exposure(ace, 1.0, 0.8);
             m.observe_exposure(novice, 1.0, 0.1);
-            m.observe_hit_on_bot(ace, 27, 800.0, 40.0);
+            m.observe_hit_on_bot(ace, 27, 800.0, 40.0, true);
         }
-        m.observe_hit_on_bot(novice, 0, 40.0, 10.0);
+        m.observe_hit_on_bot(novice, 0, 40.0, 10.0, false);
         m.observe_kill_of_bot(ace);
         m.observe_death_to_bot(novice);
         assert!(m.threat(ace) > 1.5 && m.threat(novice) < 0.5, "{} {}", m.threat(ace), m.threat(novice));
@@ -377,6 +398,8 @@ mod tests {
         assert_eq!(a.range, 800.0);
         assert_eq!(a.kungfu_share, 0.0);
         assert_eq!(a.accuracy(), Some(1.0));
+        assert_eq!(a.headshot_share(), Some(1.0));
+        assert_eq!(m.profile(novice).unwrap().headshot_share(), None);
         assert!(a.dodge > 0.7);
         assert_eq!(m.profile(novice).unwrap().kungfu_share, 1.0);
     }
@@ -400,6 +423,11 @@ mod tests {
         assert_eq!(back, want);
         back.load("rcbot-players 1\np x 1\nq 1 1\np 4 1 2 3\n");
         assert_eq!(back.players.len(), 1);
+        // A version 1 line (56 numbers, no headshots) loads with none.
+        let v1 = format!("rcbot-players 1\np 9 {}\n", vec!["1"; 56].join(" "));
+        back.load(&v1);
+        let p = back.profile(OpponentKey::Player(9)).unwrap();
+        assert_eq!((p.hits_on_bots, p.headshots_on_bots), (1.0, 0.0));
         m.new_map();
         assert!((m.profile(k).unwrap().stunts - 2.0 * MAP_DECAY).abs() < 1e-6);
     }

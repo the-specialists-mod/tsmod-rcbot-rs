@@ -206,9 +206,17 @@ impl BotManager {
         }
     }
 
-    /// The host's damage and kill events (`player_damaged`, `kill_scored`; port addition, design
-    /// §4): the bots that dealt or took it record it.
+    /// The host's damage and kill events (`damage`, `kill_scored`; port addition, design §4): a
+    /// bot that was hurt reacts (`BotEvent(BOT_EVENT_HURT)`), and the bots that dealt or took it
+    /// record it.
     pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
+        if let CombatEvent::Damage(d) = *ev
+            && d.attacker != 0
+            && d.attacker != d.victim
+            && let Some(b) = self.get_mut(d.victim)
+        {
+            b.hurt_by(w, &d);
+        }
         self.refresh_player_keys(g);
         self.update_heatmap(g, w, ev);
         self.update_opponents(g, w, ev);
@@ -228,8 +236,10 @@ impl BotManager {
             CombatEvent::Damage(d) => {
                 let (Some(key), Some(a), Some(v)) = (keys.get(d.attacker), w.entity(d.attacker), w.entity(d.victim)) else { return };
                 if d.attacker != d.victim && is_bot(d.victim) {
-                    let weapon = a.player.map_or(-1, |p| p.weapon);
-                    g.learned.opponents.observe_hit_on_bot(key, weapon, (a.origin - v.origin).length(), d.amount);
+                    // The blow's weapon as the rules count it, else what the attacker holds.
+                    let weapon = if d.weapon >= 0 { d.weapon } else { a.player.map_or(-1, |p| p.weapon) };
+                    let headshot = d.hitgroup == crate::learn::ledger::HITGROUP_HEAD;
+                    g.learned.opponents.observe_hit_on_bot(key, weapon, (a.origin - v.origin).length(), d.amount, headshot);
                 }
             }
             CombatEvent::Kill(k) => {

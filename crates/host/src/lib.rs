@@ -669,13 +669,9 @@ pub(crate) fn player_say(player: i32, args: Vec<String>) {
     with_state(Some(Event::Say(player, args.clone())), |s, a, e| bots::say_command(s, a, e, player, &args));
 }
 
-/// `BotEvent(BOT_EVENT_HURT)`: the bot looks toward who hurt it; then every field of the
-/// damage goes to the bots' combat ledgers (design §4).
+/// A player's damage, every field of it, for the bots: the hurt bot turns to where it came from,
+/// and it goes to the bots' combat ledgers, heat map and opponent model (design §4).
 fn damaged(s: &mut State, a: Api, e: Engine, d: &ts_plugin_api::DamageEvent) {
-    let from = e.edict(d.attacker).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin)));
-    if let (Some(b), Some(from)) = (s.bots.get_mut(d.victim as u32), from) {
-        b.hurt(u32::try_from(d.attacker).ok(), from, e.time());
-    }
     let ev = rcbot::learn::CombatEvent::Damage(rcbot::learn::DamageEvent {
         victim: d.victim as u32,
         attacker: d.attacker as u32,
@@ -683,6 +679,11 @@ fn damaged(s: &mut State, a: Api, e: Engine, d: &ts_plugin_api::DamageEvent) {
         amount: d.damage,
         bits: d.bits,
         health: d.health,
+        armor: d.armor,
+        hitgroup: d.hitgroup,
+        weapon: d.weapon,
+        dir: Vector::from(d.dir),
+        pos: Vector::from(d.pos),
     });
     bots::combat(s, a, e, &ev);
 }

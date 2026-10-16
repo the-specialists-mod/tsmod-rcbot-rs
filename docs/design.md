@@ -280,8 +280,9 @@ bucket search order.
   attachments, free slots, power-ups, time scale, armour, the player flags (on the ground, prone,
   stunting, ...), the stunt bits and the close-combat and stunt timers (`CombatState`) are in
   `PlayerState` too (the snapshot has no permanent kung fu flag, which nothing read). Damage comes
-  from `damage` (the bot faces the attacker); upstream guessed from a health drop and looked 128
-  units behind itself.
+  from `damage`: the bot faces back along the shot's direction (`DamageEvent::dir`, what a player
+  hit from out of sight can tell, not where the shooter stands; damage without a trace, toward the
+  attacker); upstream guessed from a health drop and looked 128 units behind itself.
 * **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47). The
   engine copies a usercmd's angles into `pev->v_angle` only while `pev->fixangle` is 0
   (`SV_RunCmd`), and clears `fixangle` only when it sends a client `svc_setangle`/`svc_addangle`,
@@ -502,7 +503,7 @@ bucket search order.
   the reputation's priority times 0.3, +2 aiming at the bot, +2.5 hurt it, up to +1.5 for its
   wounds, +1 holding a gun, up to +2 for nearness; it keeps its enemy unless another scores 25%
   (and 0.5) more or the enemy is out of sight and another is in it. `hurt` (the port's
-  `player_damaged`, now with the attacker) re-scores at once when someone else hurt it; upstream
+  `damage`, with the attacker) re-scores at once when someone else hurt it; upstream
   ignored damage while it had an enemy. A new enemy's reaction time doesn't restart for the same
   enemy found again while fighting it. Under 38% health against a healthier enemy the bot breaks
   off to cover (`RunForCover`).
@@ -547,8 +548,10 @@ the personal genes at once. The port adds learners scored by what actually happe
 bot and each opponent; upstream's objects still load and save byte for byte.
 
 * **Combat ledger** (`learn/ledger.rs`, `bot/learning.rs`): the host passes every field of
-  `player_damaged` (victim, attacker, inflictor, damage, bits, health; upstream's port dropped all
-  but the attacker) and subscribes to `kill_scored` (killer, victim, weapon, headshot, close
+  the port's `damage` (plugin API v6's `DamageEvent`: victim, attacker, inflictor, damage, bits,
+  health, armour, and the `TraceAttack`'s hitgroup, direction and position, and the blow's weapon
+  as the rules count it, which the ledger takes over a guess from the attacker's hand; v5's
+  `player_damaged` had the first six; upstream's port dropped all but the attacker) and subscribes to `kill_scored` (killer, victim, weapon, headshot, close
   combat, kung fu). Each bot keeps a ring of 128 entries (time, other player, weapon, dealt or
   taken, range bin 0-64/64-192/192-384/384-768/768-1500/over 1500, its waypoint) and one episode
   per opponent: opened when the bot engages or first trades damage, closed after 4 s without
@@ -619,14 +622,15 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   (and other backends' bots) by reputation id, RCBot's bots by profile id (`PlayerKeys`, refreshed
   by the manager): damage to bots and hits on them per second some bot had it in sight as its
   enemy (exposure), kills of and deaths to bots, a weapon histogram, its usual range, its kung fu
-  share, stunts per minute (the host now subscribes to `player_stunt`), dodging (its speed across
+  share, its headshot share (the `damage` hitgroup, plugin API v6), stunts per minute (the host
+  now subscribes to `player_stunt`), dodging (its speed across
   the bot's view while seen), and from kung fu fights its attack mix, blocks and rhythm (a new fight
   starts from that rhythm). Counts fade ×0.95 at each map load. API: `Bot::learned_threat(g, player)` and
   `OpponentModel::threat(key)` (1 for an average or unknown player, 0.25-4: its damage rate shrunk
   toward everyone's over everyone's, times √(kills/deaths vs bots)), `OpponentModel::profile(key)`
-  (`accuracy`, `favourite_weapon`, `kf_block_rate`, the fields). Saved as
-  `botprofiles/players.rop` (text, `rcbot-players 1`, `p <rep id>` / `b <profile id>` and 56
-  numbers).
+  (`accuracy`, `favourite_weapon`, `headshot_share`, `kf_block_rate`, the fields). Saved as
+  `botprofiles/players.rop` (text, `rcbot-players 2`, `p <rep id>` / `b <profile id>` and 57
+  numbers, the headshots last; version 1 files, 56 numbers, still load).
 
 Navigation, movement and tactics (#1, phase 3: bots that move like experienced TS players):
 
