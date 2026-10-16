@@ -527,7 +527,7 @@ impl Bot {
             LookTask::LookAround
         };
         let mut nearest_pickup: Option<(Entity, f32)> = None;
-        for i in self.visibles.clone() {
+        for &i in &self.visibles {
             if i == self.index {
                 continue;
             }

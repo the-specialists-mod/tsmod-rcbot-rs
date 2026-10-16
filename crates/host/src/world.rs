@@ -6,6 +6,7 @@ use crate::api::{Api, Engine};
 use rcbot::bot::{BotWorld, Entity, EntityKey, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `NON_TS_TEAMPLAY`: the map's name starts with `tm_` (`CBotGlobals::MapInit`), set at
@@ -29,12 +30,15 @@ pub struct HostWorld {
     pub eng: Engine,
     /// The game's teamplay (`GameState::teamplay`).
     pub game_teamplay: bool,
+    /// The cvars read through this world: a world lives for a frame, and every bot asks for
+    /// the same few (`sv_gravity`, `mp_timelimit`).
+    cvars: RefCell<Vec<(String, f32)>>,
 }
 
 impl HostWorld {
     /// The world now, with the game's teamplay as of this frame.
     pub fn new(api: Api, eng: Engine) -> HostWorld {
-        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed) }
+        HostWorld { api, eng, game_teamplay: GAME_TEAMPLAY.load(Ordering::Relaxed), cvars: RefCell::new(Vec::new()) }
     }
 
     /// Teams by `model` key: a `tm_` map the game doesn't run as teamplay.
@@ -203,7 +207,12 @@ impl BotWorld for HostWorld {
     }
 
     fn cvar_float(&self, name: &str) -> f32 {
-        self.eng.cvar_float(name)
+        if let Some(&(_, v)) = self.cvars.borrow().iter().find(|(n, _)| n == name) {
+            return v;
+        }
+        let v = self.eng.cvar_float(name);
+        self.cvars.borrow_mut().push((name.to_owned(), v));
+        v
     }
 }
 

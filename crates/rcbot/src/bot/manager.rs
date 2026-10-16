@@ -78,11 +78,9 @@ impl BotManager {
         self.bots.iter_mut().filter_map(Option::take).collect()
     }
 
-    fn others(&self, me: u32) -> Vec<OtherBot> {
-        self.iter()
-            .filter(|b| b.index != me)
-            .map(|b| OtherBot { handle: b.me.handle(), current_waypoint: b.current_waypoint, gun_position: b.gun_position() })
-            .collect()
+    /// What another bot sees of `b`.
+    fn other(b: &Bot) -> OtherBot {
+        OtherBot { handle: b.me.handle(), current_waypoint: b.current_waypoint, gun_position: b.gun_position() }
     }
 
     /// Hands the squad orders to their bots.
@@ -102,9 +100,13 @@ impl BotManager {
         let now = w.time();
         let mut out = Vec::new();
         let indices: Vec<u32> = self.iter().map(|b| b.index).collect();
+        // Every bot as the others see it, built once and kept up to date as each one runs (the
+        // bots before it this frame are seen as they are now, as upstream's loop sees them).
+        let mut all: Vec<(u32, OtherBot)> = self.iter().map(|b| (b.index, Self::other(b))).collect();
         for i in indices {
             self.apply_squad_orders(g);
-            g.other_bots = self.others(i);
+            g.other_bots.clear();
+            g.other_bots.extend(all.iter().filter(|(j, _)| *j != i).map(|(_, o)| *o));
             let cam = g.botcam.current_bot();
             g.botcam.other_has_enemy = cam.filter(|&c| c != i).and_then(|c| self.get(c)).is_some_and(|b| b.enemy.is_some());
             let Some(bot) = self.get_mut(i) else { continue };
@@ -119,6 +121,9 @@ impl BotManager {
                 }
             }
             out.push((i, bot.frame(g, w, rng)));
+            if let Some(slot) = all.iter_mut().find(|(j, _)| *j == i) {
+                slot.1 = Self::other(bot);
+            }
         }
         self.apply_squad_orders(g);
         g.squads.update_angles(w);
