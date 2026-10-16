@@ -59,6 +59,28 @@ pub(crate) struct Fight {
     /// The fight's spread limit ([`Bot::spread_limit`]) and until when it holds: automatic fire
     /// lets go of the trigger in any usercmd the penalty passes it, between thinks too.
     pub spread_limit: (f32, f32),
+    /// No dodge dive before this.
+    pub next_dive: f32,
+    /// A dodge dive to press (`+alt1` in a usercmd without it before) from this time.
+    pub dive_at: Option<f32>,
+    /// `+duck` held until then, to roll out of the dive's landing instead of lying prone.
+    pub roll_until: f32,
+    /// Who last hurt the bot, and when.
+    pub attacker: Option<(u32, f32)>,
+    /// When the weapon for the range is next chosen.
+    pub next_weapon_choice: f32,
+    /// When the enemy was last in sight (a clear line to it), 0 for not yet.
+    pub last_sight: f32,
+    /// The enemy's velocity then.
+    pub sight_velocity: Vector,
+    /// Its head then.
+    pub sight_head: Vector,
+    /// Holding the angle where the enemy went out of sight until then (0: not decided, -1: no).
+    pub hold_until: f32,
+    /// No grenade thrown before this.
+    pub next_grenade: f32,
+    /// No stored power-up used before this.
+    pub next_powerup: f32,
 }
 
 impl Bot {
@@ -136,6 +158,22 @@ impl Bot {
                     f.akimbo_left = !f.akimbo_left;
                 }
             }
+        }
+        // A dodge dive: `+alt1` in one usercmd (TS dives on a fresh press while moving), then
+        // `+duck` through the landing, which rolls out instead of lying prone.
+        let f = &mut self.fight;
+        if let Some(at) = f.dive_at
+            && now >= at
+        {
+            if f.sent & buttons::ALT1 == 0 {
+                b = (b | buttons::ALT1) & !buttons::DUCK;
+                f.dive_at = None;
+                f.roll_until = now + 1.2;
+            } else {
+                b &= !buttons::ALT1;
+            }
+        } else if f.roll_until > now {
+            b |= buttons::DUCK;
         }
         self.fight.sent = b & (buttons::ATTACK | buttons::ATTACK2 | buttons::ALT1);
         b
@@ -247,7 +285,250 @@ impl Bot {
         self.strafe_time = self.fight.strafe_until;
         self.strafe_speed = self.fight.strafe_dir * self.max_speed;
     }
+
+    /// A dodge dive (design §4; upstream pressed `+alt1` on every think its stunt perceptron
+    /// fired): while moving sideways faster than 80 units/s, just hurt or with the enemy's view
+    /// on the bot, light enough to dive (TS 3.0's low dive needs fewer than 62 of 81 slots used),
+    /// on the ground, not in a stunt, at most once every 3-6 s; when the perceptron fires, or by a
+    /// skill-scaled chance a think.
+    pub(crate) fn dodge(&mut self, enemy: &Entity, perceptron: bool, now: f32, rng: &mut dyn Random) {
+        let f = &self.fight;
+        if f.next_dive > now
+            || f.dive_at.is_some()
+            || self.state.stunt_state == super::TS_STATE_STUNT
+            || self.me.flags & super::entflags::ONGROUND == 0
+            || 81 - self.state.free_slots >= 62
+        {
+            return;
+        }
+        let (_, right) = make_vectors(Vector::new(0.0, self.v_angle.y, 0.0));
+        if dot(self.me.velocity, right).abs() <= 80.0 {
+            return;
+        }
+        let hurt = self.hurt_time > 0.0 && self.hurt_time + 0.5 > now;
+        let (enemy_forward, _) = make_vectors(enemy.v_angle);
+        let aimed_at = dot(enemy_forward, (self.gun_position() - (enemy.origin + enemy.view_ofs)).normalize()) > 0.95;
+        if !(hurt || aimed_at) || !(perceptron || rng.random_float(0.0, 1.0) < 0.05 + 0.1 * self.skill_share()) {
+            return;
+        }
+        self.fight.dive_at = Some(now);
+        self.fight.next_dive = now + rng.random_float(3.0, 6.0);
+    }
+
+    /// The enemy is in sight: remember how it moved and where its head was, for when it isn't.
+    pub(crate) fn saw_enemy(&mut self, enemy: &Entity, now: f32) {
+        let f = &mut self.fight;
+        f.last_sight = now;
+        f.sight_velocity = Vector::new(enemy.velocity.x, enemy.velocity.y, 0.0);
+        f.sight_head = enemy.origin + enemy.view_ofs - Vector::new(0.0, 0.0, 2.0);
+        f.hold_until = 0.0;
+    }
+
+    /// Whether the bot has lost sight of the enemy it faces (seen once, not in the last 0.15 s).
+    pub(crate) fn enemy_out_of_sight(&self, now: f32) -> bool {
+        self.fight.last_sight > 0.0 && self.fight.last_sight + 0.15 < now
+    }
+
+    /// Where to pre-aim for an enemy out of sight (design §4; upstream aimed at its live position
+    /// through the wall): its head where it went, carried on by its last velocity for up to
+    /// 0.5 s if that point is in sight, else where it was last seen.
+    pub(crate) fn lost_aim_point(&self, w: &dyn super::BotWorld, now: f32) -> Vector {
+        let f = &self.fight;
+        let predicted = f.sight_head + f.sight_velocity * (now - f.last_sight).clamp(0.0, 0.5);
+        if self.fvisible_point(w, predicted) { predicted } else { f.sight_head }
+    }
+
+    /// Hold the angle where the enemy went out of sight? Decided once per loss: for 1-3 s when
+    /// healthy (over 60%) with a loaded gun; otherwise the bot pushes on as upstream does.
+    pub(crate) fn hold_angle(&mut self, now: f32, rng: &mut dyn Random) -> bool {
+        if self.fight.hold_until == 0.0 {
+            let loaded = self.current_weapon.and_then(|id| self.weapons.get(id)).is_some_and(|wp| !wp.is_melee() && wp.clip > 0);
+            self.fight.hold_until =
+                if loaded && self.me.health > self.me.max_health * 0.6 { now + rng.random_float(1.0, 3.0) } else { -1.0 };
+        }
+        self.fight.hold_until > now
+    }
+
+    /// How much an enemy should be fought now (design §4, `FindEnemy`): its reputation's priority
+    /// (as upstream's), more if it aims at the bot, hurt it in the last 3 s, is hurt, holds a gun,
+    /// and the nearer it is.
+    pub(crate) fn threat(&self, e: &Entity, rep: Option<i32>, now: f32) -> f32 {
+        if !e.is_client() {
+            // Upstream's breakable priority, 5.
+            return 1.5;
+        }
+        let priority = rep.map_or(10, |r| super::BOT_MAX_REP - r) as f32;
+        let mut score = priority * 0.3;
+        let (forward, _) = make_vectors(e.v_angle);
+        if dot(forward, (self.gun_position() - (e.origin + e.view_ofs)).normalize()) > 0.95 {
+            score += 2.0;
+        }
+        if self.fight.attacker.is_some_and(|(a, t)| a == e.index && t + 3.0 > now) {
+            score += 2.5;
+        }
+        if e.max_health > 0.0 {
+            score += (1.0 - (e.health / e.max_health).clamp(0.0, 1.0)) * 1.5;
+        }
+        if e.player.is_some_and(|p| p.weapon != 0) {
+            score += 1.0;
+        }
+        score + 2.0 * (1.0 - (e.origin - self.me.origin).length().min(2000.0) / 2000.0)
+    }
+
+    /// What weapon `id` is worth at `dist` (design §4): damage a second, times the range falloff
+    /// and the share of shots that hit a player there with its base spread and the recoil it
+    /// builds; blades within 80 units; nothing for an empty clip (unless the clip is infinite),
+    /// the grenade or kung fu.
+    pub(crate) fn weapon_score(&self, id: i32, dist: f32) -> f32 {
+        let Some(wp) = self.weapons.get(id).filter(|w| w.has_weapon) else { return 0.0 };
+        let Some(g) = ts_data::gun_data(id) else { return 0.0 };
+        match g.kind {
+            GunKind::Grenade => 0.0,
+            GunKind::Knife | GunKind::Katana => {
+                if dist < 80.0 {
+                    g.damage / g.rate
+                } else {
+                    0.0
+                }
+            }
+            _ => {
+                if wp.clip <= 0 && self.state.active_powerup & powerup::INFAMMO == 0 {
+                    return 0.0;
+                }
+                let interval = if g.has_auto { g.rate } else { g.press_interval(mode::SEMI) };
+                let steady = if g.scale_spread {
+                    let grow = g.acc_kick * 2.0 * (1.0 - interval.min(1.0)) - 0.1 * interval;
+                    (grow.max(0.0) * 3.0).min(0.1)
+                } else {
+                    0.0
+                };
+                let hit = ((AIM_RADIUS / dist.max(1.0)) / (g.accuracy + steady).max(1e-4)).min(1.0);
+                g.damage * g.pellets * g.range_multiplier(dist) * hit * hit / interval
+            }
+        }
+    }
+
+    /// The best weapon the bot owns for `dist` other than `except`, with its score.
+    pub(crate) fn best_scored_weapon(&self, dist: f32, except: Option<i32>) -> Option<(i32, f32)> {
+        let mut best: Option<(i32, f32)> = None;
+        for id in 1..crate::weapons::MAX_WEAPONS as i32 {
+            if Some(id) == except {
+                continue;
+            }
+            let score = self.weapon_score(id, dist);
+            if score > 0.0 && best.is_none_or(|(_, b)| score > b) {
+                best = Some((id, score));
+            }
+        }
+        best
+    }
+
+    /// Takes out the weapon for the range (design §4; upstream chose only when the clip ran
+    /// dry): every 0.5 s, not while a reload runs or a switch is pending, when another weapon is
+    /// worth 30% more (and a little) than the one in hand. A kung fu power-up running makes the
+    /// bot fight hand to hand within 300 units.
+    pub(crate) fn choose_weapon(&mut self, dist: f32, now: f32) {
+        if self.fight.next_weapon_choice > now || self.switch_pending.is_some() {
+            return;
+        }
+        self.fight.next_weapon_choice = now + 0.5;
+        let Some(cur) = self.current_weapon else { return };
+        if self.state.active_powerup & powerup::KUNGFU != 0 && dist < 300.0 {
+            self.switch_weapon(TsWeapon::KungFu.id());
+            return;
+        }
+        // A reload under way, or an empty clip (`Think`'s empty-gun choice decides that one).
+        let reloading = self.next_reload_time > now && self.weapons.get(cur).is_some_and(|w| w.clip < w.max_clip);
+        if reloading || self.weapons.get(cur).is_some_and(|w| w.clip_is_empty()) {
+            return;
+        }
+        let here = self.weapon_score(cur, dist);
+        if let Some((best, score)) = self.best_scored_weapon(dist, Some(cur))
+            && score > here * 1.3 + 1.0
+        {
+            self.switch_weapon(best);
+        }
+    }
+
+    /// Uses the stored power-up when it helps the fight (design §4; upstream sent `usepowerup` on
+    /// first seeing an enemy, gated by its chat timer): slow motion or slow pause in a mid-range
+    /// fight (200-1200 units), an infinite clip or double fire rate with a gun out, kung fu
+    /// within 300 units, health or armour under 60% health, the rest at once; at most every 2 s.
+    pub(crate) fn use_powerup(&mut self, dist: f32, now: f32) {
+        let stored = self.state.stored_powerup;
+        if stored == 0 || self.state.active_powerup != 0 || self.fight.next_powerup > now {
+            return;
+        }
+        let gun = self.gun_in_hand().is_some_and(|g| !g.is_melee_or_thrown());
+        let hurt = self.me.health < self.me.max_health * 0.6;
+        let useful = if stored & (powerup::SLOWMO | powerup::SLOWPAUSE) != 0 {
+            (200.0..1200.0).contains(&dist)
+        } else if stored & (powerup::INFAMMO | powerup::DFIRERATE) != 0 {
+            gun
+        } else if stored & powerup::KUNGFU != 0 {
+            dist < 300.0
+        } else if stored & (powerup::HEALTH | powerup::ARMOR) != 0 {
+            hurt
+        } else {
+            true
+        };
+        if useful {
+            self.actions.push(super::Action::Command("usepowerup".into()));
+            self.fight.next_powerup = now + 2.0;
+        }
+    }
+
+    /// A grenade at an enemy that went behind cover (design §4): an M61 in the inventory, the
+    /// enemy out of sight for half a second to 3 s, last seen 300-750 units away, at most every
+    /// 8 s, by a skill-scaled chance.
+    pub(crate) fn grenade_behind_cover(&mut self, now: f32, rng: &mut dyn Random) {
+        let f = &self.fight;
+        let lost_for = now - f.last_sight;
+        let dist = self.distance_from(self.last_see_enemy_position, false);
+        if f.next_grenade > now
+            || !(0.5..3.0).contains(&lost_for)
+            || !(300.0..750.0).contains(&dist)
+            || !self.weapons.get(TsWeapon::M61Grenade.id()).is_some_and(|w| w.has_weapon && w.clip > 0)
+            || self.tasks.has_task(super::TaskKind::ThrowGrenade)
+        {
+            return;
+        }
+        self.fight.next_grenade = now + 8.0;
+        if rng.random_float(0.0, 1.0) < 0.3 + 0.5 * self.skill_share() {
+            let id = self.tasks.new_schedule_id();
+            let t = super::Task::new(super::TaskKind::ThrowGrenade, id, None, 0, 0.0, self.last_see_enemy_position).with_timeout(now, 4.0);
+            self.add_priority_task(t);
+        }
+    }
 }
 
 /// The radius the bot treats a player as for "on target" and spread (a player's hull is 16 wide).
 pub(crate) const AIM_RADIUS: f32 = 14.0;
+
+/// TS 3.0's M61 throw (`GrenadeIdle`, `shared/src/weapons/gun.rs`): the view pitch `p` (down
+/// positive) becomes `p * (10/9 or 8/9) - 10`, thrown at `min(750, (90 - p') * 7)`. The view
+/// pitch that lands a grenade from `src` nearest `target` under gravity `g` (the lowest arc
+/// within a 3 s fuse), and its miss in units; `None` when nothing comes within 64 units.
+pub(crate) fn throw_pitch(src: Vector, target: Vector, g: f32) -> Option<(f32, f32)> {
+    let d = (target - src).length_2d();
+    let h = target.z - src.z;
+    let mut best: Option<(f32, f32)> = None;
+    // From looking down (flat throws) up: the first that lands is the lowest arc.
+    let mut p = 80.0f32;
+    while p >= -80.0 {
+        let thrown = p * if p >= 0.0 { 10.0 / 9.0 } else { 8.0 / 9.0 } - 10.0;
+        let speed = ((90.0 - thrown) * 7.0).min(750.0);
+        let (s, c) = (-thrown).to_radians().sin_cos();
+        if c > 0.01 {
+            let t = d / (speed * c);
+            if t <= 3.0 {
+                let miss = (speed * s * t - 0.5 * g * t * t - h).abs();
+                if best.is_none_or(|(_, m)| miss < m - 1.0) {
+                    best = Some((p, miss));
+                }
+            }
+        }
+        p -= 0.5;
+    }
+    best.filter(|&(_, m)| m < 64.0)
+}

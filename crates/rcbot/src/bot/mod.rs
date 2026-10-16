@@ -1001,10 +1001,18 @@ impl Bot {
     }
 
     /// `BotEvent(BOT_EVENT_HURT, attacker, origin)`: the port reports damage (`player_damaged`)
-    /// instead of upstream's "health went down" guess in `Think`'s TS block (design §4).
-    pub fn hurt(&mut self, from: Vector, now: f32) {
+    /// instead of upstream's "health went down" guess in `Think`'s TS block (design §4). Hurt by
+    /// someone other than its enemy, the bot weighs its enemy again at once, the attacker scoring
+    /// higher, in sight or not (design §4; upstream ignored damage while it had an enemy).
+    pub fn hurt(&mut self, attacker: Option<u32>, from: Vector, now: f32) {
         self.hurt_origin = from;
         self.hurt_time = now;
+        if let Some(a) = attacker {
+            self.fight.attacker = Some((a, now));
+            if self.enemy.is_some_and(|e| e.index != a) {
+                self.next_get_enemy_time = 0.0;
+            }
+        }
         if self.enemy.is_none() && matches!(self.look_task, LookTask::NextWaypoint | LookTask::LookAround | LookTask::None) {
             self.look_task = LookTask::FaceHurtOrigin;
         }

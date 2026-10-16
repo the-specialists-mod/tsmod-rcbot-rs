@@ -28,18 +28,23 @@ pub(crate) fn is_grenade_rocket(e: &Entity) -> bool {
     e.classname.contains("grenade") || e.classname.contains("rpg_rocket")
 }
 
-/// `BotFunc_TraceToss`: where a thrown entity lands, four half-second steps with upstream's
-/// gravity term, then a long trace along the last velocity.
+/// `BotFunc_TraceToss`, rewritten (design §4): where a thrown entity lands, flown in 0.1 s steps
+/// under TS's grenade gravity (`0.75 sv_gravity`) until something is in the way or the 3 s fuse
+/// ends. Upstream's four half-second steps grew the velocity by half of itself less gravity each
+/// step (`v + (v - g) / 2`), then traced 256 times the last velocity (§5.75).
 pub(crate) fn trace_toss(w: &dyn BotWorld, e: &Entity) -> Vector {
-    let gravity = Vector::new(0.0, 0.0, w.cvar_float("sv_gravity"));
+    let g = w.cvar_float("sv_gravity") * 0.75;
     let (mut origin, mut velocity) = (e.origin, e.velocity);
-    for _ in 0..4 {
-        let next_vel = velocity + (velocity - gravity) * 0.5;
-        let tr = w.trace_line(origin, origin + next_vel, Monsters::DontIgnore, Glass::DontIgnore, None);
-        origin = tr.end_pos;
-        velocity = next_vel;
+    for _ in 0..30 {
+        velocity.z -= g * 0.1;
+        let next = origin + velocity * 0.1;
+        let tr = w.trace_line(origin, next, Monsters::DontIgnore, Glass::DontIgnore, Some(e.index));
+        if tr.fraction < 1.0 {
+            return tr.end_pos;
+        }
+        origin = next;
     }
-    w.trace_line(origin, origin + velocity * 256.0, Monsters::DontIgnore, Glass::DontIgnore, None).end_pos
+    origin
 }
 
 impl Bot {
@@ -308,14 +313,8 @@ impl Bot {
             self.button = 0;
         }
 
-        // TS: run from a grenade that is coming (`m_fNextCheckCover` is never set in TS, so
-        // this runs every think while the grenade is the entity to avoid).
-        if let Some(g_ent) = self.resolve(w, self.avoid_entity)
-            && is_grenade_rocket(&g_ent)
-        {
-            let end = trace_toss(w, &g_ent);
-            self.run_for_cover(g, w, end, true, rng);
-        }
+        // TS: run from a grenade that is coming (design §4: any within 400 units).
+        self.flee_grenades(g, w, rng);
 
         // TS: reload or switch an empty gun. A gun with nothing in the clip or the reserve is
         // dropped for the next weapon with rounds, else kung fu (design §4; upstream kept
@@ -329,11 +328,16 @@ impl Bot {
                 }
             } else if cur.clip_is_empty() {
                 if let Some(enemy) = self.resolve(w, self.enemy) {
-                    let best = self.best_weapon(w, Some(&enemy)).0;
-                    if best != 0 && best != cur.id {
-                        self.switch_weapon(best);
-                    } else if cur.can_reload() && !cur.out_of_ammo() {
-                        self.reload(now);
+                    // Within 600 units a reload over a second is worse than the next loaded
+                    // weapon (design §4; upstream took `GetBestWeaponId`'s pick by priority).
+                    let dist = self.distance_from(enemy.entity_origin(), false);
+                    let slow = crate::weapons::ts_data::gun_data(cur.id).is_none_or(|d| d.reload > 1.0);
+                    match self.best_scored_weapon(dist, Some(cur.id)) {
+                        Some((best, _)) if (dist < 600.0 && slow) || !cur.can_reload() => {
+                            self.switch_weapon(best);
+                        }
+                        _ if cur.can_reload() => self.reload(now),
+                        _ => {}
                     }
                 } else if cur.can_reload() && !cur.out_of_ammo() {
                     self.reload(now);
@@ -797,7 +801,7 @@ impl Bot {
             TaskKind::WaitForLift => self.task_wait_for_lift(w, task, &mut done),
             TaskKind::WaitForEntity => self.task_wait_for_entity(w, task, &mut done, &mut failed),
             TaskKind::HumanTower => self.task_human_tower(w, rng, task, &mut done),
-            TaskKind::ThrowGrenade => self.task_throw_grenade(&mut failed),
+            TaskKind::ThrowGrenade => self.task_throw_grenade(w, task, &mut done, &mut failed),
             TaskKind::WaitForBotAtWpt => self.task_wait_for_bot_at_wpt(g, w, rng, task, &mut done, &mut failed),
             TaskKind::FaceEdict => self.task_face_edict(w, task, &mut done, &mut failed),
             TaskKind::FollowLeader => self.task_follow_leader(g, w, task, &mut failed),
@@ -1046,6 +1050,8 @@ impl Bot {
             let dist = (enemy_origin - self.gun_position()).length();
             self.last_enemy = self.enemy;
             self.last_see_enemy_position = enemy_origin;
+            self.saw_enemy(&enemy, now);
+            self.use_powerup(dist, now);
             let cur = self.current_weapon.and_then(|id| self.weapons.get(id)).cloned();
             if cur.as_ref().is_some_and(|c| c.is_melee()) && self.me.movetype == super::MOVETYPE_FLY && rng.random_long(0, 1) != 0 {
                 self.jump();
@@ -1094,9 +1100,15 @@ impl Bot {
                 let l = &mut self.learned;
                 l.stunt.input(&inputs);
                 l.stunt.execute();
-                if l.stunt.fired() {
-                    self.alt_button();
+                // The perceptron no longer presses `+alt1` every think it fires (each press a
+                // dive in TS 3.0): it is one way a dodge dive starts (design §4).
+                let stunt = l.stunt.fired();
+                self.dodge(&enemy, stunt, now, rng);
+                // Losing the trade (under 38% health, the enemy healthier): break off to cover.
+                if self.me.health < self.me.max_health * 0.38 && enemy.health > self.me.health {
+                    self.run_for_cover(g, w, enemy_origin, false, rng);
                 }
+                self.choose_weapon(dist, now);
                 self.fight.spread_limit = (self.spread_limit(dist), now + 0.1);
                 if cur.as_ref().is_some_and(|c| c.need_to_reload()) {
                     self.run_for_cover(g, w, enemy_origin, false, rng);
@@ -1112,7 +1124,15 @@ impl Bot {
             self.last_enemy = self.enemy;
             self.search_enemy_time = now + rng.random_float(5.0, 10.0);
             self.remember_lost_enemy(last, self.enemy);
-            if self.fvisible_point(w, last) {
+            self.grenade_behind_cover(now, rng);
+            if self.hold_angle(now, rng) {
+                // Hold the angle where it went, aiming where it will show (design §4).
+                self.stop_moving();
+                self.strafe_time = 0.0;
+                self.look_task = LookTask::FaceEnemy;
+            } else if self.fvisible_point(w, last) && (self.fight.last_sight == 0.0 || self.fight.last_sight + 1.0 > now) {
+                // Upstream kept facing while the last seen position was in sight, for as long as
+                // it was; the bot goes after the enemy a second after losing it (design §4).
                 self.set(cond::SEE_ENEMY);
                 self.look_task = LookTask::FaceEnemy;
             } else if !self.want_to_follow_enemy() {

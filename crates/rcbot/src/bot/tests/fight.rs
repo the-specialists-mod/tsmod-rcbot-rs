@@ -370,3 +370,217 @@ fn shots_build_the_recoil_penalty_and_it_decays() {
     b.track_shots(3.0);
     assert_eq!(b.fight.penalty, 0.0);
 }
+
+/// Frames of a duel with everything the bot did: (time, cmd, actions).
+fn frames(
+    rig: &mut Rig,
+    w: &mut Plane,
+    seed: u64,
+    n: usize,
+    mut each: impl FnMut(&Plane, &Frame),
+) -> Vec<(f32, Option<BotCmd>, Vec<Action>)> {
+    let mut rng = XorShiftRandom::new(seed);
+    let mut out = Vec::new();
+    run(rig, w, &mut rng, n, |w, f| {
+        each(w, f);
+        out.push((w.time, f.cmd, f.actions.clone()));
+    });
+    out
+}
+
+#[test]
+fn dodge_dives_are_single_presses_rolled_out_of() {
+    // Strafing under an enemy's aim, light enough: a dive now and then, `+alt1` in one usercmd
+    // and `+duck` held after it; never two dives within 3 s.
+    let dives = |free: i32, yaw: f32| {
+        let (mut rig, mut w) = duel(5, 999, 0, mode::AUTO, 400.0);
+        rig.bot.profile.skill = 100;
+        edit(&w, 1, |e| e.player.as_mut().unwrap().free_slots = free);
+        edit(&w, 2, |e| e.v_angle = Vector::new(0.0, yaw, 0.0));
+        let f = frames(&mut rig, &mut w, 9, 500, |w, _| {
+            edit(w, 1, |e| e.origin = Vector::ZERO);
+        });
+        let cmds: Vec<(f32, i32)> = f.iter().filter_map(|(t, c, _)| c.map(|c| (*t, c.buttons))).collect();
+        assert!(cmds.windows(2).all(|p| p[0].1 & p[1].1 & buttons::ALT1 == 0), "held");
+        let at: Vec<usize> = (0..cmds.len()).filter(|&i| cmds[i].1 & buttons::ALT1 != 0).collect();
+        for &i in &at {
+            assert!(cmds[i].1 & buttons::DUCK == 0 && cmds[i + 1].1 & buttons::DUCK != 0, "rolls out");
+        }
+        assert!(at.windows(2).all(|p| cmds[p[1]].0 - cmds[p[0]].0 >= 3.0));
+        at.len()
+    };
+    assert!(dives(40, 180.0) >= 1);
+    // Too heavy (71 of 81 slots used), or nobody aiming: no dive, and no stunt key at all.
+    assert_eq!(dives(10, 180.0), 0);
+    assert_eq!(dives(40, 0.0), 0);
+}
+
+#[test]
+fn the_enemy_is_kept_until_another_is_clearly_worse() {
+    // Two alike enemies: the bot stays on one (upstream switched every second).
+    let mut rig = Rig::new(Config::default());
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(400.0, 60.0, 0.0), 0), player(3, Vector::new(400.0, -60.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(4);
+    run(&mut rig, &mut w, &mut rng, 150, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    let first = rig.bot.enemy().expect("an enemy");
+    let (mut switches, mut last) = (0, first);
+    for _ in 0..250 {
+        run(&mut rig, &mut w, &mut rng, 1, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+        if let Some(e) = rig.bot.enemy()
+            && e != last
+        {
+            switches += 1;
+            last = e;
+        }
+    }
+    assert_eq!(switches, 0);
+    // Hurt by the other one: it turns on it, out of view or not.
+    let other = if first == 2 { 3 } else { 2 };
+    let from = w.entity(other).unwrap().origin;
+    rig.bot.hurt(Some(other), from, w.time);
+    run(&mut rig, &mut w, &mut rng, 30, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    assert_eq!(rig.bot.enemy(), Some(other));
+    // Someone behind it, out of the view cone, hurts it: it takes it on.
+    edit(&w, 3, |e| e.health = 0.0);
+    edit(&w, 2, |e| e.health = 0.0);
+    w.ents.borrow_mut().push(player(4, Vector::new(-300.0, 0.0, 0.0), 0));
+    run(&mut rig, &mut w, &mut rng, 10, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    rig.bot.hurt(Some(4), Vector::new(-300.0, 0.0, 0.0), w.time);
+    run(&mut rig, &mut w, &mut rng, 30, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    assert_eq!(rig.bot.enemy(), Some(4));
+}
+
+#[test]
+fn losing_the_trade_it_breaks_off_to_cover() {
+    let (mut rig, mut w) = duel(1, 999, 0, mode::AUTO, 400.0);
+    edit(&w, 1, |e| e.health = 30.0);
+    frames(&mut rig, &mut w, 2, 40, |_, _| {});
+    assert!(rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover), "{:?}", rig.bot.tasks().iter().map(|t| t.kind).collect::<Vec<_>>());
+    // Healthier than the enemy: fights on.
+    let (mut rig, mut w) = duel(1, 999, 0, mode::AUTO, 400.0);
+    edit(&w, 1, |e| e.health = 30.0);
+    edit(&w, 2, |e| e.health = 20.0);
+    frames(&mut rig, &mut w, 2, 40, |_, _| {});
+    assert!(!rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover));
+}
+
+#[test]
+fn the_weapon_suits_the_range() {
+    // A Glock in hand and an M4 owned: at 1500 units the M4 (5.56's 1500-unit full damage and
+    // less spread).
+    let switched = |x: f32, hand: (i32, i32, i32), owned_list: &[(i32, i32, i32)]| {
+        let (mut rig, mut w) = duel(hand.0, hand.1, hand.2, mode::AUTO, x);
+        *w.inventory.borrow_mut() = owned(owned_list);
+        let f = frames(&mut rig, &mut w, 3, 100, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+        f.iter().flat_map(|(_, _, a)| a.iter()).find_map(|a| if let Action::SelectWeapon(id) = a { Some(*id) } else { None })
+    };
+    assert_eq!(switched(1500.0, (1, 17, 34), &[(1, 17, 34), (5, 30, 60)]), Some(5));
+    // Close in, both do: no switch for a few percent.
+    assert_eq!(switched(150.0, (5, 30, 60), &[(1, 17, 34), (5, 30, 60)]), None);
+    // The M4 empty with an enemy near: the pistol rather than a 2.8 s reload; far off, reload.
+    assert_eq!(switched(300.0, (5, 0, 60), &[(1, 17, 34), (5, 0, 60)]), Some(1));
+    assert_eq!(switched(900.0, (5, 0, 60), &[(1, 17, 34), (5, 0, 60)]), None);
+}
+
+#[test]
+fn out_of_sight_it_holds_the_angle_where_the_enemy_went() {
+    let (mut rig, mut w) = duel(1, 999, 0, mode::AUTO, 400.0);
+    frames(&mut rig, &mut w, 6, 40, |w, _| {
+        edit(w, 1, |e| e.origin = Vector::ZERO);
+        edit(w, 2, |e| e.velocity = Vector::new(0.0, 200.0, 0.0));
+    });
+    let head = rig.bot.fight.sight_head;
+    // A wall comes between them and the enemy walks on behind it.
+    w.wall.set(Some(200.0));
+    edit(&w, 2, |e| e.origin = Vector::new(400.0, 300.0, 0.0));
+    let f = frames(&mut rig, &mut w, 6, 40, |w, _| edit(w, 2, |e| e.origin = Vector::new(400.0, 300.0, 0.0)));
+    let cmds: Vec<BotCmd> = f.iter().filter_map(|(_, c, _)| *c).collect();
+    // (The first usercmds carry the last think's trigger.)
+    assert!(cmds.iter().skip(3).all(|c| c.buttons & buttons::ATTACK == 0));
+    assert!(cmds.iter().skip(5).all(|c| c.forward == 0.0 && c.side == 0.0), "holds still");
+    let b = &rig.bot;
+    assert!(view_off(b, head) < 3.0, "{} off the corner", view_off(b, head));
+    assert!(view_off(b, Vector::new(400.0, 300.0, 17.0)) > 20.0, "no wallhack");
+}
+
+#[test]
+fn a_grenade_goes_behind_the_cover_the_enemy_took() {
+    let (mut rig, mut w) = duel(5, 30, 60, mode::AUTO, 500.0);
+    rig.bot.profile.skill = 100;
+    *w.inventory.borrow_mut() = owned(&[(5, 30, 60), (24, 1, 0)]);
+    frames(&mut rig, &mut w, 8, 40, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    w.wall.set(Some(300.0));
+    let (mut selected, mut pressed, mut released) = (false, false, false);
+    frames(&mut rig, &mut w, 8, 250, |w, f| {
+        edit(w, 1, |e| e.origin = Vector::ZERO);
+        if f.actions.contains(&Action::SelectWeapon(24)) {
+            selected = true;
+            // The game takes the grenade out.
+            arm(w, 1, 24, 1, 0);
+        }
+        let attack = f.cmd.is_some_and(|c| c.buttons & buttons::ATTACK != 0);
+        if selected && attack {
+            pressed = true;
+        }
+        if pressed && !attack {
+            released = true;
+        }
+    });
+    assert!(selected && pressed && released, "selected {selected} pressed {pressed} released {released}");
+}
+
+#[test]
+fn throws_land_where_they_are_aimed() {
+    let src = Vector::new(0.0, 0.0, 17.0);
+    for target in [Vector::new(300.0, 0.0, 0.0), Vector::new(600.0, 100.0, -50.0), Vector::new(700.0, 0.0, 100.0)] {
+        let (p, miss) = super::super::fire::throw_pitch(src, target, 600.0).expect("a throw");
+        // Fly it as TS throws it.
+        let thrown = p * if p >= 0.0 { 10.0 / 9.0 } else { 8.0 / 9.0 } - 10.0;
+        let speed = ((90.0 - thrown) * 7.0).min(750.0);
+        let (s, c) = (-thrown).to_radians().sin_cos();
+        let t = (target - src).length_2d() / (speed * c);
+        let z = src.z + speed * s * t - 300.0 * t * t;
+        assert!((z - target.z).abs() < 32.0 && miss < 32.0, "{target:?}: pitch {p} lands at {z}");
+    }
+    // Out of reach.
+    assert!(super::super::fire::throw_pitch(src, Vector::new(5000.0, 0.0, 0.0), 600.0).is_none());
+}
+
+#[test]
+fn it_runs_from_any_grenade_landing_near_it() {
+    let flees = |at: Vector, velocity: Vector| {
+        let mut rig = Rig::new(Config::default());
+        let mut nade = player(5, at, 0);
+        (nade.classname, nade.flags, nade.player, nade.velocity) = ("grenade".into(), 0, None, velocity);
+        let mut w = plane(vec![player(1, Vector::ZERO, 0), nade]);
+        frames(&mut rig, &mut w, 3, 10, |_, _| {});
+        rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover)
+    };
+    // Behind the bot (out of view), rolling to it.
+    assert!(flees(Vector::new(-250.0, 0.0, 0.0), Vector::new(50.0, 0.0, 0.0)));
+    // Rolling away, landing over 330 units off.
+    assert!(!flees(Vector::new(-250.0, 0.0, 0.0), Vector::new(-100.0, 0.0, 0.0)));
+}
+
+#[test]
+fn power_ups_are_used_when_they_help() {
+    let used = |stored: i32, x: f32, weapon: i32| {
+        let (mut rig, mut w) = duel(weapon, 17, 34, mode::AUTO, x);
+        edit(&w, 1, |e| e.player.as_mut().unwrap().stored_powerup = stored);
+        let f = frames(&mut rig, &mut w, 3, 75, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+        f.iter().flat_map(|(_, _, a)| a.iter()).filter(|a| **a == Action::Command("usepowerup".into())).count()
+    };
+    use crate::weapons::ts_data::powerup;
+    // Slow motion in a mid-range fight, once per 2 s; not at 1500 units.
+    assert_eq!(used(powerup::SLOWMO, 500.0, 1), 1);
+    assert_eq!(used(powerup::SLOWMO, 1500.0, 1), 0);
+    // Infinite clip with a gun out; kung fu close in only.
+    assert_eq!(used(powerup::INFAMMO, 1500.0, 1), 1);
+    assert_eq!(used(powerup::KUNGFU, 500.0, 1), 0);
+    // A kung fu power-up running: hand to hand within 300 units.
+    let (mut rig, mut w) = duel(1, 17, 34, mode::AUTO, 200.0);
+    edit(&w, 1, |e| e.player.as_mut().unwrap().active_powerup = powerup::KUNGFU);
+    let f = frames(&mut rig, &mut w, 3, 50, |w, _| edit(w, 1, |e| e.origin = Vector::ZERO));
+    assert!(f.iter().any(|(_, _, a)| a.contains(&Action::SelectWeapon(0))));
+}

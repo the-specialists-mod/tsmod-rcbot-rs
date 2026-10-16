@@ -537,7 +537,7 @@ fn a_momentary_button_is_held_while_its_door_moves() {
 }
 
 #[test]
-fn grenade_throw_waypoints_fail_in_ts() {
+fn grenade_throw_waypoints_throw_an_m61_at_an_enemy_just_seen() {
     let mut rig = Rig::new(Config::default());
     let w = plane(vec![player(1, Vector::ZERO, 0)]);
     let mut rng = XorShiftRandom::new(5);
@@ -549,13 +549,16 @@ fn grenade_throw_waypoints_fail_in_ts() {
         b.current_waypoint = 1;
         b.prev_waypoint = 0;
         b.current_waypoint_flags = fl::GREN_THROW;
-        // HL's hand grenade id is TS's Desert Eagle (design §5).
+        b.last_see_enemy_time = 0.5;
+        b.last_see_enemy_position = Vector::new(500.0, 0.0, 0.0);
+        // HL's hand grenade id is TS's Desert Eagle (design §5.59): no throw with one.
         b.weapons.weapon_info(12, 7, 14, g.weapons, g.presets);
         b.next_waypoint_tasks(g, &w, 0, &mut rng);
-        assert_eq!(b.tasks.current().map(|t| t.kind), Some(TaskKind::ThrowGrenade));
-        let mut failed = false;
-        b.task_throw_grenade(&mut failed);
-        assert!(failed);
+        assert!(b.tasks.is_empty());
+        b.weapons.weapon_info(24, 1, 0, g.weapons, g.presets);
+        b.next_waypoint_tasks(g, &w, 0, &mut rng);
+        let t = *b.tasks.current().unwrap();
+        assert_eq!((t.kind, t.vector), (TaskKind::ThrowGrenade, Vector::new(500.0, 0.0, 0.0)));
     });
 }
 
@@ -601,7 +604,7 @@ fn squads_form_wedges_and_hand_on_the_lead() {
 }
 
 #[test]
-fn a_disliked_player_is_the_first_enemy_and_aimed_at_by_reputation() {
+fn a_disliked_player_is_the_first_enemy() {
     let mut rig = Rig::new(Config::default());
     let near = player(2, Vector::new(100.0, 0.0, 0.0), 0);
     let far = player(3, Vector::new(300.0, 0.0, 0.0), 0);
@@ -613,19 +616,15 @@ fn a_disliked_player_is_the_first_enemy_and_aimed_at_by_reputation() {
     let mut rng = XorShiftRandom::new(7);
     rig.with(|b, g| {
         b.me = w.entity(1).unwrap();
-        // A higher priority only wins over an enemy already picked if it is also nearer (or
-        // slower): seen first, the near stranger stays the enemy (design §5).
-        b.visibles = [2, 3].into();
-        assert_eq!(b.find_enemy(g, &w, &mut rng).map(|e| e.index), Some(2));
-        assert_eq!(b.enemy_rep, Some(5));
-        b.enemy = None;
-        b.tasks.flush();
-        b.visibles = [3, 2].into();
-        let e = b.find_enemy(g, &w, &mut rng);
-        assert_eq!(e.map(|e| e.index), Some(3));
-        assert_eq!(b.enemy_rep, Some(1));
-        // EnemyFound asked for the power-up.
-        assert!(b.actions.contains(&Action::Command("usepowerup".into())));
+        // The priority is part of the threat score whatever the order the enemies were seen in
+        // (design §4; upstream's needed the disliked one to be nearer too, §5.63).
+        for order in [[2, 3], [3, 2]] {
+            b.enemy = None;
+            b.tasks.flush();
+            b.visibles = order.into();
+            assert_eq!(b.find_enemy(g, &w, &mut rng).map(|e| e.index), Some(3));
+            assert_eq!(b.enemy_rep, Some(1));
+        }
     });
 }
 
@@ -745,10 +744,13 @@ fn a_grenade_lands_where_its_toss_ends() {
     let w = plane(vec![]);
     let g = Entity { classname: "grenade".into(), origin: Vector::ZERO, velocity: Vector::new(100.0, 0.0, 0.0), ..Entity::default() };
     assert!(think::is_grenade_rocket(&g));
+    // No gravity (cvar 0): the 3 s fuse's flight in a straight line (upstream's steps grew the
+    // velocity 1.5 times each and traced 256 times the last, §5.75).
     let end = think::trace_toss(&w, &g);
-    // No gravity (cvar 0): each step goes 1.5 times the last (150, 225, 337.5, 506.25), then
-    // 256 times the last velocity.
-    assert!((end.x - (150.0 + 225.0 + 337.5 + 506.25 + 506.25 * 256.0)).abs() < 1.0, "{end:?}");
+    assert!((end.x - 300.0).abs() < 0.1, "{end:?}");
+    // A wall in the way: there.
+    w.wall.set(Some(155.0));
+    assert!((think::trace_toss(&w, &g).x - 155.0).abs() < 0.1);
 }
 
 #[test]

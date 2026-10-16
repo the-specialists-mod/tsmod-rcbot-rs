@@ -4,8 +4,8 @@
 //! `UpdateConditions`; `bot_visibles.cpp` `CBotVisibles`; `BotFunc_BreakableIsEnemy`).
 //!
 //! The visible list keeps upstream's insertion order (`m_iVisibleList`), which decides ties in
-//! `FindEnemy`; a player the bot has a reputation of gets priority `BOT_MAX_REP - rep` and that
-//! reputation steers the aim (`GetAimVector`).
+//! `FindEnemy`; a player the bot has a reputation of gets priority `BOT_MAX_REP - rep`, which is
+//! part of each enemy's threat score (design §4).
 
 use super::remember::REMEMBER_LOST_ENEMY;
 use super::{
@@ -351,50 +351,59 @@ impl Bot {
         }
     }
 
-    /// `CBot::FindEnemy`, TS: every 0.75-1.25 s the enemy is dropped and the nearest, slowest
-    /// visible enemy (`distance + speed`) other than the last one is taken; a new enemy starts
-    /// a priority `NORMAL_ATTACK` schedule.
+    /// `CBot::FindEnemy`, TS, rewritten (design §4): every 0.4-0.6 s the visible enemies (and
+    /// whoever hurt the bot in the last 3 s, seen or not, if the line to it is clear) are scored
+    /// ([`Bot::threat`]); the enemy is kept unless another scores 25% (and a little) more, or it
+    /// is out of sight and another is in it. A new enemy starts a priority `NORMAL_ATTACK`
+    /// schedule. Upstream dropped the enemy every 0.75-1.25 s for the nearest, slowest other one
+    /// in sight, so two enemies took turns, and only a priority seen first counted (§5.63).
     pub(crate) fn find_enemy(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) -> Option<EntRef> {
         let now = w.time();
-        let old = self.enemy;
-        if self.enemy.is_some() && self.next_get_enemy_time < now {
+        let current = self.resolve(w, self.enemy).filter(|e| self.is_enemy(w, e));
+        if current.is_some() && self.next_get_enemy_time >= now {
+            return self.enemy;
+        }
+        if current.is_none() {
             self.enemy = None;
-            self.next_get_enemy_time = now + rng.random_float(0.75, 1.25);
         }
-        if self.enemy.is_none() {
-            let mut best_priority = 0;
-            let mut best_fitness = 0.0;
-            for i in self.visibles.to_vec() {
-                let Some(e) = w.entity(i) else { continue };
-                // The visible list can be a vision pass old: check the line now, so a new enemy
-                // is never one behind a wall (design §4).
-                if Some(e.handle()) == old || !self.is_enemy(w, &e) || !self.fvisible(w, &e) {
-                    continue;
-                }
-                let dist = (e.origin - self.me.origin).length();
-                let mut priority = 10;
-                let rep = if e.is_client() { self.rep_of(g, e.index) } else { None };
-                if let Some(r) = rep {
-                    priority = super::BOT_MAX_REP - r;
-                }
-                let fitness = dist + e.velocity.length();
-                if e.classname == "func_breakable" {
-                    priority = 5;
-                }
-                if priority >= best_priority && (self.enemy.is_none() || fitness < best_fitness) {
-                    self.enemy = Some(e.handle());
-                    best_fitness = fitness;
-                    self.enemy_rep = rep;
-                    best_priority = priority;
-                }
+        self.next_get_enemy_time = now + rng.random_float(0.4, 0.6);
+        let mut candidates = self.visibles.to_vec();
+        if let Some((a, t)) = self.fight.attacker
+            && t + 3.0 > now
+            && !candidates.contains(&a)
+        {
+            candidates.push(a);
+        }
+        let mut best: Option<(Entity, f32, Option<i32>)> = None;
+        let mut current_score = 0.0;
+        for i in candidates {
+            let Some(e) = w.entity(i) else { continue };
+            // The visible list can be a vision pass old: check the line now, so a new enemy
+            // is never one behind a wall (design §4).
+            if !self.is_enemy(w, &e) || !self.fvisible(w, &e) {
+                continue;
             }
-            if let Some(e) = self.resolve(w, self.enemy) {
-                self.tasks.remove_similar_task(TaskKind::NormalAttack);
-                let id = self.tasks.new_schedule_id();
-                self.add_priority_task(Task::new(TaskKind::NormalAttack, id, Some(e.handle()), 0, 0.0, Vector::ZERO));
-                self.enemy_found(g, &e, now, rng);
+            let rep = if e.is_client() { self.rep_of(g, e.index) } else { None };
+            let score = self.threat(&e, rep, now);
+            if current.as_ref().is_some_and(|c| c.index == e.index) {
+                current_score = score;
+            }
+            if best.as_ref().is_none_or(|(_, b, _)| score > *b) {
+                best = Some((e, score, rep));
             }
         }
+        if let Some(c) = &current
+            && best.as_ref().is_none_or(|(b, s, _)| b.index == c.index || *s <= current_score * 1.25 + 0.5)
+        {
+            return self.enemy;
+        }
+        let Some((e, _, rep)) = best else { return self.enemy };
+        self.enemy = Some(e.handle());
+        self.enemy_rep = rep;
+        self.tasks.remove_similar_task(TaskKind::NormalAttack);
+        let id = self.tasks.new_schedule_id();
+        self.add_priority_task(Task::new(TaskKind::NormalAttack, id, Some(e.handle()), 0, 0.0, Vector::ZERO));
+        self.enemy_found(g, &e, now, rng);
         self.enemy
     }
 
@@ -406,9 +415,12 @@ impl Bot {
         self.set(cond::SEE_ENEMY);
         self.enemy = Some(e.handle());
         self.first_see_enemy_time = now;
-        let skill = (self.profile.skill as f32 / crate::config::MAX_BOT_SKILL as f32).clamp(0.0, 1.0);
-        self.fight.react_at = now + 0.35 - 0.2 * skill;
-        self.fight.on_target_since = now;
+        // The same enemy found again while still fighting it (its attack task replaced) is no
+        // new sight.
+        if self.last_enemy != Some(e.handle()) || self.fight.last_sight + 1.0 < now {
+            self.fight.react_at = now + 0.35 - 0.2 * self.skill_share();
+            self.fight.on_target_since = now;
+        }
         self.squad_enemy_found(g.squads);
         self.remembered.add(e.entity_origin(), Some(e.handle()), REMEMBER_1ST_SEE_ENEMY, self.me.origin);
         self.investigate_sound_time = now + 2.0;
@@ -417,19 +429,8 @@ impl Bot {
         if !cam_has_enemy {
             g.botcam.set_current_bot(self.index, now, rng);
         }
-        if self.next_use_say_message > now {
-            return;
-        }
-        self.next_use_say_message = now + rng.random_float(4.0, 8.0);
-        // TS: use a stored power-up; a skilled bot far from the enemy also presses the stunt key
-        // ("this won't work anyway", upstream says).
-        self.actions.push(super::Action::Command("usepowerup".into()));
-        if self.current_weapon.is_some_and(|id| id != crate::weapons::TsWeapon::KungFu.id())
-            && self.distance_from(e.origin, false) > 200.0
-            && rng.random_long(0, 100) < self.profile.skill
-        {
-            self.button |= super::buttons::ALT1;
-        }
+        // Upstream's TS part (`usepowerup` and a stunt key press, gated by the chat timer) is
+        // replaced by the fight's power-up use and dodge dives (design §4).
     }
 
     /// `CBot::EnemyDown`.
@@ -506,6 +507,21 @@ impl Bot {
         }
         self.tasks.give_schedule_description(id, ScheduleDesc::RunForCover);
         self.tasks.set_time_to_complete_schedule(id, now, rng.random_float(5.0, 10.0));
+    }
+
+    /// Runs from a grenade that will land within its 300-unit blast (and a bit) of the bot: any
+    /// grenade within 400 units, in view or not, its landing flown out ([`super::think::trace_toss`]).
+    /// Upstream fled only the grenade that was its entity to avoid (in view, within about 135
+    /// units) and replaced its cover schedule every think (§5.65); an existing one is kept.
+    pub(crate) fn flee_grenades(&mut self, g: &BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+        for i in w.entities_in_sphere(self.me.origin, 400.0) {
+            let Some(e) = w.entity(i).filter(super::think::is_grenade_rocket) else { continue };
+            let end = super::think::trace_toss(w, &e);
+            if (end - self.me.origin).length() < 330.0 {
+                self.run_for_cover(g, w, end, false, rng);
+                return;
+            }
+        }
     }
 
     /// `RememberPosition(v, enemy, BOT_REMEMBER_LOST_ENEMY)`.

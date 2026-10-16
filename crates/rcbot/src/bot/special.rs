@@ -271,9 +271,18 @@ impl Bot {
     pub(crate) fn next_waypoint_tasks(&mut self, g: &BotGlobals<'_>, w: &dyn BotWorld, prev_flags: u32, rng: &mut dyn Random) {
         let wpt = g.waypoints.origin(self.current_waypoint);
         let f = self.current_waypoint_flags;
-        // `HasWeapon(VALVE_WEAPON_HANDGRENADE)` is id 12, TS's Desert Eagle (design §5).
-        if self.weapons.has(12) && f & fl::GREN_THROW != 0 {
-            self.add_priority_task(Task::new(TaskKind::ThrowGrenade, 0, None, 0, 0.0, wpt));
+        // Upstream asked `HasWeapon(VALVE_WEAPON_HANDGRENADE)`, id 12, TS's Desert Eagle, and threw
+        // at the waypoint (design §5.59). A TS bot with an M61 throws one from here at an enemy
+        // seen in the last 5 s 300-750 units away.
+        let now = w.time();
+        let enemy_at = self.last_see_enemy_position;
+        if f & fl::GREN_THROW != 0
+            && self.weapons.get(crate::weapons::TsWeapon::M61Grenade.id()).is_some_and(|wp| wp.has_weapon && wp.clip > 0)
+            && self.last_see_enemy_time > 0.0
+            && self.last_see_enemy_time + 5.0 > now
+            && (300.0..750.0).contains(&self.distance_from(enemy_at, false))
+        {
+            self.add_priority_task(Task::new(TaskKind::ThrowGrenade, 0, None, 0, 0.0, enemy_at).with_timeout(now, 4.0));
         } else if self.me.flags & entflags::ONGROUND != 0
             && self.me.waterlevel < 3
             && ((f & fl::JUMP != 0 && prev_flags & fl::CROUCH != 0) || (f & fl::JUMP != 0 && f & fl::STAY_NEAR != 0))
@@ -552,9 +561,62 @@ impl Bot {
         }
     }
 
-    /// `BOT_TASK_THROW_GRENADE`: only Opposing Force throws; in TS the task fails at once.
-    pub(crate) fn task_throw_grenade(&mut self, failed: &mut bool) {
-        *failed = true;
+    /// `BOT_TASK_THROW_GRENADE`, TS (design §4; upstream only threw for Opposing Force and failed
+    /// the task in TS): takes out the M61, turns to the view pitch whose throw lands at the
+    /// task's vector ([`super::fire::throw_pitch`], gravity `0.75 sv_gravity`), pulls the pin
+    /// (`+attack`) for 0.2 s and lets go (TS throws on release), then takes out a loaded gun.
+    pub(crate) fn task_throw_grenade(&mut self, w: &dyn BotWorld, task: Task, done: &mut bool, failed: &mut bool) {
+        let now = w.time();
+        let m61 = crate::weapons::TsWeapon::M61Grenade.id();
+        self.stop_moving();
+        match task.int {
+            0 => {
+                if !self.weapons.get(m61).is_some_and(|wp| wp.has_weapon && wp.clip > 0) {
+                    *failed = true;
+                    return;
+                }
+                if self.current_weapon != Some(m61) {
+                    self.switch_weapon(m61);
+                    return;
+                }
+                let src = self.gun_position();
+                let Some((pitch, _)) = super::fire::throw_pitch(src, task.vector, w.cvar_float("sv_gravity") * 0.75) else {
+                    *failed = true;
+                    return;
+                };
+                let yaw = super::look::vec_to_angles(task.vector - src).y;
+                let (forward, _) = super::look::make_vectors(Vector::new(pitch, yaw, 0.0));
+                let aim = src + forward * 128.0;
+                self.look_task = LookTask::None;
+                self.fight.aim_true = Some(aim);
+                self.turn_to(aim, now, 0.04);
+                let off = |a: f32, b: f32| super::look::angle_diff(a, b).abs();
+                if off(pitch, self.v_angle.x) < 1.5 && off(yaw, self.v_angle.y) < 1.5 {
+                    self.primary_attack();
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.int = 1;
+                    t.float = now + 0.2;
+                }
+            }
+            1 => {
+                self.look_task = LookTask::None;
+                if task.float > now {
+                    self.primary_attack();
+                } else {
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.int = 2;
+                    t.float = now + 0.6;
+                }
+            }
+            _ => {
+                if task.float < now {
+                    *done = true;
+                    if let Some(next) = self.weapons.best_loaded_gun().filter(|&id| id != m61) {
+                        self.switch_weapon(next);
+                    }
+                }
+            }
+        }
     }
 }
 

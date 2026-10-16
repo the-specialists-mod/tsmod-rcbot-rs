@@ -625,7 +625,7 @@ pub(crate) fn player_say(player: i32, args: Vec<String>) {
 fn damaged(s: &mut State, e: Engine, victim: i32, attacker: i32) {
     let from = e.edict(attacker).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin)));
     if let (Some(b), Some(from)) = (s.bots.get_mut(victim as u32), from) {
-        b.hurt(from, e.time());
+        b.hurt(u32::try_from(attacker).ok(), from, e.time());
     }
 }
 

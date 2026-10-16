@@ -189,7 +189,10 @@ impl BotWeapons {
             w.clip = clip;
             w.has_weapon = true;
             w.reserve = ammo;
-            w.max_clip = w.max_clip.max(clip);
+            // TS 3.0's full clip when the game's table has the gun, so one first seen empty can be
+            // reloaded (design §4).
+            let full = crate::weapons::ts_data::gun_data(id).filter(|g| !g.is_melee_or_thrown()).map_or(0, |g| g.clip);
+            w.max_clip = w.max_clip.max(clip).max(full);
         }
         id
     }
@@ -300,10 +303,12 @@ mod tests {
         // Out of everything: nothing to reload.
         w.weapon_info(1, 0, 0, &mut reg, &p);
         assert!(!w.get(1).unwrap().need_to_reload());
-        // A refill shows a full clip again; a weapon seen for the first time starts from its clip.
+        // A refill shows a full clip again; a weapon seen for the first time, empty, has TS's
+        // full clip (design §4; upstream: none, so it never needed a reload).
         w.weapon_info(1, 17, 17, &mut reg, &p);
         assert!(!w.get(1).unwrap().need_to_reload());
         w.weapon_info(7, 0, 30, &mut reg, &p);
-        assert_eq!(w.get(7).unwrap().max_clip, 0);
+        assert_eq!(w.get(7).unwrap().max_clip, 30);
+        assert!(w.get(7).unwrap().need_to_reload());
     }
 }

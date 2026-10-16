@@ -109,7 +109,7 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot.h` `CBotCam`; `dll.cpp` `CBotCam::Think`, `TuneIn`, `TuneOff`, `Spawn`, `Clear` | `bot/botcam.rs`, `host` | |
 | (none: a port addition) the kung fu fighter | `bot/kungfu.rs` | §4 |
 | (none: a port addition) the trigger (fire modes and rates), the recoil penalty, the fight's aim, movement, weapon choice and power-ups; TS 3.0's gun data | `bot/fire.rs`, `weapons/ts_data.rs` | §4 |
-| `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs` | |
+| `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs`, `bot/fire.rs` | The power-up use, grenade flight and cover are rewritten (§4) |
 | `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config and `NON_TS_TEAMPLAY` (`tm_` maps), `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam`, `ClientCommand`'s `±rcbot_force_grip` with `CClient::Think`'s grip, `UTIL_FacingEnt`, `UTIL_getEntityInFront` | `host` | Plugin callbacks and API calls |
 | `bot.cpp` `LookForNewTasks`' TS objectives (`m_TSObjectives`: a random one, team 1 `DEFEND`s it, team 2 `USE`s its `ts_hack`/`ts_bomb` for 9 s); `bot_client.cpp` `BotClient_TS_Objective`, `BotClient_Generic_TeamScore` (`m_iTeamScores`) | `bot/think.rs` (`objective_tasks`), `host` | The plugin API's `objectives` and `GameState::team_scores` stand in for the messages (§4) |
 | `util.cpp` `UTIL_makeTSweapon`, `ExplosionCreate`'s live branch (`TE_EXPLOSION`), `RadiusDamage`; `bot_commands.cpp` `util explo` | `host/src/commands.rs` | `create_entity`/`entity_key_value`/`spawn_entity` and `ham_execute(Use, TakeDamage)` |
@@ -448,6 +448,57 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   crouching in one spell in seven; the enemy is never stepped around. The Barrett stands still
   to shoot, the M60 keeps under 170 units/s. A strafe under way survives a think without a place
   to go (`WorkMoveDirection` zeroed it, which also stopped kung fu's circling).
+* **Dodge dives**: upstream's stunt perceptron pressed `+alt1` on every think it fired, and
+  `EnemyFound` pressed it on first sight for a skilled bot (each press a dive in TS 3.0). The
+  perceptron still runs and learns, but a dive needs a dodge: the bot moving sideways faster than
+  80 units/s, hurt in the last 0.5 s or with the enemy's view on it (dot over 0.95), light enough
+  (TS 3.0's low dive needs fewer than 62 of 81 slots used, `free_slots`), on the ground and not
+  in a stunt, at most every 3-6 s, when the perceptron fires or by a skill-scaled chance. The
+  dive is `+alt1` in one usercmd (released before), then `+duck` held for 1.2 s, which rolls out
+  of the landing instead of lying prone.
+* **Choosing the enemy** (`FindEnemy`): upstream dropped its enemy every 0.75-1.25 s for the
+  nearest, slowest *other* visible one, so two enemies took turns, and a reputation priority
+  counted only if that enemy was also nearer (§5.63). Every 0.4-0.6 s the bot scores the visible
+  enemies, and whoever hurt it in the last 3 s if the line to them is clear (in view or not):
+  the reputation's priority times 0.3, +2 aiming at the bot, +2.5 hurt it, up to +1.5 for its
+  wounds, +1 holding a gun, up to +2 for nearness; it keeps its enemy unless another scores 25%
+  (and 0.5) more or the enemy is out of sight and another is in it. `hurt` (the port's
+  `player_damaged`, now with the attacker) re-scores at once when someone else hurt it; upstream
+  ignored damage while it had an enemy. A new enemy's reaction time doesn't restart for the same
+  enemy found again while fighting it. Under 38% health against a healthier enemy the bot breaks
+  off to cover (`RunForCover`).
+* **Weapon by range**: upstream chose a weapon only when the clip ran dry, by `bot_weapons.ini`
+  priority. Every 0.5 s in a gunfight (not while a reload runs, a switch is pending or the clip is
+  empty) the bot scores its weapons at the enemy's range from TS 3.0's data, damage a second
+  times the range falloff (full to 10 ammo range units: 9 mm 800, 5.56 1500, 7.62 1700, .50
+  2000, then `1/sqrt`) times the squared share of a 14-unit radius its spread (base plus the
+  recoil it builds) covers, blades within 80 units, and takes out another worth 30% (and a little)
+  more. With an empty clip and the enemy within 600 units, a reload over a second loses to the
+  best loaded weapon; further off the bot reloads. A gun first seen empty has TS's full clip as
+  its max clip (upstream: none, so it never needed a reload). A kung fu power-up running sends the
+  bot hand to hand within 300 units.
+* **Out of sight**: upstream's `FaceEnemy` kept aiming at the enemy's live position behind the
+  wall (pre-aim through walls) and kept facing as long as the last seen position was in sight.
+  The bot now aims at the enemy's head where it went out of sight, carried on by its last
+  velocity for up to 0.5 s when that point is in sight; healthy (over 60%) with a loaded gun it
+  holds still on that angle for 1-3 s, then (or at once otherwise, or a second after losing it)
+  goes after it as upstream does.
+* **Grenades**: TS bots never threw one (§5.59). `THROW_GRENADE` now takes out the M61, turns to
+  the view pitch whose throw lands at the target under `0.75 sv_gravity` (TS 3.0's throw: pitch
+  `p * (10/9 or 8/9) - 10`, speed `min(750, (90 - p') * 7)`, the lowest arc in the 3 s fuse),
+  holds `+attack` 0.2 s and lets go, then takes out a loaded gun. The bot throws one at an enemy
+  that went out of sight 300-750 units away (0.5-3 s after, at most every 8 s, by a
+  skill-scaled chance), and from a grenade-throw waypoint at an enemy seen in the last 5 s that
+  far away. It runs for cover from any grenade within 400 units, seen or not, whose landing (flown
+  in 0.1 s steps under that gravity, §5.75) is within 330 units, keeping a cover schedule it has
+  (upstream: only the grenade that was its entity to avoid, replacing the schedule every think,
+  §5.65).
+* **Power-ups**: upstream sent `usepowerup` on first seeing an enemy, gated by its chat timer.
+  The bot uses the stored power-up in a fight when it helps (slow motion or slow pause at
+  200-1200 units, an infinite clip or double fire rate with a gun out, kung fu within 300 units,
+  health or armour under 60% health, the rest at once), at most every 2 s. An infinite clip
+  doubles the spread allowance and stops partial reloads; double fire rate halves the recoil per
+  shot and lets semi-automatic guns fire while held.
 
 ## 5. Upstream bugs found
 
@@ -627,7 +678,7 @@ Found while porting; not filed upstream.
 59. **Grenade-throw waypoints ask for HL's hand grenade** (`BotNavigate_UpdateWaypoint`,
     `bot_navigate.cpp:1580`): `HasWeapon(VALVE_WEAPON_HANDGRENADE)` is id 12, TS's Desert Eagle,
     and `BOT_TASK_THROW_GRENADE` fails for TS anyway (only Opposing Force throws), so a bot with a
-    Desert Eagle gets a task that fails. Kept.
+    Desert Eagle gets a task that fails. **Fixed**: the M61, and the task throws (§4).
 60. **A blocked formation place moves towards the map's origin** (`CBotSquad::GetFormationVector`,
     `bot.cpp:10763`): the trace's end *position* is normalised and shortened by 32 as if it were
     the offset from the leader. Kept.
@@ -638,12 +689,13 @@ Found while porting; not filed upstream.
     with the full speed before anything reads it. Kept.
 63. **An enemy's priority only counts if it is also nearer** (`FindEnemy`, `bot.cpp:9184`):
     `iPriority >= iBestPriority && fFitness < fBestFitness`, so a disliked player seen after a
-    nearer stranger isn't chosen; a higher priority seen first does keep lower ones out. Kept.
+    nearer stranger isn't chosen; a higher priority seen first does keep lower ones out.
+    **Fixed**: the priority is part of a threat score (§4).
 64. **A message said in several arguments keeps only the last** (`ClientCommand`, `dll.cpp:884`):
     the old message (`szTemp`) is never set, so each argument replaces the message. Kept.
 65. **TS bots run for cover from a grenade every think** (`Think`, `bot.cpp:3523`):
     `m_fNextCheckCover` is never set in the TS branch, so `RunForCover(…, true)` replaces the
-    cover schedule each think while the grenade is the entity to avoid. Kept.
+    cover schedule each think while the grenade is the entity to avoid. **Fixed** (§4).
 66. **A follower's task goes on following the dead leader** (`BOT_TASK_FOLLOW_LEADER`,
     `bot.cpp:13072`): after `ChangeLeader` the task's edict is set to `m_pSquadLeader`, still the
     old leader until the next think. Kept.
@@ -678,6 +730,11 @@ Found while porting; not filed upstream.
     the reputation the larger the offset, and the aim is redrawn faster (`aim_time * rep / 10`)
     for liked players. **Fixed**: reputation no longer steers the aim (§4).
 
+75. **`BotFunc_TraceToss` has no gravity to speak of** (`dll.cpp`): each of its four half-second
+    steps sets the velocity to `v + (v - g) * 0.5` (growing it by half, `g` the `sv_gravity` vector
+    pointing up), then it traces 256 times the last velocity, so the "landing" is thousands of
+    units along the throw. **Fixed** (§4).
+
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed
 bias weight.
@@ -704,6 +761,19 @@ those by going through the port's own code when that code is ported.
   gunman; blocks, ducks and steps against a punching opponent, with strikes back and learning;
   the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
   wall jump; `.rkf` round trip and damaged files; combos bred from the best.
+* **The fight** (`bot/tests/fight.rs`, `weapons/ts_data.rs`): semi-automatic guns pressed one
+  usercmd at a time no faster than their rate (Desert Eagle, Barrett), automatic held, akimbo
+  semi alternating its buttons; the aim point by gun, skill and what shows; partial reloads (and
+  none with more than half a clip, no reserve, an infinite clip or an enemy in sight); blades
+  slashing and only spare knives thrown; the aim error by skill, settling and target speed, and
+  the lead; timed turning the same at 50 and 100 Hz and tracking a crossing target; no shot before
+  the reaction time or off target; the recoil penalty from clip shots and its decay; the Barrett
+  waiting for its spread and standing still; automatic fire in bursts at range; strafing both
+  ways and keeping the gun's range; dodge dives (one `+alt1`, then `+duck`; none too heavy or
+  unaimed at); keeping an enemy, turning on whoever hurts the bot (behind it too); cover when
+  losing the trade; weapons by range and the empty-clip choice; holding the angle out of sight
+  without pre-aiming through the wall; the grenade thrown behind cover, throw pitches that land,
+  fleeing grenades out of view; power-ups used when they help; TS 3.0's gun table.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
@@ -752,10 +822,9 @@ those by going through the port's own code when that code is ported.
   waypoints (touching them in order) and attacks a visible enemy with the gun it holds; human
   towers (the touch test, crouching, standing for a climber, jumping), pushables (where to stand),
   waiting for a lift, `CheckLift` pressing a door's button (a world with a door and its button),
-  a momentary button held while its door moves, grenade-throw waypoints failing in TS, touching
-  a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation
-  (and the priority quirk), reputation after a death, breakables as enemies by the first client near them, the visible list's order and membership, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
-  (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, `tm_` maps' model
+  a momentary button held while its door moves, grenade-throw waypoints throwing an M61, touching
+  a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation, reputation after a death, breakables as enemies by the first client near them, the visible list's order and membership, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
+  (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss (and a wall stopping it), `tm_` maps' model
   teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
   bought before each spawn; unit tests cover the
   usercmd `msec` (every 100 Hz frame sends, nothing lost at 30 Hz or 1000 Hz, the first

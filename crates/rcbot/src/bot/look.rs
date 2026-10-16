@@ -208,6 +208,12 @@ impl Bot {
                     self.set_view_angles(v);
                     self.turn_speed = saved;
                 }
+                // Out of sight: pre-aim where it will show, not where it is (design §4).
+                Some(_) if self.enemy_out_of_sight(now) => {
+                    let aim = self.lost_aim_point(w, now);
+                    self.fight.aim_true = Some(aim);
+                    self.turn_to(aim, now, w.frame_time());
+                }
                 Some(e) => {
                     let aim = self.aim_vector(&e, now, w.frame_time(), rng);
                     self.turn_to(aim, now, w.frame_time());
