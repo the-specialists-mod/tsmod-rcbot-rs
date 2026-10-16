@@ -265,13 +265,12 @@ impl Tasks {
         }
     }
 
-    /// `SetTimeToCompleteSchedule`.
+    /// `SetTimeToCompleteSchedule`: every task of the schedule times out `secs` from `now`.
+    /// Upstream adds the time twice (`fTime += gpGlobals->time`, then `SetTimeToComplete` adds it
+    /// again), so its schedules time out at `2 * now + secs`: never (design §5.50). Fixed (§4).
     pub fn set_time_to_complete_schedule(&mut self, schedule_id: i32, now: f32, secs: f32) {
-        // Upstream adds the time twice (`fTime += gpGlobals->time`, then `SetTimeToComplete`
-        // adds it again), so schedules time out at `2 * now + secs`. Kept (design §5).
-        let t = now + secs;
         for task in self.tasks.iter_mut().filter(|x| x.schedule_id == schedule_id) {
-            task.set_time_to_complete(now, t);
+            task.set_time_to_complete(now, secs);
         }
     }
 
@@ -400,5 +399,18 @@ mod tests {
         q.remove_timed_out_schedules(5.0);
         assert_eq!(q.iter().count(), 1);
         assert!(!q.current().unwrap().timed_out(5.0));
+    }
+
+    #[test]
+    fn a_schedule_times_out_secs_from_now() {
+        // Upstream's `2 * now + secs` never came at a late game time (design §5.50).
+        let mut q = Tasks::default();
+        q.add_to_end(t(TaskKind::Wait, 1, 0));
+        q.add_to_end(t(TaskKind::FindPath, 3, 0));
+        q.add_to_end(t(TaskKind::Use, 3, 0));
+        q.set_time_to_complete_schedule(3, 500.0, 10.0);
+        assert!(q.iter().filter(|x| x.schedule_id == 3).all(|x| x.time_to_complete == 510.0));
+        q.remove_timed_out_schedules(511.0);
+        assert_eq!(q.iter().count(), 1);
     }
 }

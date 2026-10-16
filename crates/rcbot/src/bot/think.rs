@@ -6,7 +6,7 @@
 //! `menuselect 7` (marked "doesn't work") is replaced by the loadout the gun choice buys.
 
 use super::look::make_vectors;
-use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, LookTask, TS_STATE_STUNT, Task, TaskKind, buttons, cond};
+use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, LookTask, Task, TaskKind, buttons, cond};
 use crate::config::flags as cfg;
 use crate::learn::BotLearnedData;
 use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl};
@@ -18,6 +18,9 @@ use crate::{Random, Vector};
 const INVENTORY_SYNC: f32 = 1.0;
 /// Seconds a weapon switch waits for the game before it may be asked again.
 const SWITCH_WAIT: f32 = 1.0;
+
+/// Seconds to reach the first waypoint of a path found (then each touch gives 20-30 s more).
+const PATH_TIMEOUT: f32 = 30.0;
 
 /// A move this long in one frame is a teleport (nothing in TS runs a player 256 units in a
 /// frame at any usual frame rate).
@@ -131,6 +134,7 @@ impl Bot {
         self.update_waypoint_time = 0.0;
         self.stuck_time = 0.0;
         self.last_no_move = 0.0;
+        self.unstick = Default::default();
         self.ladder_angles = None;
     }
 
@@ -180,6 +184,8 @@ impl Bot {
         self.prev_waypoint_dist = 4096.0;
         self.last_see_waypoint = 0.0;
         self.stuck_time = 0.0;
+        self.unstick = Default::default();
+        self.dive_time = 0.0;
         self.move_speed = 0.0;
         self.up_speed = 0.0;
         self.strafe_speed = 0.0;
@@ -236,6 +242,7 @@ impl Bot {
         if !self.paths.failed_goals.is_empty() && self.paths.next_clear_failed_goals < now {
             self.paths.failed_goals.clear();
         }
+        self.paths.expire_backed_off_goals(now);
         self.squad_think(g, w);
         if !self.has(cond::WANT_TO_LEAVE_GAME) && g.config.is_on(cfg::BOTS_LEAVE_AND_JOIN) && self.want_to_leave_game(w, rng) {
             self.set(cond::WANT_TO_LEAVE_GAME);
@@ -283,6 +290,7 @@ impl Bot {
         self.work_view_angles(w, rng);
         self.work_move_direction(w, g);
         self.check_stuck(w, g, rng);
+        self.dive_landing(now);
 
         if self.last_think_time >= now {
             return;
@@ -760,11 +768,9 @@ impl Bot {
                 if self.tasks.current().is_some_and(|t| t.float < now) {
                     done = true;
                 }
-                if self.state.stunt_state != TS_STATE_STUNT {
-                    self.alt_button();
-                } else {
-                    self.stop_moving();
-                }
+                // Upstream dived (`+alt1`) until prone on every think, which standing still does
+                // nothing in TS 3.0 outside slow motion (design §4).
+                self.stop_moving();
             }
             TaskKind::ListenToSound => self.task_listen(w, rng, task, &mut done, &mut failed, &mut to_add),
             TaskKind::ChangeWeapon => {
@@ -871,7 +877,7 @@ impl Bot {
                         self.nearest_waypoint(g, w, self.me.origin, REACHABLE_RANGE, self.last_failed_waypoint, true, false, true);
                 }
                 let q = query(self, self.current_waypoint, self.goal_waypoint);
-                match self.astar.search(&mut self.paths, &q, true, g.waypoints, w, rng) {
+                match self.search_path(g, w, rng, &q, true) {
                     crate::nav::AStarResult::NoPath => {
                         *failed = true;
                         return;
@@ -882,6 +888,7 @@ impl Bot {
                 self.push_current_on_path();
                 self.move_to_valid = true;
                 *path_found = true;
+                self.path_deadline(now);
                 let t = self.tasks.current_mut().expect("current task");
                 t.found_path = true;
                 self.paths.failed_goals.clear();
@@ -892,7 +899,7 @@ impl Bot {
             } else if task.float == -2.0 || self.find_path_time < now {
                 self.find_path_time = now + 0.5;
                 if task.float == -1.0 && task.int == -1 {
-                    let goal = g.waypoints.find_random_goal(self.team, 0, &self.paths.failed_goals, rng).map_or(-1, |i| i as i32);
+                    let goal = self.roam_goal(g, now, rng);
                     self.goal_waypoint = goal;
                     let t = self.tasks.current_mut().expect("current task");
                     t.int = goal;
@@ -937,7 +944,7 @@ impl Bot {
                     return;
                 }
                 let q = query(self, self.current_waypoint, self.goal_waypoint);
-                match self.astar.search(&mut self.paths, &q, false, g.waypoints, w, rng) {
+                match self.search_path(g, w, rng, &q, false) {
                     crate::nav::AStarResult::NoPath => {
                         *failed = true;
                         return;
@@ -951,6 +958,7 @@ impl Bot {
                 self.push_current_on_path();
                 self.move_to_valid = true;
                 *path_found = true;
+                self.path_deadline(now);
                 if task.float == -2.0 {
                     *done = true;
                 }
@@ -975,6 +983,18 @@ impl Bot {
                 *done = true;
             }
             self.move_to_valid = true;
+        }
+    }
+
+    /// A path just found must be walked within [`PATH_TIMEOUT`] unless the task has a time
+    /// already: upstream's had none until the first waypoint was touched (then 20-30 s from each
+    /// touch), so a bot that never reached it kept the task for ever (design §4).
+    fn path_deadline(&mut self, now: f32) {
+        if let Some(t) = self.tasks.current_mut()
+            && t.kind == TaskKind::FindPath
+            && t.time_to_complete == -1.0
+        {
+            t.set_time_to_complete(now, PATH_TIMEOUT);
         }
     }
 

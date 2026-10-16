@@ -103,6 +103,9 @@ pub mod flags {
     pub const TS_DONT_STEAL_WEAPONS: i32 = 1 << 23;
     /// `BOT_CONFIG_TS_DONT_PICKUP_WEAPONS`.
     pub const TS_DONT_PICKUP_WEAPONS: i32 = 1 << 24;
+    /// Port addition (`tactical_paths`, design §4): paths avoid dangerous and exposed waypoints
+    /// and teammates' paths ([`crate::nav::Tactics`]). Off: upstream's shortest paths.
+    pub const TACTICAL_PATHS: i32 = 1 << 25;
 }
 
 /// `BOT_DEBUG_*_LEVEL` (`bot_const.h`): the bits of [`Config::debug_levels`].

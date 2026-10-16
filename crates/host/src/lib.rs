@@ -572,7 +572,7 @@ fn report(s: &mut State, a: Api, e: Engine) {
         a.log(
             log::INFO,
             &format!(
-                "bot #{} \"{}\" alive={} wpt={} goal={} touched={} moved={:.0} enemy={:?} weapon={:?} task={task}",
+                "bot #{} \"{}\" alive={} wpt={} goal={} touched={} moved={:.0} enemy={:?} weapon={:?} stuck_kills={} task={task}",
                 b.index,
                 b.name,
                 b.is_alive(),
@@ -581,7 +581,8 @@ fn report(s: &mut State, a: Api, e: Engine) {
                 b.touched_waypoints,
                 st.moved,
                 b.enemy(),
-                b.current_weapon()
+                b.current_weapon(),
+                b.stuck_suicides
             ),
         );
     }

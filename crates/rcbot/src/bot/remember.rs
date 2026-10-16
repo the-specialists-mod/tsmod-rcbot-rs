@@ -41,6 +41,11 @@ impl RememberPositions {
         self.positions.push(p);
     }
 
+    /// The positions, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &RememberPosition> {
+        self.positions.iter()
+    }
+
     /// `gotPosition`.
     pub fn any(&self) -> bool {
         !self.positions.is_empty()

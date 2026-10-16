@@ -14,7 +14,7 @@ pub mod rcz;
 pub mod visibility;
 pub mod waypoints;
 
-pub use astar::{AStar, AStarBot, AStarQuery, AStarResult, FailedPaths};
+pub use astar::{AStar, AStarBot, AStarQuery, AStarResult, DangerSource, FailedPaths, NoDanger, SearchOptions, Tactics};
 pub use file::{LoadError, RcwHeader};
 pub use locations::{Locations, NearestOptions};
 pub use visibility::VisibilityTable;

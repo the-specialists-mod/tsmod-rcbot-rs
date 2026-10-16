@@ -14,6 +14,7 @@
 pub mod botcam;
 mod combat;
 pub mod events;
+mod goals;
 pub mod kungfu;
 mod look;
 mod manager;
@@ -428,6 +429,9 @@ pub struct BotGlobals<'a> {
     pub chat: &'a crate::chat::bot_chat::BotChatMessages,
     /// `gpGlobals->mapname`.
     pub map_name: &'a str,
+    /// The danger of each waypoint (the learned heat map) for tactical paths and looking around;
+    /// `None`: no waypoint is more dangerous than another (port addition, design §4).
+    pub danger: Option<&'a dyn crate::nav::DangerSource>,
 }
 
 /// `eBotCondition` bits (`bot_const.h`) the TS bot uses.
@@ -562,6 +566,14 @@ pub struct Bot {
     pub(crate) velocity_2d: f32,
     pub(crate) last_no_move: f32,
     pub(crate) stuck_time: f32,
+    /// What the bot tried against getting stuck at the place it is stuck now (design §4).
+    pub(crate) unstick: movement::Unstick,
+    /// Times the bot killed itself after being stuck for [`movement::STUCK_SUICIDE`] seconds with
+    /// nothing else working (for `debug` and the host's log).
+    pub stuck_suicides: u32,
+    /// When the bot last dived (TS's `+alt1` stunt) on its own: it holds duck through the
+    /// landing and gets up if it lands prone (design §4). 0 for none.
+    pub(crate) dive_time: f32,
 
     pub(crate) turn_speed: f32,
     /// `gBotGlobals.m_fTurnSpeed`, what `SetViewAngles` resets the turn speed to.
@@ -588,6 +600,8 @@ pub struct Bot {
     pub(crate) paths: AStarBot,
     /// Waypoints touched since spawning (for `debug` and the e2e check).
     pub touched_waypoints: u32,
+    /// When the bot was last at each waypoint, for roaming (design §4).
+    pub(crate) explore: goals::Explore,
 
     pub(crate) enemy: Option<EntRef>,
     pub(crate) last_enemy: Option<EntRef>,
@@ -711,6 +725,9 @@ impl Bot {
             velocity_2d: 0.0,
             last_no_move: 0.0,
             stuck_time: 0.0,
+            unstick: movement::Unstick::default(),
+            stuck_suicides: 0,
+            dive_time: 0.0,
             turn_speed: config.turn_speed,
             base_turn_speed: config.turn_speed,
             ladder_angles: None,
@@ -732,6 +749,7 @@ impl Bot {
             astar: AStar::new(),
             paths: AStarBot::default(),
             touched_waypoints: 0,
+            explore: goals::Explore::default(),
             enemy: None,
             last_enemy: None,
             enemy_rep: None,

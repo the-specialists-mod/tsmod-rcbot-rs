@@ -214,6 +214,7 @@ fn walks_along_waypoints() {
             rep_ids: &extra.reps,
             chat: &extra.chat,
             map_name: "test",
+            danger: None,
         };
         let f = bot.frame(&mut g, &plane, &mut rng);
         if let Some(cmd) = f.cmd {
@@ -248,6 +249,7 @@ fn attacks_a_visible_enemy() {
             rep_ids: &extra.reps,
             chat: &extra.chat,
             map_name: "test",
+            danger: None,
         };
         let f = bot.frame(&mut g, &plane, &mut rng);
         if let Some(cmd) = f.cmd {
@@ -362,6 +364,7 @@ impl Rig {
             rep_ids: &self.extra.reps,
             chat: &self.extra.chat,
             map_name: "ts_test",
+            danger: None,
         };
         f(&mut self.bot, &mut g)
     }
@@ -1294,4 +1297,222 @@ fn the_visible_list_keeps_its_order_and_membership() {
     assert!(v.contains(7) && v.contains(2) && !v.contains(300) && !v.contains(5) && !v.contains(9000));
     v.set(300, true);
     assert_eq!(v.to_vec(), vec![7, 2, 300]);
+}
+
+/// A shipped TS waypoint file (`data/rcbot/waypoints/ts`).
+fn real_map(name: &str) -> Waypoints {
+    let path = format!("{}/../../data/rcbot/waypoints/ts/{name}.rcw", env!("CARGO_MANIFEST_DIR"));
+    let bytes = std::fs::read(path).unwrap();
+    Waypoints::from_rcw(&bytes, name).unwrap().0
+}
+
+/// The waypoints a bot may go to: not deleted, aiming or unreachable, and with a path out.
+fn live_waypoints(wp: &Waypoints) -> Vec<usize> {
+    (0..wp.len())
+        .filter(|&i| wp.flags(i as i32) & (fl::DELETED | fl::AIMING | fl::UNREACHABLE) == 0 && !wp.successors(i, -1).is_empty())
+        .collect()
+}
+
+/// The rig's bot on a real waypoint graph in the plane (no walls, no floors: each frame the bot is
+/// put at the height of the waypoint it heads for). `frozen` frames don't move it (something in
+/// the way); `each` sees every frame.
+fn walk_real(
+    rig: &mut Rig,
+    w: &mut Plane,
+    rng: &mut XorShiftRandom,
+    frames: usize,
+    frozen: impl Fn(usize) -> bool,
+    mut each: impl FnMut(&Bot, usize),
+) {
+    for i in 0..frames {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, w, rng));
+        if let Some(cmd) = f.cmd {
+            if frozen(i) {
+                block(w, &cmd);
+            } else {
+                w.apply(1, &cmd);
+            }
+        }
+        let z = usize::try_from(rig.bot.current_waypoint).ok().map(|c| rig.wp.origin(c as i32).z);
+        if let Some(z) = z {
+            let mut ents = w.ents.borrow_mut();
+            let me = &mut ents[0];
+            me.origin.z = z;
+            me.absmin = me.origin - Vector::new(16.0, 16.0, 36.0);
+            me.absmax = me.origin + Vector::new(16.0, 16.0, 36.0);
+        }
+        each(&rig.bot, i);
+    }
+}
+
+/// Something in the bot's way: its usercmd turns it and presses its buttons, but it doesn't move.
+fn block(w: &Plane, cmd: &BotCmd) {
+    let mut ents = w.ents.borrow_mut();
+    let me = &mut ents[0];
+    me.v_angle = cmd.angles;
+    me.button = cmd.buttons;
+    me.velocity = Vector::ZERO;
+}
+
+/// A bot on `map` at its first live waypoint.
+fn real_rig(map: &str) -> (Rig, Plane) {
+    let mut rig = Rig::new(Config::default());
+    rig.wp = real_map(map);
+    let start = rig.wp.origin(live_waypoints(&rig.wp)[0] as i32);
+    (rig, plane(vec![player(1, start, 0)]))
+}
+
+#[test]
+fn roaming_goals_cover_the_whole_map() {
+    // Upstream drew roaming goals from the first 50 waypoints only (17-37% of these maps).
+    for map in ["ts_dojo", "ts_lobby", "ts_awaken", "ts_theatre"] {
+        let (mut rig, _) = real_rig(map);
+        let live = live_waypoints(&rig.wp);
+        let mut rng = XorShiftRandom::new(11);
+        let mut seen = std::collections::HashSet::new();
+        let mut upstream = std::collections::HashSet::new();
+        let mut now = 10.0;
+        for _ in 0..live.len() * 12 {
+            now += 1.0;
+            let goal = rig.with(|b, g| b.roam_goal(g, now, &mut rng));
+            assert!(goal >= 0, "{map}");
+            seen.insert(goal as usize);
+            rig.bot.explore.touch(goal, now);
+            upstream.insert(rig.wp.find_random_goal(-1, 0, &[], &mut rng).unwrap());
+        }
+        let covered = live.iter().filter(|i| seen.contains(i)).count();
+        assert!(covered * 100 >= live.len() * 95, "{map}: {covered} of {}", live.len());
+        assert!(upstream.len() <= 50, "{map}");
+    }
+}
+
+#[test]
+fn a_bot_roams_over_a_real_map() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let mut rng = XorShiftRandom::new(5);
+    let (mut touched, mut goals) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        9000,
+        |_| false,
+        |b, _| {
+            touched.insert(b.current_waypoint);
+            goals.insert(b.goal_waypoint);
+        },
+    );
+    // Three minutes: half the map, and goals all over it (upstream's could only be the first 50
+    // waypoints).
+    let touched = live.iter().filter(|&&i| touched.contains(&(i as i32))).count();
+    assert!(touched * 2 >= live.len(), "{touched} of {} waypoints", live.len());
+    assert!(goals.iter().filter(|&&g| g >= 50).count() >= 15, "{goals:?}");
+    assert_eq!(rig.bot.stuck_suicides, 0);
+}
+
+#[test]
+fn a_stuck_bot_goes_back_once_then_fails_the_path_within_3_s() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(8);
+    // Walk until the bot is on its way between two waypoints.
+    let mut frames = 0;
+    let between = |b: &Bot, wp: &Waypoints| {
+        b.prev_waypoint >= 0
+            && b.current_waypoint >= 0
+            && b.prev_waypoint != b.current_waypoint
+            && wp.distance(b.me.origin, b.prev_waypoint) > 64.0
+            && wp.distance(b.me.origin, b.current_waypoint) > 64.0
+    };
+    while !between(&rig.bot, &rig.wp) && frames < 3000 {
+        walk_real(&mut rig, &mut w, &mut rng, 1, |_| false, |_, _| {});
+        frames += 1;
+    }
+    let (prev, cur) = (rig.bot.prev_waypoint, rig.bot.current_waypoint);
+    assert!(prev >= 0 && cur >= 0, "never got going");
+    let edge = rig.wp.find_path_from_to(prev as usize, cur as usize, -1);
+    // Something blocks the way for 3 s.
+    let mut currents = Vec::new();
+    let mut failed_at = None;
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        150,
+        |_| true,
+        |b, i| {
+            currents.push(b.current_waypoint);
+            if failed_at.is_none() && edge.is_some_and(|e| b.paths.failed_paths.contains(e)) {
+                failed_at = Some(i);
+            }
+        },
+    );
+    // Back to the previous waypoint once (upstream: one index down each frame for a second).
+    let before_fail = &currents[..failed_at.unwrap_or(currents.len())];
+    assert!(before_fail.iter().all(|&c| c == prev || c == cur), "{prev} -> {cur}: {before_fail:?}");
+    let failed_at = failed_at.expect("the path it was stuck on fails");
+    assert!(failed_at < 150, "{failed_at}");
+    assert!(!rig.bot.kill);
+}
+
+#[test]
+fn stuck_again_at_the_same_place_escalates_and_never_kills_in_a_fight() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(8);
+    walk_real(&mut rig, &mut w, &mut rng, 100, |_| false, |_, _| {});
+    let mut levels = Vec::new();
+    let mut backed_up = false;
+    let mut dived_or_wall_jumped = false;
+    for _ in 0..600 {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        if let Some(cmd) = f.cmd {
+            backed_up |= rig.bot.unstick.back_until > w.time && cmd.forward < 0.0;
+            dived_or_wall_jumped |= cmd.buttons & buttons::ALT1 != 0;
+            block(&w, &cmd);
+        }
+        if levels.last() != Some(&rig.bot.unstick.level) {
+            levels.push(rig.bot.unstick.level);
+        }
+    }
+    assert!(levels.contains(&3), "{levels:?}");
+    assert!(backed_up && dived_or_wall_jumped);
+    // 12 s without moving: not yet the last resort (upstream killed the bot after 8 s).
+    assert_eq!(rig.bot.stuck_suicides, 0);
+    let mut killed_at = None;
+    for _ in 0..2000 {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        if f.actions.contains(&Action::Kill) {
+            killed_at = Some(w.time);
+            break;
+        }
+        if let Some(cmd) = f.cmd {
+            block(&w, &cmd);
+        }
+    }
+    assert_eq!(rig.bot.stuck_suicides, 1, "killed at {killed_at:?}");
+    // Blocked since about 3 s.
+    assert!(killed_at.unwrap() > 3.0 + movement::STUCK_SUICIDE);
+}
+
+#[test]
+fn a_dive_holds_duck_through_the_landing_and_gets_up_if_prone() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.dive(1.0);
+    assert_ne!(rig.bot.button & buttons::ALT1, 0);
+    // Duck held from just after the dive through the landing.
+    for t in [1.2, 1.8, 2.4] {
+        let cmd = rig.bot.run_player_move(t, 0.02).unwrap();
+        assert_ne!(cmd.buttons & buttons::DUCK, 0, "{t}");
+    }
+    // Landed prone anyway: it jumps up.
+    rig.bot.state.stunt_state = TS_STATE_STUNT;
+    rig.bot.dive_landing(2.0);
+    let cmd = rig.bot.run_player_move(2.05, 0.02).unwrap();
+    assert_ne!(cmd.buttons & buttons::JUMP, 0);
+    assert_eq!(rig.bot.dive_time, 0.0);
 }

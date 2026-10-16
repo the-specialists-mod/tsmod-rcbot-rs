@@ -203,7 +203,8 @@ quoted), `bot_playerids.ini` (`"name"` per line; the line number is the reputati
 
 Where the port behaves differently from upstream on purpose. Everything else, quirks included, is
 kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the team checks, the
-50-candidate random goals, the bucket search order.
+50-candidate random goals (`find_random_goal`, which the bots no longer use for roaming), the
+bucket search order.
 
 * **Waypoints outside ±4096 on load**: upstream marks one deleted at the origin but doesn't count
   it, which misaligns every later index and the path section; the port marks it the same way and
@@ -398,6 +399,43 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
 
+Navigation, movement and tactics (#1, phase 3: bots that move like experienced TS players):
+
+* **Stuck recovery** (`movement.rs` `Unstick`): upstream's `CheckStuck` ran `gotStuck` on every
+  frame between 1 and 2 s of being stuck, each time one waypoint *index* back (§5.52), then failed
+  whatever path that left, and killed the bot after 8 s without progress, in a fight or not. The
+  port reacts once per stuck event: back to the previous waypoint (the one it was heading for
+  goes back on the path after it); at 2 s the path it was on when it got stuck fails and the bot
+  finds another way from the nearest waypoint but that one. Stuck again at the same place within
+  4 s escalates: backing up and strafing, a crouch jump, then a wall jump when facing a wall or
+  else a dive. Suicide is the last resort: 20 s at one place (or without progress), never with an
+  enemy in sight in the last 5 s, counted (`Bot::stuck_suicides`, `stuck_kills` in the host's
+  log).
+* **Roaming** (`roam_goal`, `Waypoints::find_weighted_goal`): upstream's random goal is one of
+  the first 50 usable waypoints (`int indexes[50]`), 17-37% of the shipped maps; the port draws
+  from all of them, weighted by how long the bot hasn't been there (`goals.rs` `Explore`, up to
+  2 min) and less for goals within 400 units. A goal reached stays off the roaming list until the
+  next clear (upstream took a goal it reached twice off the list instead).
+* **Dives** (`Bot::dive`): TS 3.0 dives (`+alt1`) land prone unless duck, jump or the stunt key is
+  held; upstream pressed the key alone at stunt waypoints, and `DEFEND` pressed it on every think
+  until prone, which standing still does nothing outside slow motion. A bot's own dive holds duck
+  from 0.15 to 1.5 s, so it rolls out of the landing, and a bot that lands prone anyway jumps to
+  get up; `DEFEND` no longer presses it.
+* **Task timeouts**: `SetTimeToCompleteSchedule` times out `secs` from now (upstream's `2 * now +
+  secs` never came, §5.50); a `FIND_PATH` that found its path has 30 s to reach the first waypoint
+  (upstream: no limit until a waypoint was touched, then 20-30 s per touch, as now). A goal A*
+  can't reach stays failed instead of being taken off the list by a second failure, and is backed
+  off for 30-60 s (`AStarBot::backed_off_goals`, past upstream's clear of every failed goal 5-10 s
+  after the last failure); `SearchOptions::UPSTREAM` keeps upstream's search for the reference
+  tests.
+* **Tactical paths** (`rcbot config tactical_paths 1`, off by default: upstream's shortest
+  paths; `nav::Tactics`): an edge into waypoint `w` costs its length times `1 + 2 danger(w) +
+  1.5 exposure(w) + 0.5 crowded(w)`: `danger` from the learned heat map (`BotGlobals::danger`, a
+  `nav::DangerSource`; none yet), `exposure` the waypoints near where enemies were lately seen that
+  see `w` (the visibility table), `crowded` teammates' paths. The heuristic is then the distance to
+  the goal alone (upstream adds the distance from the bot, which overestimates), admissible as
+  every factor is at least 1 (teleports, which cost nothing, excepted).
+
 ## 5. Upstream bugs found
 
 Found while porting; not filed upstream.
@@ -550,11 +588,12 @@ Found while porting; not filed upstream.
     max clip (§4): the largest clip seen is kept, so `NeedToReload` makes `NORMAL_ATTACK` take
     cover and press reload, as upstream means to; `m_iAmmo1` stays NULL (`CanReload` false).
 50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
-    `2 * time + secs`. Kept.
+    `2 * time + secs`. **Fixed** (§4).
 51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not
     from now. Kept.
 52. **`gotStuck` decrements the waypoint index** (`bot.cpp:8000`) instead of going back to the
-    previous waypoint. Kept.
+    previous waypoint, and `CheckStuck` calls it on every frame of the second second of being
+    stuck (about 100 decrements at 100 Hz), then fails the path that left. **Fixed** (§4).
 53. **Remembered positions**: up to 9 are kept (`Size() > MAX_REMEMBER_POSITIONS`), positions
     without an entity all compare equal (`bot.h:1888`), and `EnemyDown` runs after
     `NORMAL_ATTACK` cleared the enemy, so nothing is removed. Kept.
@@ -647,6 +686,14 @@ those by going through the port's own code when that code is ported.
   the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
   wall jump; `.rkf` round trip and damaged files; combos bred from the best.
 
+* **Navigation** (`bot/tests.rs`, on shipped `.rcw` graphs in the plane world, the bot put at
+  the height of the waypoint it heads for): roaming goals cover at least 95% of four maps' usable
+  waypoints (upstream's at most 50); a bot roaming ts_dojo for three minutes touches half the map
+  with goals all over it; a bot blocked between two waypoints goes back to the previous one once
+  (no index jumps) and fails that path within 3 s; blocked for good, it escalates (backing up, a
+  dive or wall jump) and kills itself only after 20 s; a dive holds duck through the landing and
+  jumps up from prone. A* unit tests: failed goals backed off, tactical costs (danger, exposure,
+  teammates' paths), zero tactics giving shortest paths.
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,

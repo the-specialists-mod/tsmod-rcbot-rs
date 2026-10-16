@@ -44,6 +44,8 @@ macro_rules! globals {
             rep_ids: $reps,
             chat: &$s.chat,
             map_name: &$s.map,
+            // The learned heat map, once there is one (design §4).
+            danger: None,
         }
     };
 }
