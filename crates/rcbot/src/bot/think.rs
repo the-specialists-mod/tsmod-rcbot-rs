@@ -339,7 +339,7 @@ impl Bot {
                     // weapon (design §4; upstream took `GetBestWeaponId`'s pick by priority).
                     let dist = self.distance_from(enemy.entity_origin(), false);
                     let slow = crate::weapons::ts_data::gun_data(cur.id).is_none_or(|d| d.reload > 1.0);
-                    match self.best_scored_weapon(dist, Some(cur.id)) {
+                    match self.best_scored_weapon(g, dist, Some(cur.id)) {
                         Some((best, _)) if (dist < 600.0 && slow) || !cur.can_reload() => {
                             self.switch_weapon(best);
                         }
@@ -1116,7 +1116,7 @@ impl Bot {
                 if self.me.health < self.me.max_health * 0.38 && enemy.health > self.me.health {
                     self.run_for_cover(g, w, enemy_origin, false, rng);
                 }
-                self.choose_weapon(dist, now);
+                self.choose_weapon(g, dist, now);
                 self.fight.spread_limit = (self.spread_limit(dist), now + 0.1);
                 if cur.as_ref().is_some_and(|c| c.need_to_reload()) {
                     self.run_for_cover(g, w, enemy_origin, false, rng);

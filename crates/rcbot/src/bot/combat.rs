@@ -401,7 +401,10 @@ impl Bot {
                 continue;
             }
             let rep = if e.is_client() { self.rep_of(g, e.index) } else { None };
-            let score = self.threat(&e, rep, now);
+            // What every bot learned of this player (0.25-4x), damped: a known ace is fought
+            // first, a known novice later (design §4).
+            let learned = if e.is_client() { self.learned_threat(g, e.index).sqrt() } else { 1.0 };
+            let score = self.threat(&e, rep, now) * learned;
             if current.as_ref().is_some_and(|c| c.index == e.index) {
                 current_score = score;
             }
@@ -510,7 +513,13 @@ impl Bot {
         }
         let now = w.time();
         let id = self.tasks.new_schedule_id();
-        let mut cover = g.waypoints.cover_waypoint(self.me.origin, origin, &self.paths.failed_goals, w).map_or(-1, |i| i as i32);
+        // Cover where the team doesn't keep dying (the learned heatmap, design §4).
+        let heatmap = &g.learned.heatmap;
+        let team = self.team;
+        let mut cover = g
+            .waypoints
+            .cover_waypoint_weighted(self.me.origin, origin, &self.paths.failed_goals, w, &|i| heatmap.cover_penalty(i, team))
+            .map_or(-1, |i| i as i32);
         self.add_priority_task(Task::new(TaskKind::Crouch, id, None, 0, rng.random_float(1.0, 2.0), Vector::ZERO));
         if cover == -1 {
             cover = self.nearest_waypoint(g, w, self.lowest_enemy_cost_vec, 320.0, -1, true, false, false);

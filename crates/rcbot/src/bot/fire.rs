@@ -6,6 +6,7 @@
 //! burst gun once and then never again until the key is let go (`CTSGun::PrimaryAttack` fires
 //! those on a fresh press only).
 
+use super::BotGlobals;
 use super::look::{dot, make_vectors};
 use super::{Bot, Entity, buttons};
 use crate::weapons::TsWeapon;
@@ -408,14 +409,29 @@ impl Bot {
         }
     }
 
+    /// [`weapon_score`](Self::weapon_score) corrected by what the weapon has done for this bot at
+    /// that range (the learned table, design §4), once the bot has enough time with it there: the
+    /// learned damage a second over the theory's, damped by a square root and kept within
+    /// 0.5-1.4x, so experience tips close calls without overruling the gun's numbers.
+    pub(crate) fn learned_score(&self, g: &BotGlobals<'_>, id: i32, dist: f32) -> f32 {
+        let theory = self.weapon_score(id, dist);
+        if theory <= 0.0 {
+            return theory;
+        }
+        match self.learned_weapon_score(g, id, dist) {
+            Some(learned) => theory * (learned / theory).max(0.0).sqrt().clamp(0.5, 1.4),
+            None => theory,
+        }
+    }
+
     /// The best weapon the bot owns for `dist` other than `except`, with its score.
-    pub(crate) fn best_scored_weapon(&self, dist: f32, except: Option<i32>) -> Option<(i32, f32)> {
+    pub(crate) fn best_scored_weapon(&self, g: &BotGlobals<'_>, dist: f32, except: Option<i32>) -> Option<(i32, f32)> {
         let mut best: Option<(i32, f32)> = None;
         for id in 1..crate::weapons::MAX_WEAPONS as i32 {
             if Some(id) == except {
                 continue;
             }
-            let score = self.weapon_score(id, dist);
+            let score = self.learned_score(g, id, dist);
             if score > 0.0 && best.is_none_or(|(_, b)| score > b) {
                 best = Some((id, score));
             }
@@ -427,7 +443,7 @@ impl Bot {
     /// dry): every 0.5 s, not while a reload runs or a switch is pending, when another weapon is
     /// worth 30% more (and a little) than the one in hand. A kung fu power-up running makes the
     /// bot fight hand to hand within 300 units.
-    pub(crate) fn choose_weapon(&mut self, dist: f32, now: f32) {
+    pub(crate) fn choose_weapon(&mut self, g: &BotGlobals<'_>, dist: f32, now: f32) {
         if self.fight.next_weapon_choice > now || self.switch_pending.is_some() {
             return;
         }
@@ -442,8 +458,8 @@ impl Bot {
         if reloading || self.weapons.get(cur).is_some_and(|w| w.clip_is_empty()) {
             return;
         }
-        let here = self.weapon_score(cur, dist);
-        if let Some((best, score)) = self.best_scored_weapon(dist, Some(cur))
+        let here = self.learned_score(g, cur, dist);
+        if let Some((best, score)) = self.best_scored_weapon(g, dist, Some(cur))
             && score > here * 1.3 + 1.0
         {
             self.switch_weapon(best);
