@@ -181,7 +181,9 @@ impl Bot {
         if self.me.groundentity == Some(e.index) || e.index == self.index || e.effects & EF_NODRAW != 0 {
             return false;
         }
-        if self.enemy == Some(e.handle()) && self.current_weapon.and_then(|id| self.weapons.get(id)).is_some_and(|wp| wp.is_melee()) {
+        // Upstream stepped around its enemy unless it held a blade; the fight's own movement
+        // keeps the distance now (design §4).
+        if self.enemy == Some(e.handle()) {
             return false;
         }
         if dist > avoid_dist || self.is_on_ladder() || self.current_waypoint_flags & crate::nav::flags::LADDER != 0 {
@@ -396,14 +398,17 @@ impl Bot {
         self.enemy
     }
 
-    /// `CBot::EnemyFound`. Upstream sets `m_fStrafeTime` to 2-6 *seconds since the map
-    /// started*, not from now (design §5); kept.
+    /// `CBot::EnemyFound`. Upstream set `m_fStrafeTime` to 2-6 *seconds since the map started*
+    /// and a strafe speed of 1 (design §5.51); the fight's own strafe replaces both. A new enemy
+    /// starts the reaction time (0.35 s, down to 0.15 s with skill: no shot before it) and the
+    /// aim's settling (design §4).
     pub(crate) fn enemy_found(&mut self, g: &mut BotGlobals<'_>, e: &Entity, now: f32, rng: &mut dyn Random) {
         self.set(cond::SEE_ENEMY);
-        self.strafe_speed = 1.0;
-        self.strafe_time = rng.random_float(2.0, 6.0);
         self.enemy = Some(e.handle());
         self.first_see_enemy_time = now;
+        let skill = (self.profile.skill as f32 / crate::config::MAX_BOT_SKILL as f32).clamp(0.0, 1.0);
+        self.fight.react_at = now + 0.35 - 0.2 * skill;
+        self.fight.on_target_since = now;
         self.squad_enemy_found(g.squads);
         self.remembered.add(e.entity_origin(), Some(e.handle()), REMEMBER_1ST_SEE_ENEMY, self.me.origin);
         self.investigate_sound_time = now + 2.0;

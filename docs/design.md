@@ -417,6 +417,37 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **Blades**: TS 3.0's `+attack2` throws a knife and throws the katana away; upstream pressed it
   nine times in ten within 72 units. The bot slashes with `+attack` within 72 units, and throws a
   knife only when it has a spare (more than one) at an enemy 150-500 units away it is aiming at.
+* **Aim** (`look.rs` `aim_vector`, `turn_to`): upstream offset the aim point by a random
+  `aim_factor * (size / 2 + velocity)` units per axis, redrawn every 0.8-1.2 s (±100 units
+  against a running player), made worse against disliked players (§5.74), and turned the view a
+  fixed 1/11.25 of what was left each frame (slower at higher frame rates). The bot now leads the
+  aim point by the enemy's velocity over a frame (and over the bullet's flight when the bot is in
+  slow motion, whose bullets are simulated: `velocity * 40 u/m * GetBulletVelocityMult`), and
+  misses by an angle in the view plane: 0.3-1.5 degrees by skill (less with aim skill), plus 0.02
+  of the enemy's angular speed and 0.01 of the bot's own turn rate, three times that on a new
+  target settling with a 0.2 s time constant; its direction is redrawn every 0.25-0.5 s.
+  Reputation no longer touches the aim (it still orders the enemies). The view turns in time:
+  each axis closes on the aim with a 0.04-0.16 s time constant (skill, aim speed), follows the
+  aim point's own angular speed, and turns at most 360-1080 degrees a second. Other looks keep
+  upstream's turning.
+* **When to fire**: no shot until a reaction time after a new enemy appears (0.35 s, down to
+  0.15 s with skill; upstream's `m_fFirstSeeEnemyTime` was never read), and only with the view
+  within 1.5 times the angle a 14-unit radius makes at the enemy's distance of where the bot means
+  to aim. The recoil penalty is kept as the game does from the clip's shots (`ScaleSpread`: `(1 -
+  x) * acc_kick * 2` a shot, `x` the time since the last, 0.5 from a second up, at most 0.1,
+  halved with double fire rate; `PreThink` takes 0.1 a second; the Barrett fired faster than 35
+  units/s starts at 0.3, the M60 faster than 175 kicks five times as hard): a shot needs base
+  spread plus penalty within 1-3 (by skill) times that angle, or the gun's best; automatic fire
+  lets go of the trigger in any usercmd the penalty passes it (bursts at range), and the Barrett
+  waits about a second between shots. An infinite clip doubles the allowance (spray).
+* **Moving in a gunfight**: upstream walked to `m_vLowestEnemyCostVec` within 256 units, which is
+  always 192 units to the -x/-y side (§5.55), and stepped around its enemy unless it held a blade
+  (`CanAvoid`). The bot keeps the gun's range (a shotgun closes to 250 units, a rifle backs off
+  under 300, the Barrett under 500, others hold 150-800) and strafes left and right in 0.25-0.6 s
+  spells at full speed, mostly changing direction (moving costs TS 3.0's guns no accuracy),
+  crouching in one spell in seven; the enemy is never stepped around. The Barrett stands still
+  to shoot, the M60 keeps under 170 units/s. A strafe under way survives a think without a place
+  to go (`WorkMoveDirection` zeroed it, which also stopped kung fu's circling).
 
 ## 5. Upstream bugs found
 
@@ -573,7 +604,7 @@ Found while porting; not filed upstream.
 50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
     `2 * time + secs`. Kept.
 51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not
-    from now. Kept.
+    from now (with a strafe speed of 1). **Fixed**: the fight's own strafe replaces it (§4).
 52. **`gotStuck` decrements the waypoint index** (`bot.cpp:8000`) instead of going back to the
     previous waypoint. Kept.
 53. **Remembered positions**: up to 9 are kept (`Size() > MAX_REMEMBER_POSITIONS`), positions
@@ -583,7 +614,8 @@ Found while porting; not filed upstream.
     the bot against its own PVS. Kept.
 55. **The enemy-cost buckets all get the same cost** (`workEnemyCosts`, `bot.cpp:16873`): the
     cheapest is always the first, so `m_vLowestEnemyCostVec`, where bots back off to within 256
-    units of an enemy, is always 192 units to the -x/-y side. Kept.
+    units of an enemy, is always 192 units to the -x/-y side. Kept for `RunForCover`'s fallback;
+    the fight no longer walks there (§4).
 56. **`WantToFollowEnemy` ignores its perceptron** (`bot.cpp:11040`, "Not required?"): the bot
     follows while above 30% health. Kept.
 57. **Auto-waypoints moved to the floor stay in their old location bucket** (`client.cpp:541`,
@@ -640,6 +672,11 @@ Found while porting; not filed upstream.
 73. **Held reload key** (`BOT_TASK_RELOAD`, `bot.cpp`): the task presses `IN_RELOAD` every think
     for 0.5-1.5 s whatever the weapon; with TS kung fu or a blade that key is the block, so a
     bot that switched weapons blocked over and over, draining its power. **Fixed** (§4).
+
+74. **Disliked players are aimed at worse** (`GetAimVector`, `bot.cpp`): the aim factor is
+    `(MAX_BOT_SKILL - skill + (BOT_MAX_REP - rep)) / (MAX_BOT_SKILL + BOT_MAX_REP)`, so the lower
+    the reputation the larger the offset, and the aim is redrawn faster (`aim_time * rep / 10`)
+    for liked players. **Fixed**: reputation no longer steers the aim (§4).
 
 Quirk kept, not a bug as far as can be told: `CPerceptron::setWeights(CBotGAValues*, …)`
 (`perceptron.cpp:74`) sets the bias weight to the bias (1), so GA-bred perceptrons have a fixed

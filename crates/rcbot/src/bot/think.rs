@@ -1097,15 +1097,14 @@ impl Bot {
                 if l.stunt.fired() {
                     self.alt_button();
                 }
+                self.fight.spread_limit = (self.spread_limit(dist), now + 0.1);
                 if cur.as_ref().is_some_and(|c| c.need_to_reload()) {
                     self.run_for_cover(g, w, enemy_origin, false, rng);
                     self.reload(now);
-                } else if self.hold_attack_time > now || rng.random_long(0, 100) < 90 {
+                } else if self.hold_attack_time > now || self.ready_to_fire(&enemy, dist, now) {
                     self.primary_attack();
                 }
-                if dist < 256.0 {
-                    self.set_move_vector(self.lowest_enemy_cost_vec);
-                }
+                self.combat_move(enemy_origin, dist, now, rng);
             }
         } else if self.last_enemy == self.enemy {
             // `HasSeenEnemy`.

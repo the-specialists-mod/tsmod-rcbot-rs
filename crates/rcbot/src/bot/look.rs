@@ -1,7 +1,7 @@
 //! Where the bot looks (`bot.cpp` `CBot::WorkViewAngles`, `SetViewAngles`, `ChangeAngles`
 //! (`BotFunc_ChangeAngles`, by Whistler), `GetAimVector`) and the angle helpers of `util.cpp`.
 
-use super::{BOT_FACE_HURT_TIME, BOT_MAX_REP, Bot, BotWorld, Climb, LookTask};
+use super::{BOT_FACE_HURT_TIME, Bot, BotWorld, Climb, LookTask};
 use crate::config::MAX_BOT_SKILL;
 use crate::nav::MAX_JUMP_HEIGHT;
 use crate::{Random, Vector};
@@ -200,26 +200,23 @@ impl Bot {
                 }
                 self.set_view_angles(self.current_look_dir);
             }
-            LookTask::FaceEnemy => {
-                let saved = self.turn_speed;
-                self.turn_speed = 15.0 * (1.0 - self.profile.aim_speed);
-                if self.turn_speed <= 0.0 {
-                    self.turn_speed = 1.0;
+            LookTask::FaceEnemy => match self.resolve(w, self.enemy) {
+                // A kung fu wall jump faces the wall, not the enemy (design §4).
+                Some(_) if let Some(v) = self.kungfu_face(now) => {
+                    let saved = self.turn_speed;
+                    self.turn_speed = (15.0 * (1.0 - self.profile.aim_speed)).max(1.0);
+                    self.set_view_angles(v);
+                    self.turn_speed = saved;
                 }
-                match self.resolve(w, self.enemy) {
-                    // A kung fu wall jump faces the wall, not the enemy (design §4).
-                    Some(_) if let Some(v) = self.kungfu_face(now) => self.set_view_angles(v),
-                    Some(e) => {
-                        let aim = self.aim_vector(&e, now, rng);
-                        self.set_view_angles(aim);
-                    }
-                    None => {
-                        self.look_task = LookTask::SearchForLastEnemy;
-                        self.search_enemy_time = now + rng.random_float(5.0, 8.0);
-                    }
+                Some(e) => {
+                    let aim = self.aim_vector(&e, now, w.frame_time(), rng);
+                    self.turn_to(aim, now, w.frame_time());
                 }
-                self.turn_speed = saved;
-            }
+                None => {
+                    self.look_task = LookTask::SearchForLastEnemy;
+                    self.search_enemy_time = now + rng.random_float(5.0, 8.0);
+                }
+            },
             LookTask::FaceTaskVector => match self.tasks.current().map(|t| t.vector) {
                 Some(v) => self.set_view_angles(v),
                 None => self.look_task = LookTask::NextWaypoint,
@@ -316,35 +313,101 @@ impl Bot {
         }
     }
 
-    /// `CBot::GetAimVector`: the enemy's middle plus an offset that shrinks with skill, aim skill
-    /// and (for players) reputation, redrawn every `m_fAimTime` or so.
-    pub(crate) fn aim_vector(&mut self, enemy: &super::Entity, now: f32, rng: &mut dyn Random) -> Vector {
-        let origin = self.aim_point(enemy);
-        if self.get_aim_vector_time < now {
-            let speed = match self.enemy_rep {
-                None => {
-                    self.aim_factor = (MAX_BOT_SKILL as f32 - self.profile.skill as f32) / MAX_BOT_SKILL as f32;
-                    0.5
-                }
-                Some(rep) => {
-                    self.aim_factor = (MAX_BOT_SKILL as f32 - self.profile.skill as f32 + (BOT_MAX_REP - rep) as f32)
-                        / (MAX_BOT_SKILL + BOT_MAX_REP) as f32;
-                    let s = rep as f32 / BOT_MAX_REP as f32;
-                    if s == 0.0 { 0.1 } else { s }
-                }
-            };
-            let factors = enemy.size * 0.5 + enemy.velocity;
-            self.aim_factor *= 1.0 - self.profile.aim_skill;
-            let (fx, fy, fz) = (self.aim_factor * factors.x, self.aim_factor * factors.y, self.aim_factor * factors.z);
-            self.offset_vector = Vector::new(rng.random_float(-fx, fx), rng.random_float(-fy, fy), rng.random_float(-fz, fz));
-            if self.zoom {
-                self.offset_vector = self.offset_vector * 0.5;
-            }
-            self.get_aim_vector_time = now + rng.random_float(self.profile.aim_time - 0.2, self.profile.aim_time + 0.2) * speed;
+    /// `CBot::GetAimVector`, rewritten (design §4): the aim point ([`Bot::aim_point`]) led by
+    /// the enemy's velocity over a frame (and over the bullet's flight when the bot is in slow
+    /// motion: its bullets are then simulated), off by an angular error in the view plane. The
+    /// error is a skill-scaled base (0.3-1.5 degrees, less with aim skill) plus a part of the
+    /// enemy's angular speed and of the bot's own turn rate, and settles over about 0.2 s on a
+    /// new target; its direction is redrawn every 0.25-0.5 s. Upstream offset the point by up to
+    /// `aim_factor * (size / 2 + velocity)` units per axis (±100 units against a running player)
+    /// and made disliked players' aim worse; reputation no longer steers the aim.
+    pub(crate) fn aim_vector(&mut self, enemy: &super::Entity, now: f32, frame_time: f32, rng: &mut dyn Random) -> Vector {
+        let gun = self.gun_position();
+        let mut point = self.aim_point(enemy);
+        let dist = (point - gun).length().max(1.0);
+        let mut lag = frame_time.max(0.01);
+        let ts = self.state.time_scale;
+        if ts > 0.0
+            && ts < 0.99
+            && let Some(g) = self.gun_in_hand()
+        {
+            // `GetBulletVelocityMult`: the bullet flies at `velocity * 40 u/m` times this.
+            let mult = ts / (1.0 - ts * ts).max(1.0);
+            lag += dist / (g.velocity * 40.0 * mult);
         }
-        let target = origin + self.offset_vector;
+        point = point + enemy.velocity * lag;
+        self.fight.aim_true = Some(point);
+
+        let dir = (point - gun).normalize();
+        let rel = enemy.velocity - self.me.velocity;
+        let perp = rel - dir * dot(rel, dir);
+        let target_rate = (perp.length() / dist).to_degrees();
+        let skill = (self.profile.skill as f32 / MAX_BOT_SKILL as f32).clamp(0.0, 1.0);
+        let base = (0.3 + 1.2 * (1.0 - skill)) * (1.0 - 0.5 * self.profile.aim_skill.clamp(0.0, 1.0));
+        let settle = 1.0 + 2.0 * (-(now - self.fight.on_target_since).max(0.0) / 0.2).exp();
+        let mut error = (base + 0.02 * target_rate + 0.01 * self.fight.turn_rate) * settle;
+        if self.zoom {
+            error *= 0.5;
+        }
+        if self.get_aim_vector_time < now {
+            self.fight.error_dir = rng.random_float(0.0, std::f32::consts::TAU);
+            self.fight.error_size = rng.random_float(0.0, 1.0).sqrt();
+            self.get_aim_vector_time = now + rng.random_float(0.25, 0.5);
+        }
+        let (forward, right) = make_vectors(vec_to_angles(dir));
+        let up = Vector::new(
+            right.y * forward.z - right.z * forward.y,
+            right.z * forward.x - right.x * forward.z,
+            right.x * forward.y - right.y * forward.x,
+        );
+        let off = error.to_radians().tan() * self.fight.error_size * dist;
+        let (s, c) = self.fight.error_dir.sin_cos();
+        let target = point + right * (off * c) + up * (off * s);
         self.fight.aim_target = Some(target);
         target
+    }
+
+    /// Turns toward `target` in time, not per call (design §4; upstream turned a fixed share of
+    /// what was left on every frame, `SetViewAngles`): each axis closes the error with a time
+    /// constant of 0.04-0.16 s (shorter with skill and aim speed) and follows the aim point's own
+    /// angular speed, at most 360-1080 degrees a second. A view more than 10 degrees off restarts
+    /// the aim's settling.
+    pub(crate) fn turn_to(&mut self, target: Vector, now: f32, frame_time: f32) {
+        let gun = self.gun_position();
+        let ideal = |v: Vector| {
+            let mut a = vec_to_angles(v - gun);
+            fix_angles(&mut a);
+            (-a.x, a.y)
+        };
+        let (pitch, yaw) = ideal(target);
+        let (true_pitch, true_yaw) = ideal(self.fight.aim_true.unwrap_or(target));
+        let f = &mut self.fight;
+        let dt = if f.last_turn > 0.0 && now > f.last_turn { (now - f.last_turn).min(0.1) } else { frame_time.clamp(0.001, 0.1) };
+        let (ff_pitch, ff_yaw) = match f.last_ideal {
+            Some((p, y)) if f.last_turn > 0.0 => (angle_diff(true_pitch, p) / dt, angle_diff(true_yaw, y) / dt),
+            _ => (0.0, 0.0),
+        };
+        let skill = (self.profile.skill as f32 / MAX_BOT_SKILL as f32).clamp(0.0, 1.0);
+        let tau = 0.04 + 0.12 * (1.0 - skill) * (1.0 - self.profile.aim_speed.clamp(0.0, 1.0));
+        let max_step = (360.0 + 720.0 * skill) * dt;
+        let close = 1.0 - (-dt / tau).exp();
+        let step = |err: f32, ff: f32| (err * close + ff.clamp(-720.0, 720.0) * dt).clamp(-max_step, max_step);
+        let (err_p, err_y) = (angle_diff(pitch, self.v_angle.x), angle_diff(yaw, self.v_angle.y));
+        let (sp, sy) = (step(err_p, ff_pitch), step(err_y, ff_yaw));
+        self.v_angle.x += sp;
+        self.v_angle.y += sy;
+        fix_float_angle(&mut self.v_angle.x);
+        fix_float_angle(&mut self.v_angle.y);
+        self.v_angle.z = 0.0;
+        self.ideal_pitch = pitch;
+        self.ideal_yaw = yaw;
+        let f = &mut self.fight;
+        f.turn_rate = (sp * sp + sy * sy).sqrt() / dt;
+        if (err_p * err_p + err_y * err_y).sqrt() > 10.0 {
+            f.on_target_since = now;
+        }
+        f.last_turn = now;
+        f.last_ideal = Some((true_pitch, true_yaw));
     }
 }
 

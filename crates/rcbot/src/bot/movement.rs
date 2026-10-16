@@ -90,7 +90,11 @@ impl Bot {
         }
         if null_move || self.me.flags & entflags::FROZEN != 0 {
             self.move_speed = 0.0;
-            self.strafe_speed = 0.0;
+            // A strafe under way (the fight's, kung fu's circling) goes on without a place to
+            // go (design §4; upstream stopped it).
+            if self.strafe_time < now || self.me.flags & entflags::FROZEN != 0 {
+                self.strafe_speed = 0.0;
+            }
             if self.me.waterlevel == 3 {
                 self.jump();
             }
@@ -272,15 +276,8 @@ impl Bot {
             self.primary_attack();
         }
         let buttons = self.fire_buttons(self.button, now);
-        Some(BotCmd {
-            angles: self.v_angle,
-            forward: self.move_speed,
-            side: self.strafe_speed,
-            up: self.up_speed,
-            buttons,
-            impulse: 0,
-            msec,
-        })
+        let (forward, side) = self.capped_speeds(now);
+        Some(BotCmd { angles: self.v_angle, forward, side, up: self.up_speed, buttons, impulse: 0, msec })
     }
 }
 
