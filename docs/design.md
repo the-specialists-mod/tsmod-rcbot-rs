@@ -313,9 +313,9 @@ bucket search order.
   upstream.
 * **Visibility rows** an `.rcv` doesn't hold (or all of them, without one) are worked out when
   the map's waypoints load (§5.1).
-* **What the port can't tell a plugin**, worked around: touches (`DispatchTouch`) are the bot's
-  box meeting another entity's (expanded by one unit) each frame, which is what the engine does
-  for triggers; the masters list (`master` key values from `DispatchKeyValue`) is empty, so
+* **What the port can't tell a plugin**, worked around: touches (`DispatchTouch`) are the
+  port's `entity_touch` (plugin API v6; under v5 the host made them up from the bot's box meeting
+  another entity's, expanded by one unit, each frame); the masters list (`master` key values from `DispatchKeyValue`) is empty, so
   `BotFunc_FindNearestButton` goes straight to the entities targeting the door; a client's
   `no_touch` can't stop the game's touch; a renamed player keeps the old reputation id
   (upstream copied it in `SetClientKeyValue`). The port's entity hooks (`ham_set_hook`) would
@@ -677,9 +677,10 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   when low on reserve, health by what it lacks, armour, other power-ups only with none held or
   running (more unarmed, kung fu most). `CanPickup` asks the same. An item still there 2 s after
   the bot touched it, or after 1.5 s of pressing use on it, is left alone for 30 s.
-* **Hearing** (`hearing.rs`): an enemy's footsteps (the `sound` callback) and enemies firing
-  (`IN_ATTACK`, now within 1500 units, 350 with a silencer, `TSA_SILENCER`; upstream: the nearest
-  player within 750, teammates included) are remembered for 8 s with where, when, how loud and
+* **Hearing** (`hearing.rs`): an enemy's footsteps (the `sound` callback) and enemies' shots
+  (the port's `weapon_fired`, every round, from the gun's position: within 1500 units, 350 with a
+  silencer; under v5 the bot polled `IN_ATTACK` and `TSA_SILENCER`; upstream: the nearest player
+  holding `IN_ATTACK` within 750, teammates included) are remembered for 8 s with where, when, how loud and
   who; the bot glances at a new one for 0.8 s and, if it was only roaming, chooses its goal
   again. Investigating a sound is a goal (`Investigate`: 30 x loudness, fresher and more for a
   healthy, armed bot): a path there (15 s at most) and a moving search around it. Upstream's

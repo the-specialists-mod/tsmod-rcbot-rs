@@ -2,7 +2,8 @@
 //!
 //! Upstream turned an enemy's footsteps into a `LISTEN_TO_SOUND` task without an entity, which
 //! failed at once (§5.58) after `AddPriorityTask` had made every later task forget its path, and
-//! heard gunfire only by polling for `IN_ATTACK` within 750 units, then went to the shooter with a
+//! heard gunfire only by polling for `IN_ATTACK` within 750 units (the port hears each shot,
+//! `weapon_fired`), then went to the shooter with a
 //! "find the path and finish" task that ended as soon as the path was found. The port keeps the
 //! sounds for a few seconds: where, when, how loud and from whom; the goal chooser investigates
 //! them ([`super::goals`]).
@@ -24,8 +25,6 @@ pub(crate) const LOUD_GUNFIRE: f32 = 2.0;
 pub(crate) const GUNFIRE_RANGE: f32 = 1500.0;
 /// How far silenced gunfire is heard.
 pub(crate) const SILENCED_RANGE: f32 = 350.0;
-/// `TSA_SILENCER`: the attachment bit of a silencer.
-pub(crate) const TSA_SILENCER: i32 = 1;
 
 /// A sound the bot heard.
 #[derive(Clone, Copy, Debug, PartialEq)]

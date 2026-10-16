@@ -55,6 +55,8 @@ enum Event {
     KillScored(KillInfo),
     Stunt(i32),
     Sound(i32, Option<Vector>, f32, String),
+    Touch(i32, i32),
+    Fired(i32, Vector, bool),
     Say(i32, Vec<String>),
 }
 
@@ -167,6 +169,8 @@ fn drain(s: &mut State, a: Api, e: Engine) {
             Event::KillScored(k) => bots::kill_scored(s, a, e, &k),
             Event::Stunt(player) => bots::stunt(s, a, e, player),
             Event::Sound(entity, origin, volume, sample) => bots::sound(s, a, e, entity, origin, volume, &sample),
+            Event::Touch(bot, other) => bots::touch(s, a, e, bot, other),
+            Event::Fired(player, origin, silenced) => bots::weapon_fired(s, a, e, player, origin, silenced),
             Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
     }
@@ -225,6 +229,8 @@ const DESCRIPTOR: Plugin = Plugin {
     sound: Some(sound),
     kill_scored: Some(kill_scored),
     player_stunt: Some(player_stunt),
+    entity_touch: Some(entity_touch),
+    weapon_fired: Some(weapon_fired),
     ..Plugin::EMPTY
 };
 
@@ -473,7 +479,6 @@ extern "C" fn start_frame() {
         }
         rejoin_frame(s, a, e);
         let mut rng = EngineRandom(e);
-        bots::touches(s, a, e);
         // Every bot thinks before any acts (the actions and usercmds run below), so they can
         // share what they read of the entities this frame.
         let w = HostWorld::cached(a, e);
@@ -711,6 +716,27 @@ unsafe extern "C" fn kill_scored(kill: *const KillInfo) {
     // SAFETY: a non-NULL `kill` is valid for the call; it is copied out at once.
     let k = unsafe { *kill };
     with_state(Some(Event::KillScored(k)), |s, a, e| bots::kill_scored(s, a, e, &k));
+}
+
+/// `entity_touch`: a bot touched `other` or was touched by it (`DispatchTouch` either way round).
+/// Deferred by the server until the bot is back in its slot, but a bot's touch comes from inside
+/// its own `run_cmd`, where the state is held: queued then.
+extern "C" fn entity_touch(player: c_int, other: c_int) {
+    if player <= 0 || other <= 0 || player == other {
+        return;
+    }
+    with_state(Some(Event::Touch(player, other)), |s, a, e| bots::touch(s, a, e, player, other));
+}
+
+/// `weapon_fired`: a player's shot (each round), for the bots' hearing.
+unsafe extern "C" fn weapon_fired(player: c_int, _weapon: c_int, origin: *const f32, _dir: *const f32, silenced: c_int) {
+    if player <= 0 || origin.is_null() {
+        return;
+    }
+    // SAFETY: a non-NULL origin is the server's 3 floats for the call.
+    let origin = Vector::from(unsafe { *origin.cast::<[f32; 3]>() });
+    let silenced = silenced != 0;
+    with_state(Some(Event::Fired(player, origin, silenced)), |s, a, e| bots::weapon_fired(s, a, e, player, origin, silenced));
 }
 
 /// `player_stunt`: a player started a stunt (for the bots' opponent model).

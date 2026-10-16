@@ -3,7 +3,7 @@
 //! saving them (`ClientDisconnect`: `SaveHALBrainForPersonality`, `saveLearnedData`; the map end:
 //! `CBotGlobals::saveLearnedData`), players joining and leaving (`CClients::ClientConnected` /
 //! `ClientDisconnected`: reputation ids, `AddLoadRep`, `RemoveSaveRep`, squads), deaths, sounds,
-//! touches, `say`, and the bot camera.
+//! touches, shots, `say`, and the bot camera.
 //!
 //! Files live in the plugin's data directory (RCBot's bot folder): `bot_profiles.ini`,
 //! `botprofiles/<id>.ini`, `<id>.rld`, `<id>.rkf` (the kung fu fighter), `<id>.rcr`, `<id>_hal.brn` and the keyword lists,
@@ -412,34 +412,22 @@ pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, origin: Optio
     s.bots.sound(&w, entity, origin, volume, sample);
 }
 
-/// `DispatchTouch` for the bots: the port has no touch callback for plugins, so a bot touches
-/// what its box meets (what the engine does for triggers; a solid it is pressed against touches
-/// within one unit). Design §4.
-pub(crate) fn touches(s: &mut State, a: Api, e: Engine) {
-    let reps = s.rep_ids();
+/// `DispatchTouch` for a bot (the port's `entity_touch`, plugin API v6).
+pub(crate) fn touch(s: &mut State, a: Api, e: Engine, bot: i32, other: i32) {
+    let (Ok(bot), Ok(other)) = (u32::try_from(bot), u32::try_from(other)) else { return };
     let w = HostWorld::new(a, e);
+    let Some(touched) = w.entity(other) else { return };
+    let reps = s.rep_ids();
     let mut rng = EngineRandom(e);
-    let indices: Vec<u32> = s.bots.iter().filter(|b| b.is_alive()).map(|b| b.index).collect();
     let g = globals!(s, &reps);
-    for i in indices {
-        let Some(me) = w.entity(i) else { continue };
-        let (lo, hi) = (me.absmin - Vector::new(1.0, 1.0, 1.0), me.absmax + Vector::new(1.0, 1.0, 1.0));
-        for t in w.entities_in_sphere(me.origin, 128.0) {
-            if t == 0 || t == i {
-                continue;
-            }
-            let Some(other) = w.entity(t) else { continue };
-            let overlap = other.absmin.x <= hi.x
-                && other.absmax.x >= lo.x
-                && other.absmin.y <= hi.y
-                && other.absmax.y >= lo.y
-                && other.absmin.z <= hi.z
-                && other.absmax.z >= lo.z;
-            if overlap && other.solid != rcbot::bot::SOLID_NOT {
-                s.bots.touch(&g, &w, i, &other, &mut rng);
-            }
-        }
-    }
+    s.bots.touch(&g, &w, bot, &touched, &mut rng);
+}
+
+/// `weapon_fired`: a shot the bots may hear.
+pub(crate) fn weapon_fired(s: &mut State, a: Api, e: Engine, player: i32, origin: Vector, silenced: bool) {
+    let Ok(player) = u32::try_from(player) else { return };
+    let w = HostWorld::new(a, e);
+    s.bots.weapon_fired(&w, player, origin, silenced);
 }
 
 /// `ClientCommand`'s `say` / `say_team`: `say_team "form up"` makes a squad; anything else may

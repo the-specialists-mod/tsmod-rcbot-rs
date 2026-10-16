@@ -328,10 +328,19 @@ impl BotManager {
         }
     }
 
-    /// `DispatchTouch(touched, bot)`.
+    /// `DispatchTouch(touched, bot)`: the port's `entity_touch` (plugin API v6), for a living bot.
     pub fn touch(&mut self, g: &BotGlobals<'_>, w: &dyn BotWorld, bot: u32, touched: &Entity, rng: &mut dyn Random) {
-        if let Some(b) = self.get_mut(bot) {
+        if let Some(b) = self.get_mut(bot).filter(|b| b.is_alive()) {
             b.touch(g, w, touched, rng);
+        }
+    }
+
+    /// The port's `weapon_fired`: `shooter` fired a shot from `origin`; every bot that can hear it
+    /// remembers it ([`Bot::hear_gunfire`]).
+    pub fn weapon_fired(&mut self, w: &dyn BotWorld, shooter: u32, origin: Vector, silenced: bool) {
+        let Some(s) = w.entity(shooter).filter(|e| e.is_alive()) else { return };
+        for b in self.iter_mut() {
+            b.hear_gunfire(w, &s, origin, silenced);
         }
     }
 

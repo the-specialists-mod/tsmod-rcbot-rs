@@ -2519,3 +2519,25 @@ fn a_shot_from_out_of_sight_turns_the_bot_along_it_and_headshots_are_counted() {
     let p = rig.learned.opponents.profile(key).unwrap();
     assert_eq!((p.headshots_on_bots, p.favourite_weapon()), (1.0, Some((27, 1.0))));
 }
+
+#[test]
+fn shots_are_heard_from_the_servers_report() {
+    let heard = |team: i32, at: f32, silenced: bool| {
+        let mut mgr = BotManager::default();
+        mgr.add(setup(false).1);
+        let mut w = plane(vec![player(1, Vector::ZERO, team), player(2, Vector::new(at, 0.0, 0.0), team)]);
+        w.teamplay = team != 0;
+        let b = mgr.get_mut(1).unwrap();
+        (b.me, b.state) = (w.entity(1).unwrap(), w.entity(1).unwrap().player.unwrap());
+        // No `IN_ATTACK` in the shooter's buttons: the shot itself is what is heard.
+        mgr.weapon_fired(&w, 2, Vector::new(at, 0.0, 17.0), silenced);
+        mgr.get(1).unwrap().hearing.newest_new().map(|h| (h.origin.x, h.source.map(|s| s.index)))
+    };
+    assert_eq!(heard(0, 1000.0, false), Some((1000.0, Some(2))));
+    // A silencer: only near.
+    assert_eq!(heard(0, 1000.0, true), None);
+    assert!(heard(0, 300.0, true).is_some());
+    // Too far, or a teammate.
+    assert_eq!(heard(0, 1600.0, false), None);
+    assert_eq!(heard(1, 500.0, false), None);
+}

@@ -450,11 +450,9 @@ impl Bot {
                 && self.listen_to_sound_time < now
             {
                 self.listen_to_sound_time = now + self.reaction_time + rng.random_float(0.3, 0.75);
-                // Gunfire heard is remembered and glanced at (upstream: a listen task, then a
-                // path to the shooter that ended once found; design §4).
-                for p in self.update_sounds(w) {
-                    self.hearing.add(p.origin, now, super::hearing::LOUD_GUNFIRE, Some(p.handle()));
-                }
+                // Gunfire heard (the port's `weapon_fired`, `Bot::hear_gunfire`) is glanced at
+                // (upstream: a listen task, then a path to the shooter that ended once found;
+                // design §4).
                 if let Some(h) = self.hearing.newest_new().copied()
                     && now - h.time < 1.0
                 {
@@ -526,21 +524,17 @@ impl Bot {
         true
     }
 
-    /// `UTIL_UpdateSounds`: the enemies firing (`IN_ATTACK`) that the bot hears: within 1500
-    /// units, 350 with a silencer (upstream: the nearest player within 750 units, teammates
-    /// included, whatever the gun; design §4).
-    fn update_sounds(&self, w: &dyn BotWorld) -> Vec<Entity> {
-        use super::hearing::{GUNFIRE_RANGE, SILENCED_RANGE, TSA_SILENCER};
-        (1..=w.max_clients())
-            .filter(|&i| i != self.index)
-            .filter_map(|i| w.entity(i))
-            .filter(|p| p.is_alive() && !p.netname.is_empty() && p.button & buttons::ATTACK != 0)
-            .filter(|p| {
-                let silenced = p.player.is_some_and(|s| s.attachments & TSA_SILENCER != 0);
-                let range = if silenced { SILENCED_RANGE } else { GUNFIRE_RANGE };
-                (self.me.origin - p.origin).length() < range && self.is_enemy(w, p)
-            })
-            .collect()
+    /// `UTIL_UpdateSounds`, from the port's `weapon_fired` (each shot, plugin API v6) instead of
+    /// polling for `IN_ATTACK`: an enemy's shot from `origin` is heard within 1500 units, 350 with a
+    /// silencer (upstream: the nearest player within 750 units, teammates included, whatever the
+    /// gun; design §4), and remembered for the goals and the next glance.
+    pub fn hear_gunfire(&mut self, w: &dyn BotWorld, shooter: &Entity, origin: Vector, silenced: bool) {
+        use super::hearing::{GUNFIRE_RANGE, SILENCED_RANGE};
+        let range = if silenced { SILENCED_RANGE } else { GUNFIRE_RANGE };
+        if shooter.index == self.index || !self.is_alive() || (self.me.origin - origin).length() >= range || !self.is_enemy(w, shooter) {
+            return;
+        }
+        self.hearing.add(origin, w.time(), super::hearing::LOUD_GUNFIRE, Some(shooter.handle()));
     }
 
     /// A sound was just heard: a bot only roaming drops that to choose again (the sound is
