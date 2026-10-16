@@ -364,6 +364,12 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
   the stuck and jump-waypoint jumps already are.
+* **Usercmd `msec`** (`movement.rs` `next_msec`): rounded instead of truncated, with the
+  remainder carried to the next command, and sent from 9.5 ms (w00tguy's 10, less what `f32`
+  game time loses: a 100 Hz frame often measures 9.99 ms). The clock starts one frame back for a
+  new bot or map and keeps running through deaths. Upstream lost up to 1 ms a command (bots
+  simulated 3-5% less time than passed), at 100 Hz skipped every other frame (half speed), and
+  sent 255 ms as the first command and again after each spawn (`SpawnInit` reset the clock).
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
 
@@ -668,7 +674,8 @@ those by going through the port's own code when that code is ported.
   (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss, `tm_` maps' model
   teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
   bought before each spawn; unit tests cover the
-  task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
+  usercmd `msec` (every 100 Hz frame sends, nothing lost at 30 Hz or 1000 Hz, the first
+  command one frame long), the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
   an emptied gun needing a reload), and the waypoint editor (flags, paths, delete, beam colours).
 * **Host unit tests** (`crates/host`): the plugin descriptor, and engine entity searches

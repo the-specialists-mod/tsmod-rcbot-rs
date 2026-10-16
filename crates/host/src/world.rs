@@ -50,6 +50,10 @@ impl BotWorld for HostWorld {
         self.eng.time()
     }
 
+    fn frame_time(&self) -> f32 {
+        self.eng.frame_time()
+    }
+
     fn max_entities(&self) -> u32 {
         self.eng.max_entities().max(1) as u32 - 1
     }

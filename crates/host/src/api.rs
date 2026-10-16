@@ -216,6 +216,11 @@ impl Engine {
         self.globals().time
     }
 
+    /// `gpGlobals->frametime`.
+    pub fn frame_time(&self) -> f32 {
+        self.globals().frametime
+    }
+
     /// `gpGlobals->maxClients`.
     pub fn max_clients(&self) -> i32 {
         self.globals().maxClients

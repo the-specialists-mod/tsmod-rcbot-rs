@@ -7,6 +7,48 @@ use crate::config::BOT_WAYPOINT_TOUCH_DIST;
 use crate::nav::{CONTENTS_WATER, Glass, Monsters, flags as fl};
 use crate::{Random, Vector};
 
+/// The shortest usercmd sent, in ms (w00tguy's 10, less half a millisecond: game time is an
+/// `f32`, so a 100 Hz frame often measures 9.99 ms).
+pub(crate) const MIN_MSEC: f32 = 9.5;
+
+/// When the bot's last usercmd went (`m_fLastCallRunPlayerMove`) and the part of a
+/// millisecond it didn't carry.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MsecClock {
+    /// Game time of the last command; 0 before the first.
+    pub last: f32,
+    /// What rounding left over, in ms (-0.5..0.5).
+    pub carry: f32,
+}
+
+/// The `msec` of the bot's next usercmd: the time since the last one plus what the last left
+/// over, rounded, from 1 to 255; `None` below [`MIN_MSEC`]. The rest carries over to the next
+/// command, so the bot simulates the time that passed (design §4).
+///
+/// Upstream's `UpdateMsec`/`RunPlayerMove` truncated the time: each command lost up to a
+/// millisecond (3-5% of the time at 20-30 ms frames), and at 100 Hz the frames measuring
+/// 9.99 ms (game time is an `f32`) were skipped, so the bot ran every other frame at half speed.
+/// A new clock (unset, or the time went back: a new map) starts one frame (`frame_time`) ago;
+/// upstream's started at 0 and again at each spawn, so the first command was 255 ms.
+pub(crate) fn next_msec(clock: &mut MsecClock, now: f32, frame_time: f32) -> Option<u8> {
+    if clock.last <= 0.0 || now < clock.last {
+        *clock = MsecClock { last: now - frame_time.max(0.0), carry: 0.0 };
+    }
+    let ms = (now - clock.last) * 1000.0 + clock.carry;
+    if ms < MIN_MSEC {
+        return None;
+    }
+    clock.last = now;
+    if ms > 255.0 {
+        // A pause: drop what one command can't carry rather than catching up for seconds.
+        clock.carry = 0.0;
+        return Some(255);
+    }
+    let msec = ms.round().max(1.0);
+    clock.carry = ms - msec;
+    Some(msec as u8)
+}
+
 impl Bot {
     /// `UTIL_GetAvoidAngle`.
     fn avoid_angle(&self, origin: Vector) -> f32 {
@@ -213,14 +255,11 @@ impl Bot {
         }
     }
 
-    /// `CBot::RunPlayerMove`: the usercmd, or `None` below 10 ms since the last one (w00tguy's
-    /// fix against slow motion at high frame rates).
-    pub(crate) fn run_player_move(&mut self, now: f32) -> Option<BotCmd> {
-        let msec = ((now - self.last_call_run_player_move) * 1000.0).clamp(0.0, 255.0) as u8;
-        if msec < 10 {
-            return None;
-        }
-        self.last_call_run_player_move = now;
+    /// `CBot::RunPlayerMove`: the usercmd, or `None` while less than [`MIN_MSEC`] has passed
+    /// since the last one (w00tguy's fix against slow motion at high frame rates); see
+    /// [`next_msec`].
+    pub(crate) fn run_player_move(&mut self, now: f32, frame_time: f32) -> Option<BotCmd> {
+        let msec = next_msec(&mut self.msec_clock, now, frame_time)?;
         fix_angles(&mut self.v_angle);
         self.ideal_move_speed = if self.current_waypoint_flags & fl::STAY_NEAR != 0 { self.max_speed / 2.0 } else { self.max_speed };
         if self.current_waypoint_flags & fl::CROUCH != 0 || (self.start_duck_time <= now && self.end_duck_time > now) {
@@ -241,5 +280,56 @@ impl Bot {
             impulse: 0,
             msec,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `frames` server frames of `dt` from `start` in `f32` game time, as the engine counts
+    /// it: the commands sent and their total msec.
+    fn simulate(start: f32, dt: f64, frames: usize) -> (usize, u32, f32) {
+        let mut last = MsecClock::default();
+        let (mut cmds, mut total) = (0, 0u32);
+        let mut t = f64::from(start);
+        for _ in 0..frames {
+            t += dt;
+            if let Some(ms) = next_msec(&mut last, t as f32, dt as f32) {
+                cmds += 1;
+                total += u32::from(ms);
+            }
+        }
+        (cmds, total, (t - f64::from(start)) as f32 * 1000.0)
+    }
+
+    #[test]
+    fn usercmds_carry_the_time_that_passed() {
+        // 100 Hz at a late game time, where frames measure 9.99 or 10.01 ms: every frame sends.
+        let (cmds, total, elapsed) = simulate(1000.0, 0.01, 1000);
+        assert_eq!(cmds, 1000);
+        assert!((total as f32 - elapsed).abs() <= 10.0, "{total} ms of {elapsed}");
+        // 30 Hz: nothing lost to truncation (upstream: 33 of every 33.3 ms).
+        let (cmds, total, elapsed) = simulate(50.0, 1.0 / 30.0, 300);
+        assert_eq!(cmds, 300);
+        assert!((total as f32 - elapsed).abs() <= 34.0, "{total} ms of {elapsed}");
+        // 1000 Hz: one command per 10 frames, the time still all there.
+        let (cmds, total, elapsed) = simulate(20.0, 0.001, 1000);
+        assert!((95..=105).contains(&cmds), "{cmds}");
+        assert!((total as f32 - elapsed).abs() <= 10.0, "{total} ms of {elapsed}");
+    }
+
+    #[test]
+    fn a_new_clock_starts_one_frame_back() {
+        // The first command covers the last frame, not the 255 ms upstream sent.
+        let mut last = MsecClock::default();
+        assert_eq!(next_msec(&mut last, 12.0, 0.02), Some(20));
+        // A pause longer than one command: 255, then on from now.
+        assert_eq!(next_msec(&mut last, 13.0, 0.02), Some(255));
+        assert_eq!(next_msec(&mut last, 13.02, 0.02), Some(20));
+        // A new map (time went back): one frame again.
+        assert_eq!(next_msec(&mut last, 1.5, 0.05), Some(50));
+        // Too soon after the last.
+        assert_eq!(next_msec(&mut last, 1.505, 0.005), None);
     }
 }

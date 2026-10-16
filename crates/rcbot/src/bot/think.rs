@@ -81,7 +81,7 @@ impl Bot {
         }
         self.think(g, w, rng);
         out.actions.append(&mut self.actions);
-        out.cmd = self.run_player_move(w.time());
+        out.cmd = self.run_player_move(w.time(), w.frame_time());
         out
     }
 
@@ -111,7 +111,6 @@ impl Bot {
         self.last_enemy = None;
         self.last_failed_waypoint = -1;
         self.listen_to_sound_time = 0.0;
-        self.last_call_run_player_move = 0.0;
         self.pickup_entity = None;
         self.last_update_conditions = 0.0;
         self.last_think_time = 0.0;

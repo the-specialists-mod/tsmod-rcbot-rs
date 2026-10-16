@@ -254,6 +254,10 @@ impl Entity {
 pub trait BotWorld: World {
     /// `gpGlobals->time`.
     fn time(&self) -> f32;
+    /// `gpGlobals->frametime`: the last frame's length (0 by default).
+    fn frame_time(&self) -> f32 {
+        0.0
+    }
     /// `gpGlobals->maxEntities`.
     fn max_entities(&self) -> u32;
     /// `gpGlobals->maxClients`.
@@ -504,7 +508,8 @@ pub struct Bot {
     pub(crate) think_time: f32,
     pub(crate) last_think_time: f32,
     pub(crate) reaction_time: f32,
-    pub(crate) last_call_run_player_move: f32,
+    /// `m_fLastCallRunPlayerMove`, with the carried remainder (design §4).
+    pub(crate) msec_clock: movement::MsecClock,
     pub(crate) last_update_conditions: f32,
 
     pub(crate) move_speed: f32,
@@ -647,7 +652,7 @@ impl Bot {
             think_time: BOT_DEFAULT_THINK_TIME,
             last_think_time: 0.0,
             reaction_time: BOT_DEFAULT_REACTION_TIME,
-            last_call_run_player_move: 0.0,
+            msec_clock: movement::MsecClock::default(),
             last_update_conditions: 0.0,
             move_speed: 0.0,
             strafe_speed: 0.0,

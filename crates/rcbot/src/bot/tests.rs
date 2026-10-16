@@ -61,6 +61,9 @@ impl BotWorld for Plane {
     fn time(&self) -> f32 {
         self.time
     }
+    fn frame_time(&self) -> f32 {
+        0.02
+    }
     fn max_entities(&self) -> u32 {
         8
     }
@@ -1092,8 +1095,8 @@ fn obstacles_are_crouch_jumped() {
     // `jump_and_duck`: the jump, then the duck held through the air.
     let mut rig = Rig::new(Config::default());
     rig.bot.jump_and_duck(1.0);
-    let cmd = rig.bot.run_player_move(1.05).unwrap();
+    let cmd = rig.bot.run_player_move(1.05, 0.05).unwrap();
     assert_ne!(cmd.buttons & buttons::JUMP, 0);
-    let cmd = rig.bot.run_player_move(1.2).unwrap();
+    let cmd = rig.bot.run_player_move(1.2, 0.02).unwrap();
     assert_ne!(cmd.buttons & buttons::DUCK, 0);
 }
