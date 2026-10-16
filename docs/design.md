@@ -259,7 +259,9 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   a `tm_` map the game doesn't run as teamplay (upstream's `NON_TS_TEAMPLAY`, which forces
   `m_bTeamPlay`): there every team is 0, so the bots compare `model` keys as upstream does. What the
   TS user messages told the bot comes from `PlayerInfo`: `WeaponInfo` when the weapon, clip or
-  reserve changes, `TSState` as the stunt state. Damage comes from `player_damaged` (the bot
+  reserve changes (the weapon in hand is the current weapon every frame), `TSState` as the stunt
+  state; the fire mode, attachments, free slots, power-ups, time scale and permanent kung fu are
+  in `PlayerState` too. Damage comes from `player_damaged` (the bot
   faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
 * **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47). The
   engine copies a usercmd's angles into `pev->v_angle` only while `pev->fixangle` is 0
@@ -364,6 +366,14 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
   the stuck and jump-waypoint jumps already are.
+* **Weapons the bot owns** come from the game (`player_inventory`, `BotWorld::inventory`) at the
+  first frame of a life, when the weapon in hand changes, after a drop, after a refused switch
+  and every second: guns it never held are known with their rounds (upstream knew only weapons
+  it had held, TS sending no `WeaponList`), and weapons it lost are forgotten. A new life starts
+  with no guns but kung fu (upstream kept the last life's). The current weapon is the one the
+  game reports in hand; `SwitchWeapon` asks for a switch (once, until the game shows it or a
+  second passes) instead of setting it, and a switch the game refuses (`select_weapon`'s
+  `INVALID`: not owned) makes the bot forget that weapon.
 * **Usercmd `msec`** (`movement.rs` `next_msec`): rounded instead of truncated, with the
   remainder carried to the next command, and sent from 9.5 ms (w00tguy's 10, less what `f32`
   game time loses: a 100 Hz frame often measures 9.99 ms). The clock starts one frame back for a
@@ -677,7 +687,10 @@ those by going through the port's own code when that code is ported.
   usercmd `msec` (every 100 Hz frame sends, nothing lost at 30 Hz or 1000 Hz, the first
   command one frame long), the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
-  an emptied gun needing a reload), and the waypoint editor (flags, paths, delete, beam colours).
+  an emptied gun needing a reload), the owned weapons read from the inventory (a gun never held
+  known, a lost one forgotten, a new life without the last one's guns), the weapon in hand as
+  the game reports it (a switch asked once, a refused one forgetting the weapon), and the
+  waypoint editor (flags, paths, delete, beam colours).
 * **Host unit tests** (`crates/host`): the plugin descriptor, and engine entity searches
   (`collect_search`) ending at the world FWGS and ReHLDS return for "no more" (and at a repeat)
   instead of starting over: upstream's loops stop at `FNullEnt`, the port's first ones only at

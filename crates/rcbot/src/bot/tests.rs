@@ -4,6 +4,7 @@ use super::look::make_vectors;
 use super::*;
 use crate::XorShiftRandom;
 use crate::nav::{Glass, Monsters, Trace, flags as fl};
+use crate::weapons::TsWeapon;
 use std::cell::RefCell;
 
 struct Plane {
@@ -17,6 +18,8 @@ struct Plane {
     /// Jumps, gravity and TS's wall jump in [`Plane::apply`] (off: the bot never leaves the
     /// ground).
     physics: std::cell::Cell<bool>,
+    /// What [`BotWorld::inventory`] answers (`None`: the world can't tell).
+    inventory: RefCell<Option<Vec<InventoryWeapon>>>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -84,6 +87,9 @@ impl BotWorld for Plane {
     }
     fn model_teams(&self) -> bool {
         self.models.is_some()
+    }
+    fn inventory(&self, _: u32) -> Option<Vec<InventoryWeapon>> {
+        self.inventory.borrow().clone()
     }
     fn player_model(&self, index: u32) -> String {
         self.models.iter().flatten().find(|(i, _)| *i == index).map_or(String::new(), |(_, m)| (*m).into())
@@ -155,8 +161,15 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
     if enemy {
         ents.push(player(2, Vector::new(400.0, 0.0, 0.0), 0));
     }
-    let plane =
-        Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None, wall: Default::default(), physics: Default::default() };
+    let plane = Plane {
+        time: 1.0,
+        ents: RefCell::new(ents),
+        teamplay: false,
+        models: None,
+        wall: Default::default(),
+        physics: Default::default(),
+        inventory: Default::default(),
+    };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
     let profile = crate::config::BotProfile::init(&config, &mut rng);
@@ -355,7 +368,15 @@ impl Rig {
 }
 
 fn plane(ents: Vec<Entity>) -> Plane {
-    Plane { time: 1.0, ents: RefCell::new(ents), teamplay: false, models: None, wall: Default::default(), physics: Default::default() }
+    Plane {
+        time: 1.0,
+        ents: RefCell::new(ents),
+        teamplay: false,
+        models: None,
+        wall: Default::default(),
+        physics: Default::default(),
+        inventory: Default::default(),
+    }
 }
 
 #[test]
@@ -1099,4 +1120,63 @@ fn obstacles_are_crouch_jumped() {
     assert_ne!(cmd.buttons & buttons::JUMP, 0);
     let cmd = rig.bot.run_player_move(1.2, 0.02).unwrap();
     assert_ne!(cmd.buttons & buttons::DUCK, 0);
+}
+
+fn owned(list: &[(i32, i32, i32)]) -> Option<Vec<InventoryWeapon>> {
+    Some(list.iter().map(|&(weapon, clip, ammo)| InventoryWeapon { weapon, clip, ammo }).collect())
+}
+
+#[test]
+fn owned_weapons_come_from_the_inventory() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0)]);
+    *w.inventory.borrow_mut() = owned(&[(1, 17, 34), (5, 30, 60)]);
+    let mut rng = XorShiftRandom::new(3);
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    // A gun it never held is known with its rounds.
+    assert!(rig.bot.weapons.has(5) && rig.bot.weapons.get(5).unwrap().clip == 30);
+    assert_eq!(rig.bot.current_weapon(), Some(1));
+    assert_eq!(rig.bot.weapons.best_loaded_gun(), Some(5));
+    // Taken away: forgotten at the next read, within a second.
+    *w.inventory.borrow_mut() = owned(&[(1, 17, 34)]);
+    run(&mut rig, &mut w, &mut rng, 60, |_, _| {});
+    assert!(!rig.bot.weapons.has(5) && rig.bot.weapons.has(1));
+}
+
+#[test]
+fn the_weapon_in_hand_is_what_the_game_reports() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0)]);
+    *w.inventory.borrow_mut() = owned(&[(1, 17, 34), (5, 30, 60)]);
+    let mut rng = XorShiftRandom::new(3);
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    // The switch is asked for once; the bot still holds the Glock until the game says otherwise.
+    rig.bot.switch_weapon(5);
+    rig.bot.switch_weapon(5);
+    assert_eq!(rig.bot.actions, vec![Action::SelectWeapon(5)]);
+    assert_eq!(rig.bot.current_weapon(), Some(1));
+    // Refused (not owned after all): forgotten, and asked again only if chosen again.
+    rig.bot.weapon_select_failed(5);
+    assert!(!rig.bot.weapons.has(5) && rig.bot.switch_pending.is_none());
+    rig.bot.actions.clear();
+    // The game switched: that is the current weapon.
+    arm(&w, 1, 5, 30, 60);
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    assert_eq!(rig.bot.current_weapon(), Some(5));
+    assert!(rig.bot.weapons.has(5));
+}
+
+#[test]
+fn a_new_life_forgets_the_last_ones_guns() {
+    let mut rig = Rig::new(Config::default());
+    let mut rng = XorShiftRandom::new(3);
+    rig.with(|b, g| {
+        b.weapons.weapon_info(0, 100, 0, g.weapons, g.presets);
+        b.weapons.weapon_info(5, 30, 60, g.weapons, g.presets);
+        b.next_inventory_sync = 50.0;
+        b.spawn_init(g, &mut rng);
+        assert!(!b.weapons.has(5));
+        assert!(b.weapons.has(TsWeapon::KungFu.id()));
+        assert_eq!(b.next_inventory_sync, 0.0);
+    });
 }

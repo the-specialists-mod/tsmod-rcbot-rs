@@ -5,7 +5,7 @@
 use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use ts_plugin_api::{BotBackend, BotCmd, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, ham};
+use ts_plugin_api::{BotBackend, BotCmd, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, WeaponEntry, ham};
 
 /// The plugin API table and our plugin id.
 #[derive(Clone, Copy)]
@@ -87,6 +87,16 @@ impl Api {
         let mut i = PlayerInfo::default();
         // SAFETY: `i` is writable.
         (unsafe { (self.table.player_info)(player, &mut i) } == OK).then_some(i)
+    }
+
+    /// `player_inventory`: the weapons the player owns (kung fu not included), `None` for a
+    /// non-player.
+    pub fn player_inventory(&self, player: i32) -> Option<Vec<WeaponEntry>> {
+        let mut out = vec![WeaponEntry::default(); 64];
+        // SAFETY: `out` is writable for its length.
+        let n = unsafe { (self.table.player_inventory)(player, out.as_mut_ptr(), out.len() as c_int) };
+        out.truncate(usize::try_from(n).ok()?);
+        Some(out)
     }
 
     /// `game_state`.

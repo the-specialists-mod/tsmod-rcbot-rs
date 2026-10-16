@@ -118,6 +118,14 @@ impl BotWorld for HostWorld {
                 clip: p.clip,
                 ammo: p.ammo,
                 stunt_state: p.stunt_state,
+                fire_mode: p.fire_mode,
+                attachments: p.attachments,
+                free_slots: p.free_slots,
+                active_powerup: p.active_powerup,
+                powerup_until: p.powerup_until,
+                stored_powerup: p.stored_powerup,
+                time_scale: p.time_scale,
+                kungfu: p.kungfu != 0,
             });
         }
         Some(ent)
@@ -152,6 +160,11 @@ impl BotWorld for HostWorld {
                 name: o.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect(),
             })
             .collect()
+    }
+
+    fn inventory(&self, index: u32) -> Option<Vec<rcbot::bot::InventoryWeapon>> {
+        let owned = self.api.player_inventory(index as i32)?;
+        Some(owned.into_iter().map(|o| rcbot::bot::InventoryWeapon { weapon: o.weapon, clip: o.clip, ammo: o.ammo }).collect())
     }
 
     fn player_model(&self, index: u32) -> String {

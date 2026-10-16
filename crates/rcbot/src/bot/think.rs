@@ -13,6 +13,12 @@ use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl}
 use crate::weapons::TsWeapon;
 use crate::{Random, Vector};
 
+/// Seconds between two reads of the owned weapons ([`BotWorld::inventory`]) when nothing
+/// changed.
+const INVENTORY_SYNC: f32 = 1.0;
+/// Seconds a weapon switch waits for the game before it may be asked again.
+const SWITCH_WAIT: f32 = 1.0;
+
 /// `UTIL_IsGrenadeRocket`.
 pub(crate) fn is_grenade_rocket(e: &Entity) -> bool {
     e.classname.contains("grenade") || e.classname.contains("rpg_rocket")
@@ -45,8 +51,27 @@ impl Bot {
         self.me = me;
         self.base_turn_speed = g.config.turn_speed;
 
-        // `BotClient_TS_WeaponInfo`: the port reports the weapon in hand.
+        let now = w.time();
+        self.now = now;
+
+        // `BotClient_TS_WeaponInfo`: the port reports the weapon in hand, which is the bot's
+        // current weapon every frame (upstream's switch set it before the game agreed; design §4).
         if self.state.alive {
+            let held = TsWeapon::from_game_id(self.state.weapon).map_or(self.state.weapon, TsWeapon::id);
+            if self.current_weapon != Some(held) {
+                // Taken out, picked up, or the game's choice after a drop: read what is owned.
+                self.next_inventory_sync = 0.0;
+            }
+            if self.switch_pending.is_some_and(|(id, until)| id == held || until <= now) {
+                self.switch_pending = None;
+            }
+            self.current_weapon = Some(held);
+            if self.next_inventory_sync <= now {
+                self.next_inventory_sync = now + INVENTORY_SYNC;
+                if let Some(owned) = w.inventory(self.index) {
+                    self.weapons.sync_inventory(&owned, g.weapons, g.presets);
+                }
+            }
             let info = (self.state.weapon, self.state.clip, self.state.ammo);
             if self.last_weapon_info != Some(info) {
                 // A new weapon or clip: the reload key may be pressed again (design §4).
@@ -55,7 +80,6 @@ impl Bot {
                 }
                 self.last_weapon_info = Some(info);
                 let r = self.weapons.weapon_info(info.0, info.1, info.2, g.weapons, g.presets);
-                self.current_weapon = Some(r.current);
                 // Kung fu reports no clip and no ammo too; there is nothing to drop then
                 // (upstream sent `drop` each time it took out kung fu).
                 if r.drop && r.current != TsWeapon::KungFu.id() {
@@ -106,6 +130,12 @@ impl Bot {
         self.paths.next_clear_failed_goals = 0.0;
         self.current_weapon = None;
         self.last_weapon_info = None;
+        // A new life starts with what the game gives it: forget the last one's guns (TS bots
+        // always have kung fu) and read the inventory at the first frame alive (design §4).
+        self.weapons = super::BotWeapons::default();
+        self.weapons.add(TsWeapon::KungFu.id(), g.weapons);
+        self.switch_pending = None;
+        self.next_inventory_sync = 0.0;
         self.next_reload_time = 0.0;
         self.kungfu.reset_fight();
         self.last_enemy = None;
@@ -369,14 +399,17 @@ impl Bot {
         self.enemy = if self.want_to_find_enemy { self.find_enemy(g, w, rng) } else { None };
     }
 
-    /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0).
+    /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0). The
+    /// current weapon changes when the game reports it (upstream set it at once, so a refused
+    /// switch left the bot thinking it held a weapon it didn't); the switch isn't asked again
+    /// while it is pending.
     pub(crate) fn switch_weapon(&mut self, id: i32) -> bool {
-        if self.current_weapon == Some(id) {
+        if self.current_weapon == Some(id) || self.switch_pending.is_some_and(|(p, _)| p == id) {
             return true;
         }
         let game_id = if id == TsWeapon::KungFu.id() { 0 } else { id };
         self.actions.push(Action::SelectWeapon(game_id));
-        self.current_weapon = Some(id);
+        self.switch_pending = Some((id, self.now + SWITCH_WAIT));
         self.zoom = false;
         true
     }
@@ -725,6 +758,7 @@ impl Bot {
                     self.actions.push(Action::Command("drop".into()));
                     self.weapons.remove(id);
                     self.current_weapon = None;
+                    self.next_inventory_sync = 0.0;
                     if let Some(next) = self.weapons.best_loaded_gun() {
                         self.switch_weapon(next);
                     }

@@ -464,6 +464,11 @@ extern "C" fn start_frame() {
                         if rc == OK || rc == ts_plugin_api::DEFERRED {
                             a.log(log::INFO, &format!("weapon \"{}\" switched to {id}", s.bots.get(idx).map_or("", |b| b.name.as_str())));
                             s.check("weapon_switch");
+                        } else if rc == INVALID
+                            && let Some(b) = s.bots.get_mut(idx)
+                        {
+                            // Not owned: the bot forgets it and reads its inventory again.
+                            b.weapon_select_failed(id);
                         }
                     }
                     Action::Loadout(ids) => {

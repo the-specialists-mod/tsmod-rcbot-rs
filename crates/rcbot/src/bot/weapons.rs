@@ -92,6 +92,17 @@ impl BotWeapon {
     }
 }
 
+/// A weapon a player owns, as the game lists it (the port's `player_inventory`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InventoryWeapon {
+    /// TS weapon id (1..37).
+    pub weapon: i32,
+    /// Rounds in the clip.
+    pub clip: i32,
+    /// Reserve of its ammo type.
+    pub ammo: i32,
+}
+
 /// `CBotWeapons`.
 #[derive(Clone, Debug)]
 pub struct BotWeapons {
@@ -159,6 +170,13 @@ impl BotWeapons {
     /// its enemy (TS reloads only after the trigger is released for half a second). The port
     /// keeps the largest clip seen, as `checkMaxClip` means to (design §4, §5.49).
     pub fn weapon_info(&mut self, game_id: i32, clip: i32, ammo: i32, registry: &mut Weapons, presets: &WeaponPresets) -> WeaponInfoResult {
+        let id = self.record(game_id, clip, ammo, registry, presets);
+        WeaponInfoResult { current: id, drop: ammo == 0 && clip == 0 }
+    }
+
+    /// What `WeaponInfo` does for one weapon: registers it, and keeps its clip, reserve and the
+    /// largest clip seen. The bot's id of it.
+    fn record(&mut self, game_id: i32, clip: i32, ammo: i32, registry: &mut Weapons, presets: &WeaponPresets) -> i32 {
         let id = TsWeapon::from_game_id(game_id).map_or(game_id, TsWeapon::id);
         registry.add(presets, crate::weapons::MOD_TS, id, "tsweapon", ammo, ammo, 0, 0, 0, 0, 0);
         let seen = self.get(id).filter(|w| w.id == id).map_or(0, |w| w.max_clip);
@@ -171,7 +189,23 @@ impl BotWeapons {
             w.reserve = ammo;
             w.max_clip = w.max_clip.max(clip);
         }
-        WeaponInfoResult { current: id, drop: ammo == 0 && clip == 0 }
+        id
+    }
+
+    /// The weapons the game says the bot owns (port addition, design §4): each is recorded as
+    /// `WeaponInfo` records the one in hand, and a weapon no longer owned (dropped, taken,
+    /// thrown) is forgotten. Kung fu isn't listed and stays. Upstream knew only the weapons the
+    /// bot had held (TS sends no `WeaponList`).
+    pub fn sync_inventory(&mut self, owned: &[InventoryWeapon], registry: &mut Weapons, presets: &WeaponPresets) {
+        let ids: Vec<i32> = owned.iter().map(|o| TsWeapon::from_game_id(o.weapon).map_or(o.weapon, TsWeapon::id)).collect();
+        for w in self.weapons.iter_mut() {
+            if w.has_weapon && w.id != TsWeapon::KungFu.id() && !ids.contains(&w.id) {
+                *w = BotWeapon::default();
+            }
+        }
+        for o in owned.iter().filter(|o| o.weapon > 0) {
+            self.record(o.weapon, o.clip, o.ammo, registry, presets);
+        }
     }
 
     /// `CBotWeapons::GetBestWeaponId(pBot, pEnemy)`, TS: among the weapons the bot has (melee

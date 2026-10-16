@@ -37,7 +37,7 @@ pub use remember::RememberPositions;
 pub use special::{MasterEntity, OtherBot};
 pub use squad::{SquadId, SquadOrder, Squads};
 pub use tasks::{EntRef, ScheduleDesc, Task, TaskKind, Tasks};
-pub use weapons::{BotWeapon, BotWeapons};
+pub use weapons::{BotWeapon, BotWeapons, InventoryWeapon};
 
 use crate::config::{BotProfile, Config};
 use crate::learn::{BotLearnedData, GlobalLearnedData};
@@ -143,6 +143,22 @@ pub struct PlayerState {
     pub ammo: i32,
     /// `TSState` (`eTS_State`).
     pub stunt_state: i32,
+    /// The weapon in hand's fire mode.
+    pub fire_mode: i32,
+    /// The weapon in hand's attachment bits (`TSA_*`).
+    pub attachments: i32,
+    /// Free inventory slots (`TSSpace`).
+    pub free_slots: i32,
+    /// The power-up running now (the port's `powerup` bits), 0 for none.
+    pub active_powerup: i32,
+    /// Game time at which `active_powerup` ends, 0 for none.
+    pub powerup_until: f32,
+    /// The power-up held but not used yet, 0 for none.
+    pub stored_powerup: i32,
+    /// The player's time scale (1 normal, below 1 slowed).
+    pub time_scale: f32,
+    /// Permanent kung fu picked up this life.
+    pub kungfu: bool,
 }
 
 /// What [`BotWorld::entity`] says about an entity: the `entvars_t` fields the bot reads, and for
@@ -295,6 +311,12 @@ pub trait BotWorld: World {
     fn cvar_float(&self, name: &str) -> f32 {
         let _ = name;
         0.0
+    }
+    /// The weapons player `index` owns (kung fu not included), with their clips and reserves;
+    /// `None` when the world can't tell (then the bot knows only the weapons it held).
+    fn inventory(&self, index: u32) -> Option<Vec<InventoryWeapon>> {
+        let _ = index;
+        None
     }
     /// The TS objectives player `index` has been told of (`m_TSObjectives`, from the `TSObjective`
     /// messages): the HUD's objective list that can still be completed. None by default.
@@ -594,6 +616,13 @@ pub struct Bot {
     pub(crate) weapons: BotWeapons,
     pub(crate) current_weapon: Option<i32>,
     pub(crate) last_weapon_info: Option<(i32, i32, i32)>,
+    /// A weapon switch asked for that the game hasn't shown yet, and until when it is waited
+    /// for (the switch isn't asked again meanwhile).
+    pub(crate) switch_pending: Option<(i32, f32)>,
+    /// When the owned weapons are next read from the game ([`BotWorld::inventory`]).
+    pub(crate) next_inventory_sync: f32,
+    /// The time of this frame.
+    pub(crate) now: f32,
     /// When the reload key may be pressed again (design §4: never spammed).
     pub(crate) next_reload_time: f32,
     /// The kung fu fighter: its learned stances, reactions and combos, and the fight now.
@@ -729,6 +758,9 @@ impl Bot {
             weapons: BotWeapons::default(),
             current_weapon: None,
             last_weapon_info: None,
+            switch_pending: None,
+            next_inventory_sync: 0.0,
+            now: 0.0,
             next_reload_time: 0.0,
             kungfu: kungfu::KungFu::new(),
             pickup_entity: None,
@@ -946,9 +978,20 @@ impl Bot {
         self.enemy.map(|e| e.index)
     }
 
-    /// `m_pCurrentWeapon`'s id.
+    /// `m_pCurrentWeapon`'s id: the weapon in hand as the game last reported it.
     pub fn current_weapon(&self) -> Option<i32> {
         self.current_weapon
+    }
+
+    /// The game refused to take out weapon `game_id` (TS's id, 0 kung fu): the bot doesn't own
+    /// it. It is forgotten and the owned weapons are read again next frame.
+    pub fn weapon_select_failed(&mut self, game_id: i32) {
+        let id = crate::weapons::TsWeapon::from_game_id(game_id).map_or(game_id, crate::weapons::TsWeapon::id);
+        if id != crate::weapons::TsWeapon::KungFu.id() {
+            self.weapons.remove(id);
+        }
+        self.switch_pending = None;
+        self.next_inventory_sync = 0.0;
     }
 
     /// `BotEvent(BOT_EVENT_HURT, attacker, origin)`: the port reports damage (`player_damaged`)
