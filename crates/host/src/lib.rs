@@ -1,4 +1,4 @@
-//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v4,
+//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v5,
 //! the-specialistsmod-rs#104), and the only crate in this workspace allowed `unsafe` (every other
 //! crate is `#![deny(unsafe_code)]`, which `cargo xtask lint` checks).
 //!

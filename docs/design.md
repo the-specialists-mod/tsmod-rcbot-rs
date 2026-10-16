@@ -15,7 +15,7 @@ crates/rcbot     the bot, #![deny(unsafe_code)], no FFI. Engine queries go throu
                  nav::World (traces, point contents), bot::BotWorld (entities, PVS, time),
                  Random (RANDOM_LONG / RANDOM_FLOAT) and config::CommandHost (commands' effects).
 crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe: TSRS_PluginLoad, safe
-                 wrappers over the plugin API v4 and the engine table (api.rs), the traits on
+                 wrappers over the plugin API v5 and the engine table (api.rs), the traits on
                  them (world.rs, commands.rs), RCBot's globals in one State, the per-frame bot
                  loop and the editors' display (lib.rs, editor.rs)
 xtask            build | dist | test | lint | all | e2e
@@ -29,7 +29,7 @@ Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `Way
 branches are kept and every other mod's are removed; where a branch chose between mods
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
-The host uses the port's plugin API v4 (the-specialistsmod-rs#104, #117; `goldsrc-sys` and
+The host uses the port's plugin API v5 (the-specialistsmod-rs#104, #117; `goldsrc-sys` and
 `ts-plugin-api` pinned to the port's `db84e1d`, branch `fix/plugin-api`, from a local checkout
 until it is merged). It registers the bot backend `rcbot`
 (`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
@@ -321,7 +321,7 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **TS objectives**: upstream collects the `TSObjective` messages a bot gets into
   `m_TSObjectives` and clears them at `SpawnInit` unless one came since the last weapon pick
   (`BOT_CONDITION_DONT_CLEAR_OBJECTIVES`). The port asks the server for the HUD's list as the bot
-  reads it (`objectives`, plugin API v4) each time, so the list is always the current one, and
+  reads it (`objectives`, plugin API v5) each time, so the list is always the current one, and
   keeps only the objectives that can still be completed (`ObjectiveInfo::active`: not frozen,
   a giver that hasn't fired), which the messages can't tell.
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team

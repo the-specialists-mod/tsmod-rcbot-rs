@@ -1,4 +1,4 @@
-//! Safe wrappers over the port's plugin API v4 (`ts_plugin_api::PluginApi`) and the engine's
+//! Safe wrappers over the port's plugin API v5 (`ts_plugin_api::PluginApi`) and the engine's
 //! function table it hands out. Every `unsafe` call here passes valid pointers for the call's
 //! duration; the tables themselves are the server's statics and live for the process.
 
