@@ -12,7 +12,7 @@ use super::{
     BOT_COST_BUCKETS, BOT_COST_RANGE, BOT_VIEW_DISTANCE, Bot, BotGlobals, BotWorld, EF_NODRAW, EntRef, Entity, SOLID_NOT, SOLID_TRIGGER,
     ScheduleDesc, TS_STATE_STUNT, Task, TaskKind, cond, entflags,
 };
-use crate::nav::{Glass, Monsters, REACHABLE_RANGE};
+use crate::nav::{Glass, Monsters};
 use crate::{Random, Vector};
 
 /// `BOT_REMEMBER_1ST_SEE_ENEMY`.
@@ -489,12 +489,5 @@ impl Bot {
         };
         let _ = w;
         self.weapons.best_weapon_id(dist, too_high, self.me.waterlevel == 3)
-    }
-
-    /// The `REACHABLE_RANGE` check `NORMAL_ATTACK` uses for melee (`WaypointReachable(origin,
-    /// enemy, false)`).
-    pub(crate) fn reachable(&self, w: &dyn BotWorld, to: Vector) -> bool {
-        let _ = REACHABLE_RANGE;
-        crate::nav::Waypoints::reachable(self.me.origin, to, false, w)
     }
 }

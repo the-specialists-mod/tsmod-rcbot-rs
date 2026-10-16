@@ -1056,11 +1056,9 @@ impl Bot {
                 // and kicks.
                 self.kungfu_fight(g, w, rng, &enemy, dist);
             } else if melee {
-                if !self.reachable(w, enemy_origin) {
-                    self.set_move_vector(self.lowest_enemy_cost_vec);
-                } else {
-                    self.set_move_vector(enemy_origin);
-                }
+                // Upstream first moves to `m_vLowestEnemyCostVec` when `WaypointReachable` says
+                // the enemy can't be walked to, then overwrites that with the enemy's origin on
+                // the next line: only the second counts, so the check (40+ traces) is left out.
                 self.set_move_vector(enemy_origin);
                 if dist < 256.0 {
                     self.decide_jump_duck_strafe(w, dist, enemy_origin);
