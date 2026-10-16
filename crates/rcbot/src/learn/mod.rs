@@ -25,6 +25,7 @@ pub mod perceptron;
 pub mod som;
 pub mod store;
 pub mod values;
+pub mod weapon_stats;
 
 pub use bits::Bits;
 pub use data::{BotLearnedData, GlobalLearnedData};
@@ -35,3 +36,4 @@ pub use nn::{Nn, NnGaTrained, NnLayer, TrainSet};
 pub use perceptron::Perceptron;
 pub use som::Som;
 pub use values::{BitsGaValues, BotGaValues, CombatFitnessMetrics, IntGaValues};
+pub use weapon_stats::WeaponStats;

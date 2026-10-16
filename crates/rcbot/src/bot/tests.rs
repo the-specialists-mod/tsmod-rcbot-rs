@@ -1416,3 +1416,27 @@ fn the_cheapest_cost_bucket_is_away_from_the_danger() {
     let v = rig.bot.lowest_enemy_cost_vec;
     assert_eq!((v.x, v.y), (192.0, -192.0));
 }
+
+#[test]
+fn time_in_sight_hits_and_rounds_go_to_the_weapon_table() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(9);
+    let pin = |w: &Plane, _: &Frame| w.ents.borrow_mut()[0].origin = Vector::ZERO;
+    run(&mut rig, &mut w, &mut rng, 100, pin);
+    let seen = rig.bot.weapon_stats().samples(1, 300.0);
+    assert!(seen > 0.5, "{seen}");
+    assert!(rig.with(|b, g| b.weapon_score(g, 1, 300.0)).is_none());
+    // Two rounds fired, one hit for 24.
+    arm(&w, 1, 1, 15, 34);
+    run(&mut rig, &mut w, &mut rng, 3, pin);
+    rig.with(|b, g| b.combat_event(g, &w, &damage(2, 1, 24.0), &mut rng));
+    let t = rig.bot.weapon_stats();
+    assert_eq!(t.accuracy(1, 300.0), Some(0.5));
+    assert!(t.dps(1, 300.0).is_some_and(|(v, _)| v > 0.0));
+    assert!(rig.learned.weapon_prior.samples(1, 300.0) >= seen);
+    // A score once five seconds are in.
+    run(&mut rig, &mut w, &mut rng, 250, pin);
+    let score = rig.with(|b, g| b.weapon_score(g, 1, 300.0));
+    assert!(score.is_some_and(|s| s > 0.0), "{score:?}");
+}

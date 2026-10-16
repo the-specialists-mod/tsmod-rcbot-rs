@@ -7,9 +7,15 @@
 //! and each opponent, when, with which weapon and at what range.
 
 use super::kungfu::FightEnd;
-use super::{Bot, BotGlobals, BotWorld};
+use super::{Bot, BotGlobals, BotWorld, cond};
 use crate::Random;
 use crate::learn::ledger::{CombatEvent, DamageEvent, KillEvent, Ledger, LedgerEntry, range_bin};
+use crate::learn::weapon_stats::{MIN_SAMPLES, WeaponStats};
+
+/// The longest think gap counted as exposure (a stall isn't time spent fighting).
+const MAX_TICK: f32 = 0.25;
+/// Most rounds a clip can drop between two thinks by firing (more is a reload or a switch).
+const MAX_SHOTS_PER_TICK: i32 = 10;
 
 /// Seconds after its last think in which a kung fu fight still counts as under way when it ends.
 const FIGHT_RECENT: f32 = 1.0;
@@ -19,14 +25,34 @@ const FIGHT_RECENT: f32 = 1.0;
 pub struct BotLearning {
     /// What passed between the bot and the other players.
     pub ledger: Ledger,
+    /// Weapon effectiveness by range: damage per second of exposure, accuracy.
+    pub weapons: WeaponStats,
     /// When this life started (the first think alive), 0 while dead.
     pub(crate) life_start: f32,
+    /// The last learning think (0 none this life), the weapon and clip then, and the enemy's
+    /// distance last known.
+    pub(crate) last_tick: f32,
+    pub(crate) last_clip: Option<(i32, i32)>,
+    pub(crate) last_enemy_dist: f32,
 }
 
 impl Bot {
     /// The bot's combat ledger.
     pub fn ledger(&self) -> &Ledger {
         &self.learning.ledger
+    }
+
+    /// The bot's weapon-by-range table.
+    pub fn weapon_stats(&self) -> &WeaponStats {
+        &self.learning.weapons
+    }
+
+    /// How well `weapon` (a TS id, 0 or 38 kung fu) has worked for this bot at `dist`: damage per
+    /// second with the enemy in sight, shrunk toward every bot's results; `None` until the bot
+    /// has [`MIN_SAMPLES`] seconds of its own there.
+    pub fn weapon_score(&self, g: &BotGlobals<'_>, weapon: i32, dist: f32) -> Option<f32> {
+        let t = &self.learning.weapons;
+        (t.samples(weapon, dist) >= MIN_SAMPLES).then(|| t.score(&g.learned.weapon_prior, weapon, dist))
     }
 
     /// The TS weapon id of a blow `attacker` dealt through `inflictor`: a grenade's 24, another
@@ -64,6 +90,11 @@ impl Bot {
                 if attacker == me && victim != me {
                     let e = LedgerEntry { dealt: amount, ..entry(victim, Self::blow_weapon(w, attacker, inflictor)) };
                     self.learning.ledger.record(e);
+                    if let Some(v) = w.entity(victim) {
+                        let dist = (v.origin - my_origin).length();
+                        self.learning.weapons.add_hit(e.weapon, dist, amount);
+                        g.learned.weapon_prior.add_hit(e.weapon, dist, amount);
+                    }
                 } else if victim == me && attacker != me {
                     let e = LedgerEntry { taken: amount, ..entry(attacker, Self::blow_weapon(w, attacker, inflictor)) };
                     self.learning.ledger.record(e);
@@ -95,17 +126,43 @@ impl Bot {
     }
 
     /// Every think while alive, after the tasks ran: the episode with the enemy stays open,
-    /// stale ones close.
+    /// stale ones close; time with the enemy in sight and rounds fired go to the weapon table.
     pub(crate) fn learn_think(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld) {
         let now = w.time();
-        if self.learning.life_start == 0.0 {
-            self.learning.life_start = now;
+        let l = &mut self.learning;
+        if l.life_start == 0.0 {
+            l.life_start = now;
         }
+        let dt = if l.last_tick > 0.0 { (now - l.last_tick).clamp(0.0, MAX_TICK) } else { 0.0 };
+        l.last_tick = now;
         if let Some(e) = self.enemy {
             self.learning.ledger.engage(now, e.index);
         }
         self.learning.ledger.tick(now);
-        let _ = g;
+
+        let enemy_dist = self.resolve(w, self.enemy).map(|e| (e.origin - self.me.origin).length());
+        let weapon = self.state.weapon;
+        let l = &mut self.learning;
+        if let Some(d) = enemy_dist {
+            l.last_enemy_dist = d;
+            if self.conditions & cond::SEE_ENEMY != 0 {
+                l.weapons.add_exposure(weapon, d, dt);
+                g.learned.weapon_prior.add_exposure(weapon, d, dt);
+            }
+        }
+        // Rounds fired: the clip of the same gun going down (kung fu's clip is its power bar).
+        let clip = (weapon, self.state.clip);
+        if let Some((w0, c0)) = l.last_clip
+            && w0 == clip.0
+            && w0 != 0
+            && (1..=MAX_SHOTS_PER_TICK).contains(&(c0 - clip.1))
+            && enemy_dist.is_some()
+        {
+            let fired = (c0 - clip.1) as f32;
+            l.weapons.add_shots(weapon, l.last_enemy_dist, fired);
+            g.learned.weapon_prior.add_shots(weapon, l.last_enemy_dist, fired);
+        }
+        l.last_clip = Some(clip);
     }
 
     /// The bot died (its first think dead, which may come before the kill is scored): the
@@ -116,5 +173,7 @@ impl Bot {
         }
         self.learning.ledger.close_all();
         self.learning.life_start = 0.0;
+        self.learning.last_tick = 0.0;
+        self.learning.last_clip = None;
     }
 }

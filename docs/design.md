@@ -442,6 +442,15 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   `(-192, -192)` (§5.55). The combat code decides how it moves by them.
 * **Saving**: data files are written to `<file>.tmp` and renamed over the old one, so a crash
   mid-save leaves the last good file.
+* **Weapon effectiveness by range** (`learn/weapon_stats.rs`): per bot and TS weapon id × range
+  bin, the seconds it saw its enemy with that weapon in hand (exposure), the damage it dealt
+  (ledger), the rounds it fired (the clip going down) and the hits, fading with exposure (half
+  weight after 600 s). Score: damage per second of exposure, shrunk toward every bot's results
+  (`(n v + 5 p) / (n + 5)`, `n` the exposure), themselves shrunk toward 10/s. API for the weapon
+  choice: `Bot::weapon_score(g, weapon, dist) -> Option<f32>` (`None` under 5 s of the bot's own
+  data), `Bot::weapon_stats()` (`dps`, `accuracy`, `samples`, `score`). Saved as
+  `botprofiles/<key>.rwr` and the prior as `weaponstats.rwr` (text, `rcbot-weapons 1`, `w <id>
+  <bin> <exposure> <damage> <shots> <hits>`).
 
 ## 5. Upstream bugs found
 
@@ -699,7 +708,9 @@ those by going through the port's own code when that code is ported.
   answers scored from the ledger (only the opponent's damage, a block's cost, predicted attacks
   unscored, a death -2); estimates blended opponent → class → profile with human weight and decay;
   a fight settled +2 by a kill and -2 by a death, once; the learned strafe going both ways, kung fu
-  lives not breeding the personal genes, the cheapest cost bucket away from the danger.
+  lives not breeding the personal genes, the cheapest cost bucket away from the danger; the weapon
+  table (rates by range bin, accuracy, shrinkage, fading, file round trip and damaged lines) and a
+  bot filling it from time in sight, rounds fired and hits.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

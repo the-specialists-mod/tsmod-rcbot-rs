@@ -17,6 +17,7 @@ use super::io::Reader;
 use super::opponents::PlayerKeys;
 use super::perceptron::Perceptron;
 use super::values::{BotGaValues, IntGaValues};
+use super::weapon_stats::WeaponStats;
 use crate::Random;
 use crate::nav::rcz;
 
@@ -322,6 +323,8 @@ pub struct GlobalLearnedData {
     pub ts_weapon_choices: Ga<BotGaValues>,
     /// Who each player slot is, for the port's learners (design §4).
     pub player_keys: PlayerKeys,
+    /// Every bot's weapon-by-range results together: the prior each bot's own shrinks toward.
+    pub weapon_prior: WeaponStats,
 }
 
 impl Default for GlobalLearnedData {
@@ -330,6 +333,7 @@ impl Default for GlobalLearnedData {
             enemy_costs: std::array::from_fn(|_| Ga::new(0)),
             ts_weapon_choices: Ga::new(0),
             player_keys: PlayerKeys::default(),
+            weapon_prior: WeaponStats::default(),
         }
     }
 }
