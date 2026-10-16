@@ -7,6 +7,9 @@ use crate::nav::{Glass, Monsters, Trace, flags as fl};
 use crate::weapons::TsWeapon;
 use std::cell::RefCell;
 
+/// The fight: trigger, aim, movement and weapon choice (design §4).
+mod fight;
+
 struct Plane {
     time: f32,
     ents: RefCell<Vec<Entity>>,

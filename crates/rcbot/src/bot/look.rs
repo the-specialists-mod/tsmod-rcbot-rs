@@ -294,10 +294,32 @@ impl Bot {
         self.turn_speed = self.base_turn_speed;
     }
 
+    /// Where on the enemy to aim (design §4; upstream: the middle of its box, `EntityOrigin`):
+    /// a player's upper chest; its head (2 units under the eyes) when only the head is in sight,
+    /// or for a skilled bot (70+) with a precise gun (Desert Eagle, Raging Bull, M16, AK-47,
+    /// Barrett, Contender: headshots do double damage); the middle with a shotgun, whose pellets
+    /// spread over the body anyway. Anything else: its middle.
+    pub(crate) fn aim_point(&self, enemy: &super::Entity) -> Vector {
+        if !enemy.is_client() {
+            return enemy.entity_origin();
+        }
+        let gun = self.gun_in_hand();
+        if gun.is_some_and(|g| g.pellets > 1.0) {
+            return enemy.entity_origin();
+        }
+        let head_only = self.has(super::cond::SEE_ENEMY_HEAD) && !self.has(super::cond::SEE_ENEMY_BODY);
+        let precise = gun.is_some_and(|g| matches!(g.id, 12 | 13 | 18 | 27 | 31 | 36));
+        if head_only || (precise && self.profile.skill >= 70) {
+            enemy.origin + enemy.view_ofs - Vector::new(0.0, 0.0, 2.0)
+        } else {
+            enemy.origin + Vector::new(0.0, 0.0, enemy.view_ofs.z * 0.6)
+        }
+    }
+
     /// `CBot::GetAimVector`: the enemy's middle plus an offset that shrinks with skill, aim skill
     /// and (for players) reputation, redrawn every `m_fAimTime` or so.
     pub(crate) fn aim_vector(&mut self, enemy: &super::Entity, now: f32, rng: &mut dyn Random) -> Vector {
-        let origin = enemy.entity_origin();
+        let origin = self.aim_point(enemy);
         if self.get_aim_vector_time < now {
             let speed = match self.enemy_rep {
                 None => {
@@ -320,7 +342,9 @@ impl Bot {
             }
             self.get_aim_vector_time = now + rng.random_float(self.profile.aim_time - 0.2, self.profile.aim_time + 0.2) * speed;
         }
-        origin + self.offset_vector
+        let target = origin + self.offset_vector;
+        self.fight.aim_target = Some(target);
+        target
     }
 }
 

@@ -3,6 +3,7 @@
 
 pub mod presets;
 pub mod ts;
+pub mod ts_data;
 
 pub use presets::{PresetError, WeaponPreset, WeaponPresets};
 pub use ts::TsWeapon;

@@ -163,6 +163,7 @@ impl Bot {
         self.next_inventory_sync = 0.0;
         self.next_reload_time = 0.0;
         self.kungfu.reset_fight();
+        self.fight = super::fire::Fight::default();
         self.last_enemy = None;
         self.last_failed_waypoint = -1;
         self.listen_to_sound_time = 0.0;
@@ -337,7 +338,9 @@ impl Bot {
                 } else if cur.can_reload() && !cur.out_of_ammo() {
                     self.reload(now);
                 }
-            } else if self.enemy.is_none() && cur.low_on_ammo() && cur.can_reload() {
+            } else if self.enemy.is_none() && cur.low_on_ammo() && cur.can_reload() && self.safe_to_reload(now) {
+                // Under half a clip with no enemy seen for a moment: reload now rather than
+                // run dry in the next fight (design §4).
                 self.reload(now);
             }
         }
@@ -1063,15 +1066,20 @@ impl Bot {
                 if dist < 256.0 {
                     self.decide_jump_duck_strafe(w, dist, enemy_origin);
                 }
+                // TS 3.0's `+attack2` throws a knife and the katana: slash with `+attack`, and
+                // throw only a spare knife at a target out of reach (design §4; upstream pressed
+                // `+attack2` nine times in ten within 72 units).
                 if dist < 72.0 {
-                    if rng.random_long(0, 100) > 90 {
-                        self.primary_attack();
-                    } else {
-                        self.secondary_attack();
-                        if !g.config.is_on(cfg::TS_DONT_STEAL_WEAPONS) {
-                            self.use_button();
-                        }
+                    self.primary_attack();
+                    if !g.config.is_on(cfg::TS_DONT_STEAL_WEAPONS) {
+                        self.use_button();
                     }
+                } else if matches!(weap_id, 25 | 35)
+                    && (150.0..500.0).contains(&dist)
+                    && cur.as_ref().is_some_and(|c| c.clip > 1)
+                    && self.in_aim(&enemy, dist)
+                {
+                    self.secondary_attack();
                 }
             } else {
                 let l = &mut self.learned;

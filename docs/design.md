@@ -108,6 +108,7 @@ callback that finds the state busy is queued and runs before the next frame.
 | `bot_client.cpp` `BotClient_Generic_DeathMessage`'s events; `engine.cpp` `pfnEmitSound`'s loop; `dll.cpp` `DispatchTouch`, `ClientCommand`'s `say`; `globals.cpp` `StartFrame`'s leave-the-game part | `bot/manager.rs` | |
 | `bot.h` `CBotCam`; `dll.cpp` `CBotCam::Think`, `TuneIn`, `TuneOff`, `Spawn`, `Clear` | `bot/botcam.rs`, `host` | |
 | (none: a port addition) the kung fu fighter | `bot/kungfu.rs` | §4 |
+| (none: a port addition) the trigger (fire modes and rates), the recoil penalty, the fight's aim, movement, weapon choice and power-ups; TS 3.0's gun data | `bot/fire.rs`, `weapons/ts_data.rs` | §4 |
 | `bot.cpp` `FindEnemy`'s reputation priority, `EnemyFound`'s TS part (`usepowerup`), Think's grenade cover (`UTIL_IsGrenadeRocket`, `dll.cpp` `BotFunc_TraceToss`), idle chat | `bot/combat.rs`, `bot/think.rs` | |
 | `dll.cpp`/`engine.cpp` hooks, `RCBot_ServerCommand`, `ClientCommand`'s dispatch, `BotFunc_AddBot`'s rest (profile choice, greeting), `BotFunc_ReadProfile`'s brain and reputations, `ClientDisconnect`'s saving, `ServerDeactivate`'s `saveLearnedData`, `CClients::ClientConnected`/`ClientDisconnected` (reputation ids, `AddLoadRep`, `RemoveSaveRep`), `megahal.cpp` `PrepareHALBrainForPersonality`/`LoadHALBrainForPersonality`/`SaveHALBrainForPersonality`'s files, `globals.cpp` `MapInit`'s map config and `NON_TS_TEAMPLAY` (`tm_` maps), `ReadMapConfig`, `StartFrame`'s rejoin (`min_bots`/`max_bots`, leave and join), `SetupBotChat`'s file, `WaypointLoad`'s file choice, `WaypointSave`'s files, `UTIL_ShowMenu`, `UTIL_PlaySound`, `WaypointDrawBeam`, `ClientCommand`'s `±rcbot_force_grip` with `CClient::Think`'s grip, `UTIL_FacingEnt`, `UTIL_getEntityInFront` | `host` | Plugin callbacks and API calls |
 | `bot.cpp` `LookForNewTasks`' TS objectives (`m_TSObjectives`: a random one, team 1 `DEFEND`s it, team 2 `USE`s its `ts_hack`/`ts_bomb` for 9 s); `bot_client.cpp` `BotClient_TS_Objective`, `BotClient_Generic_TeamScore` (`m_iTeamScores`) | `bot/think.rs` (`objective_tasks`), `host` | The plugin API's `objectives` and `GameState::team_scores` stand in for the messages (§4) |
@@ -397,6 +398,25 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   sent 255 ms as the first command and again after each spawn (`SpawnInit` reset the clock).
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
+* **The trigger** (`bot/fire.rs`, data in `weapons/ts_data.rs` from the port's `weapons.toml`):
+  upstream held `+attack` on 90% of thinks, which in TS 3.0 fires a semi-automatic or burst gun
+  once and never again while held (`CTSGun::PrimaryAttack` fires those on a fresh press). The
+  usercmd now presses such a gun's trigger for one command and releases it for at least one, no
+  faster than the gun fires (semi 0.1 s for a gun with an automatic mode, else its rate: Desert
+  Eagle 0.1, Raging Bull 0.15, Contender 0.25, Barrett 0.7; a semi shotgun 0.15; a burst 0.26);
+  akimbo semi alternates `+attack` and `+attack2` (each gun its own button). With the double
+  fire rate power-up semi fires while held, so the key is held. Automatic and pump guns, blades
+  and grenades are held as before.
+* **Aim point**: upstream aimed at the middle of the enemy's box. The bot aims at a player's
+  upper chest (`origin + 0.6 view_ofs.z`), at its head (2 units under the eyes) when only the
+  head is in sight or when a skilled bot (70+) holds a precise gun (Desert Eagle, Raging Bull,
+  M16, AK-47, Barrett, Contender: headshots do double damage), and at the middle with a shotgun.
+* **Partial reloads**: with no enemy seen for 1.5 s, a gun under half its clip with rounds in
+  reserve is reloaded (once per press guard as above), unless an infinite-clip power-up runs.
+  `CanReload` and `LowOnAmmo` answer from the clip and reserve (§5.49).
+* **Blades**: TS 3.0's `+attack2` throws a knife and throws the katana away; upstream pressed it
+  nine times in ten within 72 units. The bot slashes with `+attack` within 72 units, and throws a
+  knife only when it has a spare (more than one) at an enemy 150-500 units away it is aiming at.
 
 ## 5. Upstream bugs found
 
@@ -548,7 +568,8 @@ Found while porting; not filed upstream.
     of sight. In `cargo xtask e2e` three quarters of the bots' attack commands were on an empty
     clip, and kills were rare enough that a two-minute run sometimes had none. **Fixed** for the
     max clip (§4): the largest clip seen is kept, so `NeedToReload` makes `NORMAL_ATTACK` take
-    cover and press reload, as upstream means to; `m_iAmmo1` stays NULL (`CanReload` false).
+    cover and press reload, as upstream means to. `CanReload` and `LowOnAmmo` now ask the clip
+    and reserve instead of `m_iAmmo1` (**Fixed**, §4 partial reloads).
 50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
     `2 * time + secs`. Kept.
 51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not

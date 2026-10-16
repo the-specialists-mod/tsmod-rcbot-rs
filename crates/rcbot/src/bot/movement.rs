@@ -271,12 +271,13 @@ impl Bot {
         if self.hold_attack_time > now {
             self.primary_attack();
         }
+        let buttons = self.fire_buttons(self.button, now);
         Some(BotCmd {
             angles: self.v_angle,
             forward: self.move_speed,
             side: self.strafe_speed,
             up: self.up_speed,
-            buttons: self.button,
+            buttons,
             impulse: 0,
             msec,
         })

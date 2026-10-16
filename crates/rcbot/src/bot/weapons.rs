@@ -46,14 +46,16 @@ impl BotWeapon {
         self.clip <= 0 && self.reserve <= 0
     }
 
-    /// `LowOnAmmo`: false without `m_iAmmo1`.
+    /// `LowOnAmmo`, TS: under half the clip seen. Upstream asked `m_iAmmo1`, which TS never sets,
+    /// so it was always false (design §5).
     pub fn low_on_ammo(&self) -> bool {
-        false
+        !self.is_melee() && self.max_clip > 0 && self.clip * 2 < self.max_clip
     }
 
-    /// `CanReload`: false without `m_iAmmo1`, so always false in TS (design §5).
+    /// `CanReload`, TS: a gun whose clip has room and whose reserve has rounds. Upstream asked
+    /// `m_iAmmo1`, so it was always false in TS (design §5).
     pub fn can_reload(&self) -> bool {
-        false
+        !self.is_melee() && self.max_clip > 0 && self.clip < self.max_clip && self.reserve > 0
     }
 
     /// `NeedToReload`, TS: an empty clip with a reserve, for a gun whose clip was seen.

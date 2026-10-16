@@ -14,6 +14,7 @@
 pub mod botcam;
 mod combat;
 pub mod events;
+mod fire;
 pub mod kungfu;
 mod look;
 mod manager;
@@ -633,6 +634,8 @@ pub struct Bot {
     pub(crate) next_reload_time: f32,
     /// The kung fu fighter: its learned stances, reactions and combos, and the fight now.
     pub kungfu: kungfu::KungFu,
+    /// The trigger, recoil, aim and fight state the port adds (design §4).
+    pub(crate) fight: fire::Fight,
     pub(crate) pickup_entity: Option<EntRef>,
     pub(crate) pickup_item_time: f32,
 
@@ -769,6 +772,7 @@ impl Bot {
             now: 0.0,
             next_reload_time: 0.0,
             kungfu: kungfu::KungFu::new(),
+            fight: fire::Fight::default(),
             pickup_entity: None,
             pickup_item_time: 0.0,
             spawn_time: 0.0,
