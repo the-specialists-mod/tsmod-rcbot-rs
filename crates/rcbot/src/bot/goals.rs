@@ -72,6 +72,11 @@ const POWERUP_ARMOR: i32 = 128;
 /// See [`POWERUP_HEALTH`].
 const POWERUP_KUNGFU: i32 = 4;
 
+/// The Barrett, TS's sniper rifle.
+const SNIPER: i32 = 18;
+/// Guns that do best from a held spot: the Barrett and the scoped rifles (M4A1, AK47, AUG, M16A4).
+const LONG_GUNS: [i32; 5] = [SNIPER, 5, 13, 15, 27];
+
 /// A goal must score this much to beat roaming ([`Bot::choose_goal`]).
 pub(crate) const ROAM_SCORE: f32 = 10.0;
 
@@ -82,8 +87,12 @@ pub(crate) enum Goal {
     Item(EntRef),
     /// Go after an enemy last seen at this place and time.
     Hunt(Vector, f32),
-    /// Go and see what made a sound there.
+    /// Go and see what made a sound there (or what a teammate saw).
     Investigate(Vector),
+    /// Outnumbered: join the teammate there.
+    Regroup(Vector),
+    /// Hold a waypoint with long sight lines for a while (a long gun, low health, a fight near).
+    Hold(i32),
     /// Nothing better: roam (or upstream's objectives and end-level waypoints).
     Roam,
 }
@@ -191,7 +200,83 @@ impl Bot {
                 best = (Goal::Investigate(h.origin), s);
             }
         }
+        // What teammates saw and heard, worth less (they may be on it) and only when nobody claimed it.
+        if let Some(board) = g.squads.boards.get(self.state.team) {
+            for t in board.sightings.iter().filter(|t| t.by != self.index) {
+                let fresh = 1.0 - (now - t.time) / super::board::SIGHTING_FOR;
+                let s = score(25.0 * fresh * ready * self.claim_near(g, w, t.origin), (t.origin - from).length(), 0.0);
+                if s > best.1 {
+                    best = (Goal::Investigate(t.origin), s);
+                }
+            }
+            for t in board.sounds.iter().filter(|t| t.by != self.index) {
+                let fresh = 1.0 - (now - t.time) / 8.0;
+                let s = score(15.0 * t.loud * fresh * ready * self.claim_near(g, w, t.origin), (t.origin - from).length(), 0.0);
+                if s > best.1 {
+                    best = (Goal::Investigate(t.origin), s);
+                }
+            }
+        }
+        if self.hold_again <= now
+            && let Some((spot, value)) = self.hold_spot(g, now)
+        {
+            let s = score(value, (g.waypoints.origin(spot) - from).length(), self.danger_near(g, w, g.waypoints.origin(spot)));
+            if s > best.1 {
+                best = (Goal::Hold(spot), s);
+            }
+        }
+        if let Some(mate) = self.regroup_point(g, now) {
+            let s = score(60.0, (mate - from).length(), 0.0);
+            if s > best.1 {
+                best = (Goal::Regroup(mate), s);
+            }
+        }
         best
+    }
+
+    /// Whether to hold a place rather than roam, and where: a waypoint within 600 units that sees
+    /// the most of the map (the visibility table), not taken by a teammate. Worth it with a long
+    /// gun (a sniper rifle, a scoped rifle), hurt, or soon after a fight; little after a long quiet.
+    pub(crate) fn hold_spot(&self, g: &BotGlobals<'_>, now: f32) -> Option<(i32, f32)> {
+        let weapon = self.current_weapon.unwrap_or(0);
+        let mut value = 0.0;
+        if LONG_GUNS.contains(&weapon) {
+            value += if weapon == SNIPER { 30.0 } else { 12.0 };
+        }
+        if self.me.health < 50.0 {
+            value += 10.0;
+        }
+        if self.last_see_enemy_time > 0.0 && now - self.last_see_enemy_time < 10.0 {
+            value += 6.0;
+        }
+        if value <= 0.0 {
+            return None;
+        }
+        let wp = &*g.waypoints;
+        let from = self.me.origin;
+        let mut best: Option<(usize, usize)> = None;
+        for i in 0..wp.len() {
+            let f = wp.flags(i as i32);
+            if f & (crate::nav::flags::DELETED | crate::nav::flags::AIMING | crate::nav::flags::UNREACHABLE) != 0
+                || (wp.origin(i as i32) - from).length() > 600.0
+                || self.claim_factor(g, i) < 1.0
+            {
+                continue;
+            }
+            let sees = (0..wp.len()).filter(|&j| j != i && wp.visibility.get(i, j)).count();
+            if best.is_none_or(|(_, b)| sees > b) {
+                best = Some((i, sees));
+            }
+        }
+        // A spot that sees little is no better than walking.
+        let (spot, sees) = best?;
+        (sees >= 8).then_some((spot as i32, value))
+    }
+
+    /// [`Bot::claim_factor`] for the waypoint nearest a place.
+    fn claim_near(&self, g: &BotGlobals<'_>, w: &dyn BotWorld, at: Vector) -> f32 {
+        let wpt = self.nearest_waypoint(g, w, at, 400.0, -1, false, false, false);
+        usize::try_from(wpt).map_or(1.0, |i| self.claim_factor(g, i))
     }
 
     /// How ready the bot is to look for a fight: its health, less without a loaded gun.
@@ -246,7 +331,25 @@ impl Bot {
 
     /// How much the bot still wants an item a teammate is going for (1: nobody is).
     pub(crate) fn claim_item_factor(&self, g: &BotGlobals<'_>, item: EntRef) -> f32 {
-        let _ = (g, item);
-        1.0
+        let taken =
+            g.squads.boards.get(self.state.team).is_some_and(|b| b.claims.iter().any(|c| c.by != self.index && c.item == Some(item)));
+        if taken { 0.1 } else { 1.0 }
+    }
+
+    /// Outnumbered: more enemies seen near the bot in the last 5 s (by it or its team) than it has
+    /// teammates near it, by two or more. Where the nearest teammate is, if so.
+    pub(crate) fn regroup_point(&self, g: &BotGlobals<'_>, now: f32) -> Option<Vector> {
+        let board = g.squads.boards.get(self.state.team)?;
+        let me = self.me.origin;
+        let mut enemies: Vec<EntRef> =
+            board.sightings.iter().filter(|s| now - s.time < 5.0 && (s.origin - me).length() < 1500.0).map(|s| s.enemy).collect();
+        enemies.extend(self.remembered.iter().filter(|p| now - p.time < 5.0 && (p.origin - me).length() < 1500.0).filter_map(|p| p.entity));
+        enemies.sort_by_key(|e| (e.index, e.serial));
+        enemies.dedup();
+        let near = board.mates(self.index).filter(|m| (*m - me).length() < 1000.0).count();
+        if enemies.len() < near + 2 {
+            return None;
+        }
+        board.mates(self.index).filter(|m| (*m - me).length() >= 300.0).min_by(|a, b| (*a - me).length().total_cmp(&(*b - me).length()))
     }
 }

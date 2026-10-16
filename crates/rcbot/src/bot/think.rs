@@ -297,11 +297,6 @@ impl Bot {
             self.spawn_position = self.me.origin;
         }
         self.need_to_init = true;
-        // A stealthy squad walks at half speed; `Think` resets the speed before anything reads
-        // it, so this never shows (design §5). Kept.
-        if self.squad.and_then(|id| g.squads.get(id)).is_some_and(|s| s.is_stealth()) {
-            self.ideal_move_speed = self.max_speed / 2.0;
-        }
 
         self.remembered.tick(now);
         self.hearing.tick(now);
@@ -403,8 +398,11 @@ impl Bot {
             }
         }
 
-        if !self.follow_formation(g, w) && self.update_waypoint_time < now && !self.update_waypoint(g, w, rng) {
-            self.update_waypoint_time = now + 0.5;
+        // Upstream waited half a second whenever there was no next waypoint, so a bot stood still
+        // at every goal it reached; only a bot without any waypoint near waits now
+        // (`update_waypoint`, design §4).
+        if !self.follow_formation(g, w) && self.update_waypoint_time < now {
+            self.update_waypoint(g, w, rng);
         }
 
         if self.enemy.is_none() {
@@ -455,6 +453,7 @@ impl Bot {
         self.update_pre_aim(g, now, rng);
         // `WantToFindEnemy`, TS: unless `dont_shoot` is on.
         self.enemy = if self.want_to_find_enemy { self.find_enemy(g, w, rng) } else { None };
+        self.share_with_team(g, w);
     }
 
     /// The map's items ([`super::items::ItemMemory`]): the list now and then, and whether the ones
@@ -734,6 +733,9 @@ impl Bot {
             if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) { LookTask::SearchForLastEnemy } else { LookTask::PreAim };
         let id = self.tasks.new_schedule_id();
         self.looking_for_enemy = false;
+        // A new goal's path may be searched at once (upstream waited out the last search's half
+        // second, standing at the goal it had reached).
+        self.find_path_time = 0.0;
         let (goal, _) = self.choose_goal(g, w, now);
         match goal {
             Goal::Item(item) => {
@@ -767,6 +769,19 @@ impl Bot {
                 let search = rng.random_float(3.0, 5.0);
                 self.add_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, search, origin));
                 self.looking_for_enemy = true;
+                let wpt = self.nearest_waypoint(g, w, origin, 400.0, -1, false, false, false);
+                self.claim(g, wpt, None);
+                return;
+            }
+            Goal::Hold(spot) => {
+                self.hold_again = now + rng.random_float(15.0, 30.0);
+                self.add_task(Task::new(TaskKind::FindPath, id, None, spot, -1.0, Vector::ZERO).with_timeout(now, HUNT_TIME));
+                self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, g.waypoints.origin(spot)));
+                self.claim(g, spot, None);
+                return;
+            }
+            Goal::Regroup(mate) => {
+                self.add_task(Task::new(TaskKind::FindPath, id, None, 0, 0.0, mate).with_timeout(now, HUNT_TIME));
                 return;
             }
             Goal::Roam => {}

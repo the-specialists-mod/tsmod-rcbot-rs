@@ -10,6 +10,9 @@ use crate::config::BOT_WAYPOINT_TOUCH_DIST;
 use crate::nav::{Glass, Monsters, NearestOptions, REACHABLE_RANGE, flags as fl};
 use crate::{Random, Vector};
 
+/// Teammates' goals nearer than this to one make it worth less.
+const CLAIM_RANGE: f32 = 500.0;
+
 impl Bot {
     /// `WaypointLocations.NearestWaypoint(origin, range, ignore, visible, unreachable, is_bot)`
     /// with the bot's failed goals when `failed`.
@@ -40,10 +43,19 @@ impl Bot {
         g.waypoints.find_weighted_goal(self.team, 0, &ignore, weight, rng).map_or(-1, |i| i as i32)
     }
 
-    /// How much the bot still wants a goal its teammates have claimed (1: nobody has).
+    /// How much the bot still wants a goal its teammates have claimed (1: nobody has; less the
+    /// nearer their goal is to this one).
     pub(crate) fn claim_factor(&self, g: &BotGlobals<'_>, waypoint: usize) -> f32 {
-        let _ = (g, waypoint);
-        1.0
+        let Some(board) = g.squads.boards.get(self.state.team) else { return 1.0 };
+        let at = g.waypoints.origin(waypoint as i32);
+        let mut f = 1.0f32;
+        for c in board.claims.iter().filter(|c| c.by != self.index && c.waypoint >= 0) {
+            let d = (g.waypoints.origin(c.waypoint) - at).length();
+            if d < CLAIM_RANGE {
+                f = f.min(0.2 + 0.8 * d / CLAIM_RANGE);
+            }
+        }
+        f
     }
 
     /// `BotNavigate_AStarAlgo` for the bot: upstream's search, except that a goal no path reaches
@@ -73,24 +85,52 @@ impl Bot {
         self.astar.search_with(&mut self.paths, q, continue_search, g.waypoints, w, rng, &opts)
     }
 
-    /// The waypoints nearest where enemies were lately seen, weighted by how lately.
+    /// The waypoints nearest where enemies were lately seen (by the bot or its team), weighted
+    /// by how lately.
     pub(crate) fn threat_waypoints(&self, g: &BotGlobals<'_>, w: &dyn BotWorld) -> Vec<(usize, f32)> {
+        let now = self.now;
+        let mut seen: Vec<(Vector, f32)> =
+            self.remembered.iter().map(|p| (p.origin, 1.0 - (now - p.time) / super::remember::REMEMBER_FOR)).collect();
+        if let Some(b) = g.squads.boards.get(self.state.team) {
+            seen.extend(b.sightings.iter().map(|s| (s.origin, 1.0 - (now - s.time) / super::board::SIGHTING_FOR)));
+        }
         let mut out: Vec<(usize, f32)> = Vec::new();
-        for p in self.remembered.iter() {
-            let wpt = self.nearest_waypoint(g, w, p.origin, 400.0, -1, false, false, false);
-            if let Ok(i) = usize::try_from(wpt)
-                && !out.iter().any(|&(x, _)| x == i)
-            {
-                out.push((i, 1.0));
+        for (origin, weight) in seen {
+            let wpt = self.nearest_waypoint(g, w, origin, 400.0, -1, false, false, false);
+            if let Ok(i) = usize::try_from(wpt) {
+                match out.iter_mut().find(|(x, _)| *x == i) {
+                    Some(e) => e.1 = e.1.max(weight.max(0.1)),
+                    None => out.push((i, weight.max(0.1))),
+                }
             }
         }
         out
     }
 
-    /// Tells the bot's team where it is going (a waypoint, or an item): teammates leave it to
-    /// the bot.
+    /// Tells the bot's team where it is going (a waypoint, or an item) for the next 30 s:
+    /// teammates leave it to the bot.
     pub(crate) fn claim(&mut self, g: &mut BotGlobals<'_>, waypoint: i32, item: Option<super::EntRef>) {
-        let _ = (g, waypoint, item);
+        let until = self.now + 30.0;
+        if let Some(board) = g.squads.boards.get_mut(self.state.team) {
+            board.claim(super::board::Claim { by: self.index, waypoint, item, until });
+        }
+    }
+
+    /// Tells the bot's team what it knows now: its position and path, the enemy it fights, the
+    /// sounds it heard; and forgets what is old on the board.
+    pub(crate) fn share_with_team(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld) {
+        let now = self.now;
+        let team = self.state.team;
+        let enemy = self.resolve(w, self.enemy).filter(|_| self.has(super::cond::SEE_ENEMY));
+        let Some(board) = g.squads.boards.get_mut(team) else { return };
+        board.expire(now);
+        board.post(self.index, self.me.origin, &self.paths.bot_paths, now);
+        if let Some(e) = enemy {
+            board.sight(self.index, e.handle(), e.entity_origin(), now);
+        }
+        for h in self.hearing.iter().filter(|h| h.time == now) {
+            board.hear(self.index, h.origin, h.loud, now);
+        }
     }
 
     /// A moving search around `center` (`SEARCH_FOR_ENEMY` with a place): walks to random
@@ -125,8 +165,7 @@ impl Bot {
 
     /// The waypoints on teammates' paths (sorted).
     pub(crate) fn crowded_waypoints(&self, g: &BotGlobals<'_>) -> Vec<usize> {
-        let _ = g;
-        Vec::new()
+        g.squads.boards.get(self.state.team).map_or_else(Vec::new, |b| b.paths_of_others(self.index))
     }
 
     /// Records the path between two waypoints as failed (`m_stFailedPaths.AddFailedPath`).
@@ -223,6 +262,8 @@ impl Bot {
         if cur == -1 {
             self.current_waypoint = self.nearest_waypoint(g, w, origin, REACHABLE_RANGE, self.last_failed_waypoint, true, false, true);
             if self.current_waypoint == -1 {
+                // No waypoint near: look again in half a second (`Think`'s wait).
+                self.update_waypoint_time = now + 0.5;
                 return false;
             }
             self.prev_waypoint_dist = g.waypoints.distance(origin, self.current_waypoint);

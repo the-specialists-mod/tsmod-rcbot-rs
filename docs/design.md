@@ -477,6 +477,24 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   at; a teammate carrying it is escorted (kept within 300 units); an enemy carrier is cut off at
   the point it must reach; otherwise the bot goes for a case lying in the map that its team may
   take (`ts_flag` of another team or any).
+* **Team boards** (`board.rs`, kept in `Squads::boards`, one per rules team, none in
+  deathmatch): each bot posts every think where it is and the path it has left, the enemy it
+  sees and the sounds it hears, and the goal it took (30 s). Teammates' goals within 500 units
+  are worth less (down to a fifth; an item a teammate goes for a tenth), their sightings and
+  sounds are goals too (worth less than the bot's own), their paths are `crowded` in tactical
+  paths and their sightings threats; an outnumbered bot (two or more enemies seen near in 5 s
+  beyond the teammates within 1000 units) regroups with the nearest teammate. A player's death
+  clears its sightings and posts. Upstream's bots shared nothing but squads.
+* **Moving on** (`look_for_new_tasks`, `update_waypoint`): upstream stopped the bot at every new
+  task pass, waited half a second whenever no next waypoint was set (every goal reached), and
+  waited out the last search's half second before searching the next goal's path, so it stood
+  still at every goal; now only a bot with no waypoint near waits. A bot holds a spot instead of
+  roaming (`Hold`: the waypoint within 600 units that sees the most, seeing at least 8, untaken)
+  with a long gun (the Barrett most, scoped rifles), when hurt or right after a fight, for 10-20
+  s, then roams 15-30 s before holding again. Searches move (above).
+* **Speeds**: a stay-near waypoint halves the speed in the frame the move is worked out
+  (upstream set it in `RunPlayerMove`, a frame late), and a stealthy squad walks at half speed
+  (upstream overwrote it before it was read, §5.62).
 * **Tactical paths** (`rcbot config tactical_paths 1`, off by default: upstream's shortest
   paths; `nav::Tactics`): an edge into waypoint `w` costs its length times `1 + 2 danger(w) +
   1.5 exposure(w) + 0.5 crowded(w)`: `danger` from the learned heat map (`BotGlobals::danger`, a
@@ -672,7 +690,7 @@ Found while porting; not filed upstream.
     `SquadCanShoot` is removed on the next line, before any task reads it (and TS's
     `WantToFindEnemy` ignores it). Kept.
 62. **Stealth squads don't slow down** (`Think`, `bot.cpp:3150`): the half speed is overwritten
-    with the full speed before anything reads it. Kept.
+    with the full speed before anything reads it. **Fixed** (§4).
 63. **An enemy's priority only counts if it is also nearer** (`FindEnemy`, `bot.cpp:9184`):
     `iPriority >= iBestPriority && fFitness < fBestFitness`, so a disliked player seen after a
     nearer stranger isn't chosen; a higher priority seen first does keep lower ones out. Kept.
@@ -754,6 +772,10 @@ those by going through the port's own code when that code is ported.
   pre-aim picks the waypoint coming into view, the dangerous one first, then another; objectives
   by their text (attack: path and 9 s use; defend: a waypoint 200-900 units off that sees it); CTB
   (take the other team's case, carry it home, escort a teammate, cut off an enemy carrier).
+  Team boards: teammates' paths, claims and sightings, regrouping when outnumbered; a bot roaming
+  ts_dojo stands still less than 4% of the time (upstream stopped at every goal); a sniper holds
+  the spot that sees the most, a pistol roams; stay-near waypoints and stealth squads halve the
+  speed in the same frame.
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,

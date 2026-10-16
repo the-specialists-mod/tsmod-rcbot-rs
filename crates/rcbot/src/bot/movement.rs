@@ -108,6 +108,16 @@ impl Bot {
         -a
     }
 
+    /// The speed to move at now: `m_fIdealMoveSpeed`, at most half the maximum at a stay-near
+    /// waypoint or in a stealthy squad. Upstream set the stay-near speed in `RunPlayerMove`, after
+    /// this frame's move was worked out (so a frame late), and the stealth speed was overwritten
+    /// before anything read it (design §5.62). Fixed (§4).
+    fn speed_limit(&self, g: &BotGlobals<'_>) -> f32 {
+        let slow =
+            self.current_waypoint_flags & fl::STAY_NEAR != 0 || self.squad.and_then(|id| g.squads.get(id)).is_some_and(|s| s.is_stealth());
+        if slow { self.ideal_move_speed.min(self.max_speed / 2.0) } else { self.ideal_move_speed }
+    }
+
     /// `CBot::WorkMoveDirection`: forward and side speeds toward `m_vMoveToVector` relative to
     /// the view, around an entity to avoid.
     pub(crate) fn work_move_direction(&mut self, w: &dyn BotWorld, g: &BotGlobals<'_>) {
@@ -174,9 +184,10 @@ impl Bot {
         }
         fix_float_angle(&mut angle);
         let radians = angle * std::f32::consts::PI / 180.0;
-        self.move_speed = self.ideal_move_speed * radians.cos();
+        let speed = self.speed_limit(g);
+        self.move_speed = speed * radians.cos();
         if self.strafe_time < now {
-            self.strafe_speed = self.ideal_move_speed * radians.sin();
+            self.strafe_speed = speed * radians.sin();
         }
         if climb == Climb::Climbing {
             self.button |= buttons::FORWARD;
@@ -398,7 +409,7 @@ impl Bot {
     pub(crate) fn run_player_move(&mut self, now: f32, frame_time: f32) -> Option<BotCmd> {
         let msec = next_msec(&mut self.msec_clock, now, frame_time)?;
         fix_angles(&mut self.v_angle);
-        self.ideal_move_speed = if self.current_waypoint_flags & fl::STAY_NEAR != 0 { self.max_speed / 2.0 } else { self.max_speed };
+        // The stay-near speed is applied where the move is worked out (`speed_limit`).
         if self.current_waypoint_flags & fl::CROUCH != 0 || (self.start_duck_time <= now && self.end_duck_time > now) {
             self.duck();
         }

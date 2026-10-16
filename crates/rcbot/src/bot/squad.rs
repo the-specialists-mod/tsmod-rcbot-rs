@@ -287,14 +287,18 @@ pub struct Squads {
     pub orders: Vec<SquadOrder>,
     /// Lines for players' chat areas (`ClientPrint(HUD_PRINTTALK)`, `BotPrintTalkMessageOne`).
     pub messages: Vec<(u32, String)>,
+    /// What each team's bots tell each other (port addition, design §4), kept here because the
+    /// squads are the bots' shared state that lives across frames.
+    pub boards: super::board::TeamBoards,
 }
 
 impl Squads {
-    /// `FreeMemory`.
+    /// `FreeMemory` (and the team boards).
     pub fn clear(&mut self) {
         self.squads.clear();
         self.orders.clear();
         self.messages.clear();
+        self.boards.clear();
     }
 
     /// The squad with this id, if it still exists.

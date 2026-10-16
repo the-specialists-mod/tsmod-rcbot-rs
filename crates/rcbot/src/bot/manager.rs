@@ -143,6 +143,7 @@ impl BotManager {
             for b in self.iter_mut() {
                 b.remembered.forget(v.handle());
             }
+            g.squads.boards.died(v.handle());
         }
         if killer == victim || killer == -1 {
             if let Some(b) = u32::try_from(victim).ok().and_then(|v| self.get_mut(v)) {

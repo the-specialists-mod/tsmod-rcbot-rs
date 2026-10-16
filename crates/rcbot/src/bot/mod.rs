@@ -11,6 +11,7 @@
 //! ([`PlayerState`]), which is also how teams are known (upstream compared model strings, which
 //! TS 3.0's teams don't use; the-specialistsmod-rs#104).
 
+pub mod board;
 pub mod botcam;
 mod combat;
 pub mod events;
@@ -707,6 +708,8 @@ pub struct Bot {
     pub(crate) pre_aim: preaim::PreAim,
     /// Where a moving search goes next (`SEARCH_FOR_ENEMY` with a centre).
     pub(crate) search_point: Option<Vector>,
+    /// When the bot may hold a spot again (it roams in between; design §4).
+    pub(crate) hold_again: f32,
     /// The objective the bot last tried to complete, and when it should be done by.
     pub(crate) objective_attempt: Option<(i32, f32)>,
     /// Objectives the bot's team couldn't complete, defended instead until the time.
@@ -863,6 +866,7 @@ impl Bot {
             hearing: hearing::Hearing::default(),
             pre_aim: preaim::PreAim::default(),
             search_point: None,
+            hold_again: 0.0,
             objective_attempt: None,
             objective_failed: Vec::new(),
             used_melee: false,

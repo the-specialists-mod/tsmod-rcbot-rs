@@ -1882,3 +1882,119 @@ fn ctb_bots_take_the_case_home_and_escort_or_cut_off_carriers() {
     enemy.player.as_mut().unwrap().has_flag = true;
     assert_eq!(tasks(&world(me, vec![enemy]), &mut rig)[0], (TaskKind::FindPath, Some(7)));
 }
+
+#[test]
+fn stealth_squads_and_stay_near_waypoints_slow_down_at_once() {
+    let mut rig = Rig::new(Config::default());
+    let leader = player(2, Vector::new(-100.0, 0.0, 0.0), 0);
+    let w = plane(vec![player(1, Vector::ZERO, 0), leader.clone()]);
+    let speed = |rig: &mut Rig| {
+        rig.with(|b, g| {
+            b.me = w.entity(1).unwrap();
+            b.ideal_move_speed = b.max_speed;
+            b.set_move_vector(Vector::new(500.0, 0.0, 0.0));
+            b.work_move_direction(&w, g);
+            b.move_speed.hypot(b.strafe_speed)
+        })
+    };
+    assert!((speed(&mut rig) - 290.0).abs() < 1.0);
+    // A stay-near waypoint: half speed in the same frame (upstream: the next one).
+    rig.bot.current_waypoint_flags = fl::STAY_NEAR;
+    assert!(speed(&mut rig) <= 145.5);
+    rig.bot.current_waypoint_flags = 0;
+    // A stealthy squad: half speed (upstream overwrote it before it was read, design §5.62).
+    let me = w.entity(1).unwrap();
+    let id = rig.extra.squads.add_member(&leader, &me, false).unwrap();
+    rig.extra.squads.get_mut(id).unwrap().set_combat_type(squad::CombatType::Stealth);
+    rig.bot.squad = Some(id);
+    assert!(speed(&mut rig) <= 145.5);
+}
+
+#[test]
+fn teammates_share_sightings_claims_and_paths() {
+    let mut rig = Rig::new(Config::default());
+    for i in 0..6 {
+        for j in 0..6 {
+            rig.wp.visibility.set(i, j, true);
+        }
+    }
+    let mut w = plane(vec![player(1, Vector::ZERO, 1), player(3, Vector::new(900.0, 0.0, 0.0), 1)]);
+    w.teamplay = true;
+    let enemies = [EntRef { index: 5, serial: 1 }, EntRef { index: 6, serial: 1 }];
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        b.now = 10.0;
+        let board = g.squads.boards.get_mut(1).unwrap();
+        // Teammate 3 goes to waypoint 4 by 2, 3, 4 and goes for an item.
+        board.post(3, Vector::new(1200.0, 0.0, 0.0), &[4, 3, 2], 10.0);
+        board.claim(board::Claim { by: 3, waypoint: 4, item: Some(EntRef { index: 9, serial: 1 }), until: 40.0 });
+        assert_eq!(b.crowded_waypoints(g), vec![2, 3, 4]);
+        assert!(b.claim_factor(g, 4) < 0.25 && b.claim_factor(g, 0) == 1.0);
+        assert_eq!(b.claim_item_factor(g, EntRef { index: 9, serial: 1 }), 0.1);
+        // Two enemies seen near the bot, no teammate near: regroup with the teammate.
+        assert_eq!(b.regroup_point(g, 10.0), None);
+        for (i, e) in enemies.iter().enumerate() {
+            g.squads.boards.get_mut(1).unwrap().sight(3, *e, Vector::new(200.0, 100.0 * i as f32, 0.0), 9.0);
+        }
+        assert_eq!(b.regroup_point(g, 10.0), Some(Vector::new(1200.0, 0.0, 0.0)));
+        // A teammate's sighting is worth going to see; its sightings are threats for tactical paths.
+        let (goal, _) = b.choose_goal(g, &w, 10.0);
+        assert!(matches!(goal, goals::Goal::Regroup(_)), "{goal:?}");
+        assert!(!b.threat_waypoints(g, &w).is_empty());
+        // Deathmatch: no board.
+        b.state.team = 0;
+        assert_eq!(b.claim_factor(g, 4), 1.0);
+    });
+}
+
+#[test]
+fn a_bot_never_stands_at_a_reached_goal() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(5);
+    let (mut still, mut last) = (0, Vector::ZERO);
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        6000,
+        |_| false,
+        |b, _| {
+            if (b.me.origin - last).length_2d() < 0.5 {
+                still += 1;
+            }
+            last = b.me.origin;
+        },
+    );
+    // Upstream stopped at every goal (`StopMoving` and half a second without a waypoint): about
+    // one frame in ten on this map.
+    assert!(still * 100 < 6000 * 4, "{still} of 6000 frames standing");
+}
+
+#[test]
+fn a_sniper_holds_a_spot_that_sees_far() {
+    let mut rig = Rig::new(Config::default());
+    // Waypoint 3 sees all the others; the rest see only their neighbours.
+    for i in 0..12 {
+        rig.wp.add_origin(Vector::new(900.0 + i as f32 * 100.0, 300.0, 0.0), 0, None);
+    }
+    for j in 0..rig.wp.len() {
+        rig.wp.visibility.set(3, j, true);
+    }
+    let w = plane(vec![player(1, Vector::new(300.0, 0.0, 0.0), 0)]);
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        b.current_weapon = Some(1);
+        assert!(b.hold_spot(g, 5.0).is_none(), "a pistol roams");
+        b.current_weapon = Some(18);
+        let (spot, _) = b.hold_spot(g, 5.0).unwrap();
+        assert_eq!(spot, 3);
+        let mut rng = XorShiftRandom::new(2);
+        b.look_for_new_tasks(g, &w, &mut rng);
+        let kinds: Vec<_> = b.tasks().iter().map(|t| (t.kind, t.int)).collect();
+        assert_eq!(kinds, [(TaskKind::FindPath, 3), (TaskKind::Defend, 0)]);
+        // Then it roams a while before holding again.
+        assert!(b.hold_again >= 16.0);
+    });
+}
