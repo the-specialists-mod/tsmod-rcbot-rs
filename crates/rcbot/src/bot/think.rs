@@ -19,6 +19,10 @@ const INVENTORY_SYNC: f32 = 1.0;
 /// Seconds a weapon switch waits for the game before it may be asked again.
 const SWITCH_WAIT: f32 = 1.0;
 
+/// A move this long in one frame is a teleport (nothing in TS runs a player 256 units in a
+/// frame at any usual frame rate).
+const TELEPORT_DISTANCE: f32 = 256.0;
+
 /// `UTIL_IsGrenadeRocket`.
 pub(crate) fn is_grenade_rocket(e: &Entity) -> bool {
     e.classname.contains("grenade") || e.classname.contains("rpg_rocket")
@@ -44,11 +48,15 @@ impl Bot {
     pub fn frame(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) -> Frame {
         let mut out = Frame::default();
         let Some(me) = w.entity(self.index) else { return out };
+        let (was_alive, was_at) = (self.is_alive(), self.me.origin);
         self.state = me.player.unwrap_or_default();
         // The engine sets `v_angle` from our usercmd; it differs when the game turned the
         // player (spawn, teleport: `fixangle`).
         self.v_angle = me.v_angle;
         self.me = me;
+        if was_alive && self.is_alive() && (self.me.origin - was_at).length() > TELEPORT_DISTANCE {
+            self.teleported();
+        }
         self.base_turn_speed = g.config.turn_speed;
 
         let now = w.time();
@@ -107,6 +115,23 @@ impl Bot {
         out.actions.append(&mut self.actions);
         out.cmd = self.run_player_move(w.time(), w.frame_time());
         out
+    }
+
+    /// The game moved the bot elsewhere (a teleport: the host sees `fixangle` 1, or the bot
+    /// moved more than 256 units in a frame). Its waypoints, path and stuck timers belong to
+    /// where it was: they are dropped, so it finds its nearest waypoint and a path from there
+    /// (port addition, design §4; upstream kept heading for the old waypoint, got stuck and
+    /// failed the path).
+    pub fn teleported(&mut self) {
+        self.current_waypoint = -1;
+        self.prev_waypoint = -1;
+        self.current_waypoint_flags = 0;
+        self.prev_waypoint_dist = 4096.0;
+        self.paths.bot_paths.clear();
+        self.update_waypoint_time = 0.0;
+        self.stuck_time = 0.0;
+        self.last_no_move = 0.0;
+        self.ladder_angles = None;
     }
 
     /// `CBot::SpawnInit(false)`: forget this life (tasks, path, enemy, waypoints) and pick new

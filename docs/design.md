@@ -367,6 +367,10 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
   the stuck and jump-waypoint jumps already are.
+* **Teleports**: when the game sets a bot's view (`fixangle` 1: a spawn or a teleport) or the bot
+  moves more than 256 units in a frame, it drops its current and previous waypoints, its path
+  and its stuck timers (`Bot::teleported`), and starts again from its nearest waypoint;
+  upstream went on towards the old waypoint, got stuck and failed the path.
 * **Sounds** (`sound` callback): a bot hears a sound where the game played it (the callback's
   origin; upstream's `pfnEmitSound` hook took the entity's centre, which for the world is the
   middle of the map), not when it is silent (volume 0), and only the kinds it reacts to
@@ -692,7 +696,7 @@ those by going through the port's own code when that code is ported.
   usercmd `msec` (every 100 Hz frame sends, nothing lost at 30 Hz or 1000 Hz, the first
   command one frame long), the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
-  an emptied gun needing a reload), the owned weapons read from the inventory (a gun never held
+  an emptied gun needing a reload), a teleport dropping the path, the owned weapons read from the inventory (a gun never held
   known, a lost one forgotten, a new life without the last one's guns), the weapon in hand as
   the game reports it (a switch asked once, a refused one forgetting the weapon), and the
   waypoint editor (flags, paths, delete, beam colours).

@@ -1192,3 +1192,30 @@ fn a_new_life_forgets_the_last_ones_guns() {
         assert_eq!(b.next_inventory_sync, 0.0);
     });
 }
+
+#[test]
+fn a_teleport_drops_the_path() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0)]);
+    let (mut wp, mut rng) = (Waypoints::new(), XorShiftRandom::new(3));
+    for i in 0..6 {
+        wp.add_origin(Vector::new(i as f32 * 150.0, 0.0, 0.0), 0, None);
+    }
+    for i in 0..5 {
+        wp.add_path(i, (i + 1) as i16);
+        wp.add_path(i + 1, i as i16);
+    }
+    rig.wp = wp;
+    run(&mut rig, &mut w, &mut rng, 100, |_, _| {});
+    assert!(rig.bot.current_waypoint != -1, "on its way");
+    // Far from every waypoint in one frame: nothing of the old path is kept.
+    w.ents.borrow_mut()[0].origin = Vector::new(3000.0, 3000.0, 0.0);
+    run(&mut rig, &mut w, &mut rng, 1, |_, _| {});
+    assert_eq!((rig.bot.current_waypoint, rig.bot.prev_waypoint), (-1, -1));
+    assert!(rig.bot.paths.bot_paths.is_empty());
+    // What the host does on `fixangle` 1.
+    rig.bot.current_waypoint = 3;
+    rig.bot.stuck_time = 5.0;
+    rig.bot.teleported();
+    assert_eq!((rig.bot.current_waypoint, rig.bot.stuck_time), (-1, 0.0));
+}

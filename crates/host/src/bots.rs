@@ -335,21 +335,26 @@ pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, origin: Optio
 /// fake clients there, so a bot's `fixangle` was never cleared, and `SV_RunCmd` copies the
 /// usercmd's angles into `pev->v_angle` only while it is 0: after its first spawn the bot's view
 /// stayed where the game put it, and it never turned or aimed. Upstream wrote `pev->v_angle`
-/// itself (`ChangeAngles`), as the port's own bots do (design §4).
-pub(crate) fn take_fixed_angles(s: &State, e: Engine) {
-    for b in s.bots.iter() {
+/// itself (`ChangeAngles`), as the port's own bots do (design §4). A set angle (1) also means
+/// the game put the bot somewhere (a spawn, a teleport): its path is dropped
+/// ([`Bot::teleported`]).
+pub(crate) fn take_fixed_angles(s: &mut State, e: Engine) {
+    for b in s.bots.iter_mut() {
         let Some(ed) = e.edict(b.index as i32) else { continue };
-        e.vars_mut(ed, |v| {
+        let fixed = e.vars_mut(ed, |v| {
             match v.fixangle {
                 1 => v.v_angle = v.angles,
                 2 => {
                     v.v_angle[1] += v.avelocity[1];
                     v.avelocity[1] = 0.0;
                 }
-                _ => return,
+                _ => return 0,
             }
-            v.fixangle = 0;
+            std::mem::replace(&mut v.fixangle, 0)
         });
+        if fixed == 1 {
+            b.teleported();
+        }
     }
 }
 
