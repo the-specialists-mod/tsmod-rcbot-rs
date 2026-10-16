@@ -15,12 +15,14 @@ pub mod botcam;
 mod combat;
 pub mod events;
 mod goals;
+mod hearing;
 mod items;
 pub mod kungfu;
 mod look;
 mod manager;
 mod movement;
 mod navigate;
+mod preaim;
 mod remember;
 pub(crate) mod special;
 pub mod squad;
@@ -561,6 +563,8 @@ pub enum LookTask {
     FaceTaskVector,
     /// `BOT_LOOK_TASK_FACE_TASK_EDICT`.
     FaceTaskEdict,
+    /// Port addition: look where an enemy may appear next (`preaim.rs`, design §4).
+    PreAim,
 }
 
 /// `eClimbType`, TS's cases.
@@ -697,6 +701,16 @@ pub struct Bot {
     pub(crate) looking_for_enemy: bool,
     pub(crate) listen_to_sound_time: f32,
     pub(crate) investigate_sound_time: f32,
+    /// The sounds heard lately (design §4).
+    pub(crate) hearing: hearing::Hearing,
+    /// Where the bot pre-aims (design §4).
+    pub(crate) pre_aim: preaim::PreAim,
+    /// Where a moving search goes next (`SEARCH_FOR_ENEMY` with a centre).
+    pub(crate) search_point: Option<Vector>,
+    /// The objective the bot last tried to complete, and when it should be done by.
+    pub(crate) objective_attempt: Option<(i32, f32)>,
+    /// Objectives the bot's team couldn't complete, defended instead until the time.
+    pub(crate) objective_failed: Vec<(i32, f32)>,
     pub(crate) used_melee: bool,
     pub(crate) prev_health: f32,
     pub(crate) chat_message_time: f32,
@@ -846,6 +860,11 @@ impl Bot {
             looking_for_enemy: false,
             listen_to_sound_time: 0.0,
             investigate_sound_time: 0.0,
+            hearing: hearing::Hearing::default(),
+            pre_aim: preaim::PreAim::default(),
+            search_point: None,
+            objective_attempt: None,
+            objective_failed: Vec::new(),
             used_melee: false,
             prev_health: 0.0,
             chat_message_time: 0.0,

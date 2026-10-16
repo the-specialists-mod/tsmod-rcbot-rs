@@ -138,6 +138,12 @@ impl BotManager {
     /// Upstream tells teams apart with `pev->team`, which TS 3.0 doesn't set: the port's rules
     /// team is used (design §4).
     pub fn death(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, killer: i32, victim: i32, rng: &mut dyn Random) {
+        // A dead player isn't where it was last seen any more (design §4).
+        if let Some(v) = u32::try_from(victim).ok().and_then(|v| w.entity(v)) {
+            for b in self.iter_mut() {
+                b.remembered.forget(v.handle());
+            }
+        }
         if killer == victim || killer == -1 {
             if let Some(b) = u32::try_from(victim).ok().and_then(|v| self.get_mut(v)) {
                 b.event(g, w, BotEvent::KillSelf, rng);

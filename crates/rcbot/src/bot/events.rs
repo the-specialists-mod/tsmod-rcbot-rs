@@ -307,9 +307,11 @@ impl Bot {
     }
 
     /// `CBot::HearSound`, TS's kinds: an enemy player's sound at `origin` (unless building a
-    /// human tower) makes the bot listen; pain of its task's entity is noted.
+    /// human tower) is remembered ([`super::hearing::Hearing`]) and the bot glances at it; pain of
+    /// its task's entity is noted.
     ///
-    /// Upstream gives the listen task no entity, so it fails at once (design §5). Kept.
+    /// Upstream added a `LISTEN_TO_SOUND` task without an entity, which failed at once (§5.58)
+    /// after making every later task forget its path; teammates' sounds are ignored as before.
     pub fn hear_sound(&mut self, w: &dyn BotWorld, kind: SoundKind, source: &Entity, origin: Vector) {
         match kind {
             SoundKind::PlayerPain => {
@@ -319,8 +321,9 @@ impl Bot {
             }
             SoundKind::Player => {
                 if self.is_enemy(w, source) && self.enemy.is_none() && self.tasks.current().is_none_or(|t| t.kind != TaskKind::HumanTower) {
-                    let id = self.tasks.new_schedule_id();
-                    self.add_priority_task(Task::new(TaskKind::ListenToSound, id, None, 0, 0.0, origin));
+                    let now = w.time();
+                    self.hearing.add(origin, now, super::hearing::LOUD_STEPS, Some(source.handle()));
+                    self.watch(origin, now, 0.8);
                 }
             }
             SoundKind::Unknown | SoundKind::Door | SoundKind::Weapon | SoundKind::Button => {}

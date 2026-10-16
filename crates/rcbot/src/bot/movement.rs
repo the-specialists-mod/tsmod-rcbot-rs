@@ -212,7 +212,7 @@ impl Bot {
             u.since = now;
             self.give_up_stuck(now);
         }
-        if climb != Climb::None {
+        if climb == Climb::Climbing {
             self.got_stuck();
             return;
         }
@@ -305,6 +305,9 @@ impl Bot {
         }
 
         let ducking = self.me.flags & entflags::DUCKING != 0;
+        // The speed asked for, sideways included: a bot looking aside (pre-aiming) walks with
+        // the strafe (upstream compared the forward speed alone).
+        let wanted = (self.move_speed * self.move_speed + self.strafe_speed * self.strafe_speed).sqrt();
         if self.stuck_time == 0.0 {
             self.unstick.reacted = false;
             if self.me.waterlevel != 3 {
@@ -317,10 +320,10 @@ impl Bot {
                         self.stuck_time = now;
                     }
                 } else if ducking {
-                    if self.velocity_2d < self.move_speed / 4.0 {
+                    if self.velocity_2d < wanted / 4.0 {
                         self.stuck_time = now;
                     }
-                } else if self.velocity_2d < self.move_speed / 2.0 {
+                } else if self.velocity_2d < wanted / 2.0 {
                     self.stuck_time = now;
                 }
             } else if self.velocity_3d < BOT_STUCK_SWIM_SPEED {
@@ -381,10 +384,10 @@ impl Bot {
                 self.stuck_time = 0.0;
             }
         } else if ducking {
-            if self.velocity_2d >= self.move_speed / 4.0 {
+            if self.velocity_2d >= wanted / 4.0 {
                 self.stuck_time = 0.0;
             }
-        } else if self.velocity_2d >= self.move_speed / 2.0 {
+        } else if self.velocity_2d >= wanted / 2.0 {
             self.stuck_time = 0.0;
         }
     }

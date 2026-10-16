@@ -20,10 +20,10 @@ through its plugin API, and `ts_bot_backend rcbot` selects it instead of the nat
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
 | Combat: what the bot sees (a fresh line of sight before every shot), enemy choice and aim by reputation, best weapon (of the inventory the game reports), reloads (one press per empty clip) and switching (upstream's TS reload bug fixed), empty guns dropped, cover, hearing (the port's `sound` callback) | done |
 | Kung fu (a port addition): reads the opponent, defensive or offensive stance, blocks, ducks and steps out of attacks, counters, learned and evolving combos with crouch-jump, flying and wall-jump kicks, saved in `<id>.rkf`; unarmed bots take cover from distant gunmen | done |
-| Navigation and tactics (port additions, docs/design.md §4): stuck recovery without suicide loops, map-wide roaming, dives that don't end prone, task timeouts that work, items chosen by worth from what the bot knows of the map (`entity_info`) | done |
+| Navigation and tactics (port additions, docs/design.md §4): stuck recovery without suicide loops, map-wide roaming, dives that don't end prone, task timeouts that work, items chosen by worth from what the bot knows of the map (`entity_info`), sounds and lost enemies investigated, pre-aiming at what comes into view, objectives attacked or defended by what they say, capture the briefcase | done |
 | Waypoint editing, display (beams), autowaypointing, the waypoint menus on the HUD (`ShowMenu`) | done |
 | Special waypoints: lifts and their buttons, pushables, human towers, grenade-throw waypoints | done |
-| TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals (and `tm_` maps' model teams) | done; TS objectives and team scores wait for plugin API additions (the-specialistsmod-rs#117) |
+| TS: loadouts by GA (bought before each spawn), kung fu, power-up pickup and `usepowerup`, stunts (the perceptron), prone and crouch, teamplay end-level goals (and `tm_` maps' model teams), TS objectives and team scores | done |
 | Bot events and reputation (kills, deaths, what bots see), squads, botcam, chat (idle, events, greetings, MegaHAL replies, typing), profiles from `bot_profiles.ini`, learned data, brains and reputations saved and loaded | done |
 | End-to-end: `cargo xtask e2e` on all seven engine roots | bots join, move, use waypoints, kill, change weapons; back to `native` at the next map |
 

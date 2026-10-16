@@ -80,6 +80,10 @@ pub(crate) const ROAM_SCORE: f32 = 10.0;
 pub(crate) enum Goal {
     /// Pick up an item.
     Item(EntRef),
+    /// Go after an enemy last seen at this place and time.
+    Hunt(Vector, f32),
+    /// Go and see what made a sound there.
+    Investigate(Vector),
     /// Nothing better: roam (or upstream's objectives and end-level waypoints).
     Roam,
 }
@@ -171,7 +175,73 @@ impl Bot {
                 best = (Goal::Item(k.handle), s);
             }
         }
+        // Enemies seen lately and sounds heard: worth more fresh, to a bot ready to fight.
+        let ready = self.fight_readiness();
+        for p in self.remembered.iter().filter(|p| p.entity.is_some() && !p.hunted) {
+            let fresh = 1.0 - (now - p.time) / super::remember::REMEMBER_FOR;
+            let s = score(45.0 * fresh * ready, (p.origin - from).length(), 0.0);
+            if s > best.1 {
+                best = (Goal::Hunt(p.origin, p.time), s);
+            }
+        }
+        for h in self.hearing.iter().filter(|h| !h.investigated) {
+            let fresh = 1.0 - (now - h.time) / super::hearing::HEARD_FOR;
+            let s = score(30.0 * h.loud * fresh * ready, (h.origin - from).length(), 0.0);
+            if s > best.1 {
+                best = (Goal::Investigate(h.origin), s);
+            }
+        }
         best
+    }
+
+    /// How ready the bot is to look for a fight: its health, less without a loaded gun.
+    pub(crate) fn fight_readiness(&self) -> f32 {
+        let health = (self.me.health / self.me.max_health.max(100.0)).clamp(0.1, 1.0);
+        if self.weapons.best_loaded_gun().is_some() { health } else { health * 0.5 }
+    }
+
+    /// Where an enemy last seen at `origin` `secs` ago may be now: a waypoint about as far along
+    /// the graph from there as it could have walked (200 units/s, at most 1500), out of the bot's
+    /// sight (it went where the bot doesn't see it); the nearest waypoint to `origin` when it was
+    /// seen just now. -1 for none.
+    pub(crate) fn predict_enemy(
+        &self,
+        g: &BotGlobals<'_>,
+        w: &dyn BotWorld,
+        origin: Vector,
+        secs: f32,
+        rng: &mut dyn crate::Random,
+    ) -> i32 {
+        let start = self.nearest_waypoint(g, w, origin, crate::nav::REACHABLE_RANGE, -1, false, false, false);
+        let Ok(start) = usize::try_from(start) else { return -1 };
+        let reach = (secs * 200.0).min(1500.0);
+        if reach < 300.0 {
+            return start as i32;
+        }
+        let wp = &*g.waypoints;
+        // Dijkstra by length from `start`, up to `reach`.
+        let mut dist = vec![f32::INFINITY; wp.len()];
+        let mut open = vec![start];
+        dist[start] = 0.0;
+        while let Some(i) = open.pop() {
+            for s in wp.successors(i, -1) {
+                let d = dist[i] + (wp.origin(s as i32) - wp.origin(i as i32)).length();
+                if d < dist[s] && d <= reach {
+                    dist[s] = d;
+                    open.push(s);
+                }
+            }
+        }
+        let mine = usize::try_from(self.current_waypoint).ok();
+        let candidates: Vec<usize> = (0..wp.len())
+            .filter(|&i| dist[i] >= reach * 0.5 && dist[i].is_finite())
+            .filter(|&i| wp.flags(i as i32) & (crate::nav::flags::DELETED | crate::nav::flags::AIMING) == 0)
+            .filter(|&i| mine.is_none_or(|m| !wp.visibility.get(m, i)))
+            .collect();
+        if candidates.is_empty() {
+            return start as i32;
+        }
+        candidates[rng.random_long(0, candidates.len() as i32 - 1) as usize] as i32
     }
 
     /// How much the bot still wants an item a teammate is going for (1: nobody is).

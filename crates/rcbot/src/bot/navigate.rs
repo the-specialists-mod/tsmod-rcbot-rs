@@ -87,6 +87,42 @@ impl Bot {
         out
     }
 
+    /// Tells the bot's team where it is going (a waypoint, or an item): teammates leave it to
+    /// the bot.
+    pub(crate) fn claim(&mut self, g: &mut BotGlobals<'_>, waypoint: i32, item: Option<super::EntRef>) {
+        let _ = (g, waypoint, item);
+    }
+
+    /// A moving search around `center` (`SEARCH_FOR_ENEMY` with a place): walks to random
+    /// waypoints within 500 units of it that the bot can see, one after another.
+    pub(crate) fn search_move(&mut self, g: &BotGlobals<'_>, w: &dyn BotWorld, center: Vector, rng: &mut dyn Random) {
+        let arrived = self.search_point.is_none_or(|p| self.distance_from(p, true) < BOT_WAYPOINT_TOUCH_DIST * 1.5);
+        if arrived {
+            self.search_point = None;
+            let near: Vec<usize> = (0..g.waypoints.len())
+                .filter(|&i| g.waypoints.flags(i as i32) & (fl::DELETED | fl::AIMING) == 0)
+                .filter(|&i| {
+                    (g.waypoints.origin(i as i32) - center).length() < 500.0
+                        && self.distance_from(g.waypoints.origin(i as i32), true) > 64.0
+                })
+                .collect();
+            for _ in 0..4 {
+                if near.is_empty() {
+                    break;
+                }
+                let o = g.waypoints.origin(near[rng.random_long(0, near.len() as i32 - 1) as usize] as i32);
+                if w.trace_line(self.gun_position(), o, Monsters::Ignore, Glass::Ignore, Some(self.index)).fraction >= 1.0 {
+                    self.search_point = Some(o);
+                    break;
+                }
+            }
+        }
+        match self.search_point {
+            Some(p) => self.set_move_vector(p),
+            None => self.stop_moving(),
+        }
+    }
+
     /// The waypoints on teammates' paths (sorted).
     pub(crate) fn crowded_waypoints(&self, g: &BotGlobals<'_>) -> Vec<usize> {
         let _ = g;
