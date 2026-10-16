@@ -7,6 +7,7 @@
 use super::events::BOT_HEAR_DISTANCE;
 use super::{Bot, BotEvent, BotGlobals, BotWorld, Entity, Frame, OtherBot, SoundKind, SquadOrder, cond};
 use crate::config::MAX_PLAYERS;
+use crate::learn::ledger::CombatEvent;
 use crate::{Random, Vector};
 
 /// A bot slot: the bot and the frame it produced.
@@ -193,6 +194,20 @@ impl BotManager {
             if !b.is_enemy(w, &v) && b.distance_from(v.entity_origin(), false) < BOT_HEAR_DISTANCE && b.fvisible_point(w, v.entity_origin())
             {
                 b.event(g, w, BotEvent::HearTeammateDie(v.handle()), rng);
+            }
+        }
+    }
+
+    /// The host's damage and kill events (`player_damaged`, `kill_scored`; port addition, design
+    /// §4): the bots that dealt or took it record it.
+    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+        let (a, b) = match *ev {
+            CombatEvent::Damage(d) => (d.attacker, d.victim),
+            CombatEvent::Kill(k) => (k.killer, k.victim),
+        };
+        for i in if a == b { vec![a] } else { vec![a, b] } {
+            if let Some(bot) = self.get_mut(i) {
+                bot.combat_event(g, w, ev);
             }
         }
     }

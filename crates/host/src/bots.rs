@@ -322,6 +322,32 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
     s.bots.death(&mut g, &w, killer, victim, &mut rng);
 }
 
+/// A damage or kill event for the bots' learners (design §4).
+pub(crate) fn combat(s: &mut State, a: Api, e: Engine, ev: &rcbot::learn::CombatEvent) {
+    let reps = s.rep_ids();
+    let w = HostWorld::new(a, e);
+    let mut g = globals!(s, &reps);
+    s.bots.combat_event(&mut g, &w, ev);
+}
+
+/// `kill_scored`: the rules' view of a death (its killer, weapon and tags).
+pub(crate) fn kill_scored(s: &mut State, a: Api, e: Engine, k: &ts_plugin_api::KillInfo) {
+    let (Ok(victim), Ok(killer)) = (u32::try_from(k.victim), u32::try_from(k.killer.max(0))) else { return };
+    if victim == 0 {
+        return;
+    }
+    let tags = k.tags;
+    let ev = rcbot::learn::CombatEvent::Kill(rcbot::learn::KillEvent {
+        killer,
+        victim,
+        weapon: k.weapon,
+        headshot: tags & ts_plugin_api::kill::HEADSHOT != 0,
+        close_combat: tags & ts_plugin_api::kill::CLOSE_COMBAT != 0,
+        kung_fu: tags & ts_plugin_api::kill::KUNG_FU != 0,
+    });
+    combat(s, a, e, &ev);
+}
+
 /// `sound`: `pfnEmitSound`'s part for the bots.
 pub(crate) fn sound(s: &mut State, a: Api, e: Engine, entity: i32, origin: Option<Vector>, volume: f32, sample: &str) {
     let Ok(entity) = u32::try_from(entity) else { return };

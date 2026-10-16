@@ -15,6 +15,7 @@ pub mod botcam;
 mod combat;
 pub mod events;
 pub mod kungfu;
+pub mod learning;
 mod look;
 mod manager;
 mod movement;
@@ -31,6 +32,7 @@ mod tests;
 
 pub use botcam::BotCam;
 pub use events::{BotEvent, NO_CLIENT, SoundKind};
+pub use learning::BotLearning;
 pub use look::{fix_angles, make_vectors, vec_to_angles};
 pub use manager::{BotManager, BotSlot};
 pub use remember::RememberPositions;
@@ -513,6 +515,8 @@ pub struct Bot {
     pub profile: BotProfile,
     /// The learning objects of `setupDataStructures` (`m_GASurvival`, the perceptrons, ...).
     pub learned: BotLearnedData,
+    /// The port's learners: the combat ledger and what is scored from it (design §4).
+    pub learning: BotLearning,
     /// `m_bKick`: kick the bot next frame.
     pub kick: bool,
     /// `m_bKill`: suicide next frame.
@@ -670,6 +674,7 @@ impl Bot {
             name,
             profile,
             learned: BotLearnedData::new(rng),
+            learning: BotLearning::default(),
             kick: false,
             kill: false,
             me: Entity::default(),

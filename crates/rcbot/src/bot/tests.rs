@@ -1295,3 +1295,51 @@ fn the_visible_list_keeps_its_order_and_membership() {
     v.set(300, true);
     assert_eq!(v.to_vec(), vec![7, 2, 300]);
 }
+
+/// A damage event from the host (`player_damaged`), the attacker its own inflictor.
+fn damage(victim: u32, attacker: u32, amount: f32) -> crate::learn::CombatEvent {
+    crate::learn::CombatEvent::Damage(crate::learn::DamageEvent {
+        victim,
+        attacker,
+        inflictor: attacker as i32,
+        amount,
+        bits: 0,
+        health: 0.0,
+    })
+}
+
+/// A kill event from the host (`kill_scored`).
+fn kill(killer: u32, victim: u32, weapon: i32) -> crate::learn::CombatEvent {
+    crate::learn::CombatEvent::Kill(crate::learn::KillEvent {
+        killer,
+        victim,
+        weapon,
+        headshot: false,
+        close_combat: false,
+        kung_fu: weapon == 0,
+    })
+}
+
+#[test]
+fn the_ledger_keeps_what_passed_with_each_opponent() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(0.0, 800.0, 0.0), 0)]);
+    arm(&w, 3, 5, 30, 60);
+    rig.with(|b, g| {
+        for ev in [damage(2, 1, 30.0), damage(1, 3, 50.0), damage(3, 2, 10.0), kill(1, 2, 1)] {
+            b.combat_event(g, &w, &ev);
+        }
+    });
+    let l = rig.bot.ledger();
+    // Not the bot's: the damage between 2 and 3.
+    assert_eq!(l.entries().count(), 3);
+    assert!((l.reward_since(0.0, 2) - 1.3).abs() < 1e-6);
+    assert!((l.reward_since(0.0, 3) + 0.5).abs() < 1e-6);
+    let e: Vec<_> = l.entries().map(|e| (e.other, e.weapon, e.range_bin)).collect();
+    assert_eq!(e, [(2, 1, 2), (3, 5, 4), (2, 1, 2)]);
+    // The kill closed the fight with 2; the one with 3 is open.
+    assert!(l.episode(2).is_none() && l.episode(3).is_some());
+    rig.with(|b, g| b.combat_event(g, &w, &kill(3, 1, 5)));
+    assert!(rig.bot.ledger().open_episodes().is_empty());
+    assert_eq!(rig.bot.ledger().closed_episodes().last().map(|e| e.reward()), Some(-1.5));
+}

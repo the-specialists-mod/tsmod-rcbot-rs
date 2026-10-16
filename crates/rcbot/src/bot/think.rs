@@ -250,6 +250,7 @@ impl Bot {
                 let team_score_since = g.team_scores[team] - self.prev_team_score;
                 self.prev_team_score = g.team_scores[team];
                 let fitness = BotLearnedData::death_fitness(survival, frags_since, team_score_since);
+                self.learn_on_death(g, now);
                 let used_melee = self.used_melee;
                 self.learned.on_death(fitness, used_melee, &mut g.learned.ts_weapon_choices, &mut g.learned.enemy_costs[team], rng);
                 self.spawn_init(g, rng);
@@ -416,6 +417,7 @@ impl Bot {
         self.clear(cond::CANT_SHOOT);
         self.enemy = None;
         self.do_tasks(g, w, rng);
+        self.learn_think(g, w);
         self.clear(cond::TASK_EDICT_PAIN);
         if self.look_for_new_tasks {
             self.look_for_new_tasks(g, w, rng);

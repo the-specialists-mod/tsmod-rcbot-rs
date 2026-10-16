@@ -398,6 +398,24 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
 * **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` every frame, by rules team
   (the bot's `team`); see §5 for upstream's indexing.
 
+### Learning from fights (port additions)
+
+Upstream's learners hardly help in TS: one fitness per life (`survival * 0.001 + frags * 0.2 +
+team score * 0.2`, 0/0.2/0.4 in deathmatch) grades the loadout, the stunts, the survival genes and
+the personal genes at once. The port adds learners scored by what actually happened between the
+bot and each opponent; upstream's objects still load and save byte for byte.
+
+* **Combat ledger** (`learn/ledger.rs`, `bot/learning.rs`): the host passes every field of
+  `player_damaged` (victim, attacker, inflictor, damage, bits, health; upstream's port dropped all
+  but the attacker) and subscribes to `kill_scored` (killer, victim, weapon, headshot, close
+  combat, kung fu). Each bot keeps a ring of 128 entries (time, other player, weapon, dealt or
+  taken, range bin 0-64/64-192/192-384/384-768/768-1500/over 1500, its waypoint) and one episode
+  per opponent: opened when the bot engages or first trades damage, closed after 4 s without
+  contact, at a kill or a death. Reward: `(dealt - taken) / 100`, +1 a kill, -1 a death, only
+  between the bot and that opponent; a decision gets `exp(-dt / 1 s)`-discounted credit for what
+  follows it. API: `Ledger::reward_since(t, opponent)`, `dealt_since`, `taken_since`, `credit`,
+  `episode`; `Bot::ledger()`. `player_killed` still drives upstream's death events.
+
 ## 5. Upstream bugs found
 
 Found while porting; not filed upstream.
@@ -707,6 +725,10 @@ those by going through the port's own code when that code is ported.
   known, a lost one forgotten, a new life without the last one's guns), the weapon in hand as
   the game reports it (a switch asked once, a refused one forgetting the weapon), and the
   waypoint editor (flags, paths, delete, beam colours).
+* **Learning** (`learn/ledger.rs`, `learn/store.rs`, `bot/tests.rs`): range bins, rewards and
+  credit per opponent, episodes opening on contact and closing on timeout or death, the entry
+  ring; a bot's ledger from host events (only its own fights, weapons and range bins); versioned
+  text headers and exact number round trips, the file key of a bot without a profile.
 * **Host unit tests** (`crates/host`): the plugin descriptor, and engine entity searches
   (`collect_search`) ending at the world FWGS and ReHLDS return for "no more" (and at a repeat)
   instead of starting over: upstream's loops stop at `FNullEnt`, the port's first ones only at
