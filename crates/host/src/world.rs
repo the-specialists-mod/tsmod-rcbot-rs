@@ -3,12 +3,12 @@
 //! sequence, as upstream's `RANDOM_LONG` does).
 
 use crate::api::{Api, Engine};
-use rcbot::bot::{BotWorld, Entity, EntityKey, PlayerState};
+use rcbot::bot::{BotWorld, Entity, EntityKey, GameMode, ItemInfo, ItemKind, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// `NON_TS_TEAMPLAY`: the map's name starts with `tm_` (`CBotGlobals::MapInit`), set at
 /// `ServerActivate`.
@@ -16,13 +16,43 @@ pub static NON_TS_TEAMPLAY: AtomicBool = AtomicBool::new(false);
 
 /// The game's teamplay (`GameState::teamplay`) as of this frame ([`refresh_game_state`]).
 static GAME_TEAMPLAY: AtomicBool = AtomicBool::new(false);
+/// The game's mode, CTB and round as of this frame (`mode | ctb << 8 | round << 16`).
+static GAME_MODE: AtomicI32 = AtomicI32::new(0);
 
 /// Reads the game's state once for the frame (the server scans the entities for it): the
-/// worlds made until the next refresh, callbacks included, use its teamplay.
+/// worlds made until the next refresh, callbacks included, use its teamplay and mode.
 pub fn refresh_game_state(api: Api) -> ts_plugin_api::GameState {
     let g = api.game_state();
     GAME_TEAMPLAY.store(g.teamplay != 0, Ordering::Relaxed);
+    GAME_MODE.store((g.mode & 0xff) | (i32::from(g.ctb != 0) << 8) | ((g.round & 0xff) << 16), Ordering::Relaxed);
     g
+}
+
+/// What `entity_info` says about an item, for the classes a bot looks at (`ts_*`, `weapon_*`).
+fn item_info(api: Api, index: u32, classname: &str) -> Option<ItemInfo> {
+    use ts_plugin_api::entity;
+    if !classname.starts_with("ts_") && !classname.starts_with("weapon") {
+        return None;
+    }
+    let i = api.entity_info(index as i32)?;
+    let kind = match i.kind {
+        entity::GROUND_WEAPON => ItemKind::GroundWeapon,
+        entity::POWERUP => ItemKind::Powerup,
+        entity::PROJECTILE => ItemKind::Projectile,
+        entity::GUN => ItemKind::Gun,
+        entity::CTB_FLAG => ItemKind::CtbFlag,
+        entity::CTB_BASE => ItemKind::CtbBase,
+        entity::OBJECTIVE => ItemKind::Objective,
+        _ => ItemKind::Other,
+    };
+    Some(ItemInfo {
+        kind,
+        weapon: i.weapon,
+        powerup: i.powerup,
+        owner: u32::try_from(i.owner).unwrap_or(0),
+        team: i.team,
+        available: i.available != 0,
+    })
 }
 
 /// A cached world's slot for one index: `None` not read yet, `Some(None)` no entity there.
@@ -92,6 +122,7 @@ impl HostWorld {
             owner: None,
             groundentity: None,
             player: None,
+            item: None,
         });
         let (classname, netname, target, targetname, ground, owner) =
             self.eng.vars(e, |v, _| (v.classname, v.netname, v.target, v.targetname, v.groundentity, v.owner));
@@ -123,7 +154,10 @@ impl HostWorld {
                 stored_powerup: p.stored_powerup,
                 time_scale: p.time_scale,
                 kungfu: p.kungfu != 0,
+                has_flag: p.has_flag != 0,
             });
+        } else {
+            ent.item = item_info(self.api, index, &ent.classname);
         }
         Some(ent)
     }
@@ -207,6 +241,11 @@ impl BotWorld for HostWorld {
         HostWorld::model_teams(self)
     }
 
+    fn game_mode(&self) -> GameMode {
+        let m = GAME_MODE.load(Ordering::Relaxed);
+        GameMode { mode: m & 0xff, ctb: m & 0x100 != 0, round: (m >> 16) & 0xff }
+    }
+
     /// The HUD's objective list as the bot reads it (its team's texts), the ones that can still
     /// be completed (design §4).
     fn ts_objectives(&self, index: u32) -> Vec<rcbot::bot::TsObjective> {
@@ -216,6 +255,7 @@ impl BotWorld for HostWorld {
             .filter(|o| o.active != 0)
             .map(|o| rcbot::bot::TsObjective {
                 id: o.id,
+                entity: u32::try_from(o.entity).ok().filter(|&e| e > 0),
                 origin: Vector::from(o.origin),
                 name: o.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect(),
             })

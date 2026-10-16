@@ -11,6 +11,47 @@ use crate::{Random, Vector};
 /// `f32`, so a 100 Hz frame often measures 9.99 ms).
 pub(crate) const MIN_MSEC: f32 = 9.5;
 
+/// Seconds without progress on a path before a stuck bot kills itself (upstream: 8, with or
+/// without an enemy; design §4).
+pub(crate) const STUCK_SUICIDE: f32 = 20.0;
+/// A stuck event this soon after the last one, this near where the series began, escalates.
+const UNSTICK_SERIES_TIME: f32 = 4.0;
+/// See [`UNSTICK_SERIES_TIME`].
+const UNSTICK_SERIES_RANGE: f32 = 128.0;
+/// How far ahead a wall counts for a wall jump (TS's `CheckForWallJump`).
+const WALL_JUMP_RANGE: f32 = 48.0;
+/// After a dive, duck is held from this long ...
+const DIVE_DUCK_FROM: f32 = 0.15;
+/// ... to this long, through the landing, so it rolls out instead of landing prone.
+const DIVE_DUCK_UNTIL: f32 = 1.5;
+/// A bot still prone this long after its dive jumps to get up.
+const DIVE_GET_UP_AFTER: f32 = 0.6;
+
+/// What the bot tried against being stuck (design §4): upstream jumped and went back one waypoint
+/// *index* on every frame between 1 and 2 s, failed whatever path that left, and killed the bot
+/// after 8 s. The port reacts once per stuck event and escalates while the bot keeps getting stuck
+/// at the same place: back to the previous waypoint, back up and strafe, crouch jump, wall jump or
+/// dive; at 2 s the path it was on is failed and the bot finds another.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Unstick {
+    /// Stuck events in this series (0 for the first).
+    pub level: u32,
+    /// Where the series began.
+    pub at: Vector,
+    /// When the series began.
+    pub since: f32,
+    /// When the last stuck event of the series ended (0: none yet).
+    pub last: f32,
+    /// The path `(previous, current)` waypoint the bot was on when this event began.
+    pub edge: (i32, i32),
+    /// The 1 s reaction ran for this event.
+    pub reacted: bool,
+    /// Backing up (forward speed reversed) until then.
+    pub back_until: f32,
+    /// Which way it strafes while backing up (-1 left, 1 right).
+    pub back_side: f32,
+}
+
 /// When the bot's last usercmd went (`m_fLastCallRunPlayerMove`) and the part of a
 /// millisecond it didn't carry.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -65,6 +106,16 @@ impl Bot {
             a += 360.0;
         }
         -a
+    }
+
+    /// The speed to move at now: `m_fIdealMoveSpeed`, at most half the maximum at a stay-near
+    /// waypoint or in a stealthy squad. Upstream set the stay-near speed in `RunPlayerMove`, after
+    /// this frame's move was worked out (so a frame late), and the stealth speed was overwritten
+    /// before anything read it (design §5.62). Fixed (§4).
+    fn speed_limit(&self, g: &BotGlobals<'_>) -> f32 {
+        let slow =
+            self.current_waypoint_flags & fl::STAY_NEAR != 0 || self.squad.and_then(|id| g.squads.get(id)).is_some_and(|s| s.is_stealth());
+        if slow { self.ideal_move_speed.min(self.max_speed / 2.0) } else { self.ideal_move_speed }
     }
 
     /// `CBot::WorkMoveDirection`: forward and side speeds toward `m_vMoveToVector` relative to
@@ -137,12 +188,18 @@ impl Bot {
         }
         fix_float_angle(&mut angle);
         let radians = angle * std::f32::consts::PI / 180.0;
-        self.move_speed = self.ideal_move_speed * radians.cos();
+        let speed = self.speed_limit(g);
+        self.move_speed = speed * radians.cos();
         if self.strafe_time < now {
-            self.strafe_speed = self.ideal_move_speed * radians.sin();
+            self.strafe_speed = speed * radians.sin();
         }
         if climb == Climb::Climbing {
             self.button |= buttons::FORWARD;
+        }
+        if self.unstick.back_until > now && climb == Climb::None {
+            // Stuck again at the same place: step back from it, sideways (design §4).
+            self.move_speed = -self.move_speed;
+            self.strafe_speed = self.unstick.back_side * self.ideal_move_speed * 0.7;
         }
         if self.move_speed.abs() < 1.0 {
             self.move_speed = 0.0;
@@ -152,8 +209,88 @@ impl Bot {
         }
     }
 
-    /// `CBot::CheckStuck`: no progress for 8 s on a path kills the bot (`m_bKill`); slow for a
-    /// second jumps, for two fails the path and strafes away from a wall.
+    /// The stuck event's reaction after a second ([`Unstick`]): the first time at a place back to
+    /// the previous waypoint with a crouch jump, then backing up and strafing, a crouch jump, and
+    /// from then on a wall jump facing a wall or else a dive.
+    fn react_to_stuck(&mut self, w: &dyn BotWorld, now: f32, climb: Climb, rng: &mut dyn Random) {
+        let u = &mut self.unstick;
+        u.edge = (self.prev_waypoint, self.current_waypoint);
+        if u.last > 0.0 && now - u.last < UNSTICK_SERIES_TIME && (self.me.origin - u.at).length() < UNSTICK_SERIES_RANGE {
+            u.level += 1;
+        } else {
+            u.level = 0;
+            u.at = self.me.origin;
+            u.since = now;
+        }
+        if u.level >= 4 && now - u.since > STUCK_SUICIDE {
+            // Nothing got it away from here: the last resort, never in a fight.
+            u.since = now;
+            self.give_up_stuck(now);
+        }
+        if climb == Climb::Climbing {
+            self.got_stuck();
+            return;
+        }
+        match self.unstick.level {
+            0 => {
+                self.jump_and_duck(now);
+                self.got_stuck();
+            }
+            1 => {
+                self.unstick.back_until = now + rng.random_float(0.6, 1.0);
+                self.unstick.back_side = if rng.random_long(0, 1) == 0 { -1.0 } else { 1.0 };
+            }
+            2 => self.jump_and_duck(now),
+            _ => {
+                let (forward, _) = make_vectors(Vector::new(0.0, self.v_angle.y, 0.0));
+                let from = self.me.origin;
+                let wall = w.trace_line(from, from + forward * WALL_JUMP_RANGE, Monsters::Ignore, Glass::DontIgnore, Some(self.index));
+                if wall.fraction < 1.0 && self.me.flags & entflags::ONGROUND != 0 {
+                    // TS's wall jump: `+alt1` facing a wall throws the player up and back off it.
+                    self.alt_button();
+                } else {
+                    self.dive(now);
+                }
+            }
+        }
+    }
+
+    /// The last resort against being stuck: suicide (`m_bKill`), never in a fight.
+    fn give_up_stuck(&mut self, now: f32) {
+        if self.enemy.is_none() && self.last_see_enemy_time + 5.0 < now {
+            self.kill = true;
+            self.stuck_suicides += 1;
+        }
+    }
+
+    /// A dive (`+alt1` while moving, TS's stunt key), with duck held through the landing so the
+    /// bot rolls out of it instead of lying prone ([`Bot::dive_landing`]).
+    pub(crate) fn dive(&mut self, now: f32) {
+        self.alt_button();
+        self.dive_time = now;
+        self.start_duck_time = now + DIVE_DUCK_FROM;
+        self.end_duck_time = now + DIVE_DUCK_UNTIL;
+    }
+
+    /// After a dive: a bot that landed prone anyway (TS's stance 2 on the ground) jumps to get up
+    /// (TS dives land prone unless duck, jump or the stunt key is held; design §4).
+    pub(crate) fn dive_landing(&mut self, now: f32) {
+        if self.dive_time <= 0.0 {
+            return;
+        }
+        let since = now - self.dive_time;
+        if since > 3.0 {
+            self.dive_time = 0.0;
+        } else if since > DIVE_GET_UP_AFTER && self.state.stunt_state == super::TS_STATE_STUNT && self.me.flags & entflags::ONGROUND != 0 {
+            self.start_jump_time = now;
+            self.end_jump_time = now + 0.1;
+            self.dive_time = 0.0;
+        }
+    }
+
+    /// `CBot::CheckStuck`: no progress on a path for [`STUCK_SUICIDE`] seconds out of a fight kills
+    /// the bot (`m_bKill`; upstream: 8 s); slow for a second it reacts ([`Bot::react_to_stuck`]), for
+    /// two fails the path it was on and strafes away from a wall.
     pub(crate) fn check_stuck(&mut self, w: &dyn BotWorld, g: &BotGlobals<'_>, rng: &mut dyn Random) {
         let now = w.time();
         let climb = self.climb_type();
@@ -173,16 +310,21 @@ impl Bot {
                 }
             } else if self.velocity_3d > stuck_speed {
                 self.last_no_move = 0.0;
-            } else if self.last_no_move + 8.0 < now {
+            } else if self.last_no_move + STUCK_SUICIDE < now {
+                // Upstream: after 8 s, whatever happened.
                 self.last_no_move = 0.0;
-                self.kill = true;
+                self.give_up_stuck(now);
             }
         } else {
             self.last_no_move = 0.0;
         }
 
         let ducking = self.me.flags & entflags::DUCKING != 0;
+        // The speed asked for, sideways included: a bot looking aside (pre-aiming) walks with
+        // the strafe (upstream compared the forward speed alone).
+        let wanted = (self.move_speed * self.move_speed + self.strafe_speed * self.strafe_speed).sqrt();
         if self.stuck_time == 0.0 {
+            self.unstick.reacted = false;
             if self.me.waterlevel != 3 {
                 if climb != Climb::None {
                     let dir = self.ladder_dir(false, g.waypoints);
@@ -193,10 +335,10 @@ impl Bot {
                         self.stuck_time = now;
                     }
                 } else if ducking {
-                    if self.velocity_2d < self.move_speed / 4.0 {
+                    if self.velocity_2d < wanted / 4.0 {
                         self.stuck_time = now;
                     }
-                } else if self.velocity_2d < self.move_speed / 2.0 {
+                } else if self.velocity_2d < wanted / 2.0 {
                     self.stuck_time = now;
                 }
             } else if self.velocity_3d < BOT_STUCK_SWIM_SPEED {
@@ -218,14 +360,19 @@ impl Bot {
                 } else {
                     self.jump_and_duck(now);
                 }
-                self.last_failed_waypoint = self.current_waypoint;
-                if self.current_waypoint != -1 && self.prev_waypoint != -1 {
-                    self.fail_path(g, self.prev_waypoint, self.current_waypoint);
+                // The path the bot was on when it got stuck fails (upstream failed whatever its
+                // index decrements had left), and the bot finds another way from the nearest
+                // waypoint but that one (design §4).
+                let (prev, cur) = if self.unstick.reacted { self.unstick.edge } else { (self.prev_waypoint, self.current_waypoint) };
+                self.last_failed_waypoint = cur;
+                if cur != -1 && prev != -1 {
+                    self.fail_path(g, prev, cur);
                 }
                 if let Some(t) = self.tasks.current_mut() {
                     t.found_path = false;
                 }
-                if self.strafe_time < now {
+                self.unstick.last = now;
+                if self.strafe_time < now && self.unstick.back_until <= now {
                     if self.wall_on_side(w, -1.0) {
                         self.strafe_time = now + rng.random_float(1.5, 2.5);
                         self.strafe_speed = self.max_speed;
@@ -237,10 +384,11 @@ impl Bot {
             }
             self.stuck_time = 0.0;
         } else if self.stuck_time + 1.0 < now {
-            if climb == Climb::None {
-                self.jump_and_duck(now);
+            // Once per stuck event (upstream: every frame, each time one waypoint index back).
+            if !self.unstick.reacted {
+                self.unstick.reacted = true;
+                self.react_to_stuck(w, now, climb, rng);
             }
-            self.got_stuck();
         } else if self.me.waterlevel == 3 {
             if self.velocity_3d >= BOT_STUCK_SWIM_SPEED {
                 self.stuck_time = 0.0;
@@ -251,10 +399,10 @@ impl Bot {
                 self.stuck_time = 0.0;
             }
         } else if ducking {
-            if self.velocity_2d >= self.move_speed / 4.0 {
+            if self.velocity_2d >= wanted / 4.0 {
                 self.stuck_time = 0.0;
             }
-        } else if self.velocity_2d >= self.move_speed / 2.0 {
+        } else if self.velocity_2d >= wanted / 2.0 {
             self.stuck_time = 0.0;
         }
     }
@@ -265,7 +413,7 @@ impl Bot {
     pub(crate) fn run_player_move(&mut self, now: f32, frame_time: f32) -> Option<BotCmd> {
         let msec = next_msec(&mut self.msec_clock, now, frame_time)?;
         fix_angles(&mut self.v_angle);
-        self.ideal_move_speed = if self.current_waypoint_flags & fl::STAY_NEAR != 0 { self.max_speed / 2.0 } else { self.max_speed };
+        // The stay-near speed is applied where the move is worked out (`speed_limit`).
         if self.current_waypoint_flags & fl::CROUCH != 0 || (self.start_duck_time <= now && self.end_duck_time > now) {
             self.duck();
         }

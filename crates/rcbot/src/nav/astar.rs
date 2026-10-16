@@ -98,6 +98,11 @@ impl FailedPaths {
         }
     }
 
+    /// Whether `p` is failed (without marking it).
+    pub fn contains(&self, p: PathRef) -> bool {
+        self.paths.iter().any(|e| e.0 == p)
+    }
+
     /// `ClearFailedPaths`.
     pub fn clear(&mut self) {
         self.paths.clear();
@@ -126,6 +131,10 @@ pub struct AStarBot {
     /// `m_stBotPaths`, a stack (top = end): the found path, next waypoint on top, goal at the
     /// bottom, without the start waypoint.
     pub bot_paths: Vec<usize>,
+    /// Goals no path was found to, and until when they are left alone ([`SearchOptions::back_off_failed_goals`];
+    /// port addition, design §4). Upstream's `failed_goals` are all forgotten 5-10 s after a
+    /// failure, and a second failure of the same goal took it off the list again.
+    pub backed_off_goals: Vec<(usize, f32)>,
 }
 
 impl AStarBot {
@@ -135,15 +144,91 @@ impl AStarBot {
             self.failed_goals.remove(p);
         }
     }
+
+    /// The goals to leave alone at `now`: upstream's failed goals and those still backed off.
+    pub fn ignored_goals(&self, now: f32) -> Vec<usize> {
+        let mut out = self.failed_goals.clone();
+        out.extend(self.backed_off_goals.iter().filter(|&&(_, until)| until > now).map(|&(g, _)| g));
+        out
+    }
+
+    /// Forgets backed-off goals whose time is up.
+    pub fn expire_backed_off_goals(&mut self, now: f32) {
+        self.backed_off_goals.retain(|&(_, until)| until > now);
+    }
 }
 
-/// An extra, opt-in cost per waypoint for A* (a port addition, design §4): how dangerous a
-/// waypoint is for a team, 0..1. [`AStar::search_with_danger`] multiplies each edge's length
-/// by `1 + weight * danger(successor)`; [`AStar::search`] adds nothing, so upstream's searches
-/// stay bit for bit what they were.
+/// How dangerous each waypoint is for a team: what the learned heat map (deaths, damage taken)
+/// provides for [`Tactics::danger`] (design §4). 0 is safe; a value of `d` makes an edge into the
+/// waypoint cost `1 + weight * d` times its length.
 pub trait DangerSource {
-    /// The danger of `waypoint` for RCBot team `team` (`GetTeam()`, -1 none), 0..1.
-    fn danger(&self, waypoint: usize, team: i32) -> f32;
+    /// The danger at `waypoint` for RCBot team `team` (`GetTeam()`, -1 none): 0 or more, 0 by
+    /// default.
+    fn danger(&self, waypoint: usize, team: i32) -> f32 {
+        let _ = (waypoint, team);
+        0.0
+    }
+}
+
+/// No danger anywhere.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoDanger;
+
+impl DangerSource for NoDanger {}
+
+/// What a search may do beyond upstream's `BotNavigate_AStarAlgo`. [`SearchOptions::UPSTREAM`] is
+/// upstream exactly (the reference tests compare it bit for bit).
+#[derive(Clone, Copy)]
+pub struct SearchOptions<'a> {
+    /// A goal no path reaches stays failed, and is also backed off for 30-60 s
+    /// ([`AStarBot::backed_off_goals`]); upstream toggles it off the list on a second failure.
+    pub back_off_failed_goals: bool,
+    /// Tactical costs; `None`: the edge cost is its length, with upstream's heuristic.
+    pub tactics: Option<Tactics<'a>>,
+}
+
+impl SearchOptions<'_> {
+    /// Upstream's search.
+    pub const UPSTREAM: SearchOptions<'static> = SearchOptions { back_off_failed_goals: false, tactics: None };
+}
+
+/// The tactical costs of a search (design §4): an edge into waypoint `w` costs its length times
+/// `1 + danger_weight * danger(w) + exposure_weight * exposure(w) + crowd_weight * crowded(w)`,
+/// where `exposure` is the summed weight of the threats (waypoints enemies were seen at) that can
+/// see `w` (the visibility table) and `crowded` is 1 on a teammate's path. Every factor is at
+/// least 1, so the heuristic is the straight distance to the goal alone (admissible, except
+/// across teleports, which cost nothing).
+#[derive(Clone, Copy)]
+pub struct Tactics<'a> {
+    /// The danger per waypoint.
+    pub danger: &'a dyn DangerSource,
+    /// The searching bot's team, for the danger.
+    pub team: i32,
+    /// How much danger counts.
+    pub danger_weight: f32,
+    /// Waypoints enemies were seen at, with a weight each (newer, more).
+    pub threats: &'a [(usize, f32)],
+    /// How much being seen from a threat counts.
+    pub exposure_weight: f32,
+    /// Waypoints on teammates' paths (sorted, for `binary_search`).
+    pub crowded: &'a [usize],
+    /// How much a teammate's path counts.
+    pub crowd_weight: f32,
+}
+
+impl Tactics<'_> {
+    /// The cost factor of an edge into `w` (1 or more).
+    fn factor(&self, waypoints: &Waypoints, w: usize) -> f32 {
+        let mut f = 1.0 + self.danger_weight * self.danger.danger(w, self.team).max(0.0);
+        if self.exposure_weight > 0.0 {
+            let seen: f32 = self.threats.iter().filter(|&&(t, _)| t == w || waypoints.visibility.get(t, w)).map(|&(_, wt)| wt).sum();
+            f += self.exposure_weight * seen;
+        }
+        if self.crowd_weight > 0.0 && self.crowded.binary_search(&w).is_ok() {
+            f += self.crowd_weight;
+        }
+        f
+    }
 }
 
 /// One search request.
@@ -227,16 +312,13 @@ impl AStar {
         world: &dyn World,
         rng: &mut dyn Random,
     ) -> AStarResult {
-        self.search_with_danger(bot, q, continue_search, waypoints, world, rng, None)
+        self.search_with(bot, q, continue_search, waypoints, world, rng, &SearchOptions::UPSTREAM)
     }
 
-    /// [`search`](Self::search) with an extra cost: each edge's length times `1 + weight *
-    /// danger(successor, q.team)` (port addition, design §4). `None` (or a weight of 0) is
-    /// upstream's search exactly. The heuristic is upstream's either way (it already
-    /// overestimates; a danger cost only makes edges dearer). A search continued over several
-    /// frames should keep the same source and weight.
-    #[allow(clippy::too_many_arguments)] // upstream's arguments and the hook
-    pub fn search_with_danger(
+    /// [`AStar::search`] with the port's [`SearchOptions`]; with [`SearchOptions::UPSTREAM`] it is
+    /// upstream's search. A search continued next frame must pass the same options.
+    #[allow(clippy::too_many_arguments)] // upstream's arguments and the options
+    pub fn search_with(
         &mut self,
         bot: &mut AStarBot,
         q: &AStarQuery,
@@ -244,14 +326,16 @@ impl AStar {
         waypoints: &mut Waypoints,
         world: &dyn World,
         rng: &mut dyn Random,
-        danger: Option<(&dyn DangerSource, f32)>,
+        opts: &SearchOptions<'_>,
     ) -> AStarResult {
-        let danger = danger.filter(|&(_, weight)| weight != 0.0);
         let (Some(from), Some(to)) = (q.from, q.to) else { return AStarResult::NoPath };
         if from >= MAX_WAYPOINTS || to >= MAX_WAYPOINTS {
             return AStarResult::NoPath;
         }
-        let dist_from_bot = |v: Vector| (v - q.gun_position).length();
+        let tactics = opts.tactics;
+        // Upstream's heuristic adds the distance from the bot (not admissible); tactical costs
+        // are never below the length, so the goal distance alone is.
+        let dist_from_bot = |v: Vector| if tactics.is_some() { 0.0 } else { (v - q.gun_position).length() };
 
         if !continue_search {
             self.nodes.fill(AStarNode::default());
@@ -320,10 +404,9 @@ impl AStar {
                 let mut cur_cost = self.nodes[current].cost;
                 let teleport = cur_wpt.flags & fl::TELEPORT == fl::TELEPORT;
                 if !teleport {
-                    let len = (succ_origin - cur_wpt.origin).length();
-                    cur_cost += len;
-                    if let Some((source, weight)) = danger {
-                        cur_cost += len * weight * source.danger(succ, q.team).max(0.0);
+                    match &tactics {
+                        None => cur_cost += (succ_origin - cur_wpt.origin).length(),
+                        Some(t) => cur_cost += (succ_origin - cur_wpt.origin).length() * t.factor(waypoints, succ),
                     }
                 }
 
@@ -363,8 +446,14 @@ impl AStar {
                 if !bot.failed_goals.contains(&to) {
                     bot.failed_goals.push(to);
                     bot.next_clear_failed_goals = q.time + rng.random_float(5.0, 10.0);
-                } else {
+                } else if !opts.back_off_failed_goals {
+                    // Upstream: a second failure takes the goal off the list again.
                     bot.remove_failed_goal(to);
+                }
+                if opts.back_off_failed_goals {
+                    let until = q.time + rng.random_float(30.0, 60.0);
+                    bot.backed_off_goals.retain(|&(g, _)| g != to);
+                    bot.backed_off_goals.push((to, until));
                 }
             }
             return AStarResult::NoPath;
@@ -457,6 +546,83 @@ mod tests {
     }
 
     #[test]
+    fn backed_off_goals_stay_failed() {
+        let mut w = grid();
+        w.add_origin(Vector::new(1000.0, 0.0, 0.0), 0, None); // 9, no paths
+        let mut bot = AStarBot::default();
+        let opts = SearchOptions { back_off_failed_goals: true, tactics: None };
+        let mut search = |bot: &mut AStarBot, time: f32| {
+            let q = AStarQuery { time, ..query(0, 9) };
+            AStar::new().search_with(bot, &q, false, &mut w, &EmptyWorld, &mut XorShiftRandom::new(1), &opts)
+        };
+        assert_eq!(search(&mut bot, 100.0), AStarResult::NoPath);
+        assert_eq!(search(&mut bot, 101.0), AStarResult::NoPath);
+        // Still failed after the second failure, and backed off for 30-60 s from the last.
+        assert_eq!(bot.failed_goals, vec![9]);
+        assert_eq!(bot.backed_off_goals.len(), 1);
+        let until = bot.backed_off_goals[0].1;
+        assert!((131.0..161.0).contains(&until), "{until}");
+        bot.failed_goals.clear(); // what the bot's periodic clear does
+        assert_eq!(bot.ignored_goals(120.0), vec![9]);
+        assert!(bot.ignored_goals(until + 1.0).is_empty());
+    }
+
+    /// A danger source for tests: listed waypoints have danger 1.
+    struct Hot(Vec<usize>);
+    impl DangerSource for Hot {
+        fn danger(&self, w: usize, _team: i32) -> f32 {
+            if self.0.contains(&w) { 1.0 } else { 0.0 }
+        }
+    }
+
+    fn path_of(bot: &AStarBot) -> Vec<usize> {
+        bot.bot_paths.iter().rev().copied().collect()
+    }
+
+    #[test]
+    fn tactical_costs_avoid_danger_exposure_and_teammates() {
+        // 0 -> 8 on the grid: through the middle row or around it.
+        let tactical = |danger: &dyn DangerSource, threats: &[(usize, f32)], crowded: &[usize], w: &mut Waypoints| {
+            let t = Tactics { danger, team: 0, danger_weight: 4.0, threats, exposure_weight: 4.0, crowded, crowd_weight: 4.0 };
+            let opts = SearchOptions { back_off_failed_goals: true, tactics: Some(t) };
+            let mut bot = AStarBot::default();
+            let r = AStar::new().search_with(&mut bot, &query(0, 8), false, w, &EmptyWorld, &mut XorShiftRandom::new(1), &opts);
+            assert!(matches!(r, AStarResult::Next(_)), "{r:?}");
+            path_of(&bot)
+        };
+        let mut w = grid();
+        // Waypoint i is at (i % 3, i / 3); the two ways round are 0-3-6-7-8 and 0-1-2-5-8.
+        let p = tactical(&Hot(vec![1, 2, 4]), &[], &[], &mut w);
+        assert_eq!(p, vec![3, 6, 7, 8]);
+        let p = tactical(&Hot(vec![3, 4, 6]), &[], &[], &mut w);
+        assert_eq!(p, vec![1, 2, 5, 8]);
+        // Exposure: an enemy seen at 6 sees 3 and 7 (and itself).
+        w.visibility.set(6, 3, true);
+        w.visibility.set(6, 7, true);
+        let p = tactical(&NoDanger, &[(6, 1.0)], &[], &mut w);
+        assert_eq!(p, vec![1, 2, 5, 8]);
+        // A teammate's path through 1 and 2: the other way.
+        let p = tactical(&NoDanger, &[], &[1, 2], &mut w);
+        assert_eq!(p, vec![3, 6, 7, 8]);
+    }
+
+    #[test]
+    fn zero_tactics_find_shortest_paths() {
+        // With no danger, threats or teammates the costs are the lengths, and the goal distance
+        // alone is admissible: the path is a shortest one.
+        let mut w = grid();
+        let t =
+            Tactics { danger: &NoDanger, team: 0, danger_weight: 1.0, threats: &[], exposure_weight: 1.0, crowded: &[], crowd_weight: 1.0 };
+        let opts = SearchOptions { back_off_failed_goals: false, tactics: Some(t) };
+        let mut bot = AStarBot::default();
+        let mut astar = AStar::new();
+        let r = astar.search_with(&mut bot, &query(0, 8), false, &mut w, &EmptyWorld, &mut XorShiftRandom::new(1), &opts);
+        assert!(matches!(r, AStarResult::Next(_)));
+        assert_eq!(bot.bot_paths.len(), 4);
+        assert_eq!(astar.node(8).unwrap().cost(), 400.0);
+    }
+
+    #[test]
     fn continues_across_calls() {
         let mut w = grid();
         let mut bot = AStarBot::default();
@@ -506,9 +672,9 @@ mod tests {
     }
 
     /// Danger on one waypoint, for the hook.
-    struct Hot(usize);
+    struct HotOne(usize);
 
-    impl DangerSource for Hot {
+    impl DangerSource for HotOne {
         fn danger(&self, waypoint: usize, _team: i32) -> f32 {
             if waypoint == self.0 { 1.0 } else { 0.0 }
         }
@@ -524,7 +690,18 @@ mod tests {
         let mut rng = XorShiftRandom::new(1);
         for weight in [0.0, 1.0, 5.0] {
             let mut b = AStarBot::default();
-            let r = AStar::new().search_with_danger(&mut b, &query(0, 2), false, &mut w, &EmptyWorld, &mut rng, Some((&Hot(1), weight)));
+            let hot = HotOne(1);
+            let t = Tactics {
+                danger: &hot,
+                team: 0,
+                danger_weight: weight,
+                threats: &[],
+                exposure_weight: 0.0,
+                crowded: &[],
+                crowd_weight: 0.0,
+            };
+            let opts = SearchOptions { back_off_failed_goals: false, tactics: Some(t) };
+            let r = AStar::new().search_with(&mut b, &query(0, 2), false, &mut w, &EmptyWorld, &mut rng, &opts);
             if weight < 2.0 {
                 // A weight of 0 is the plain search; 1 isn't enough to pay for two more edges.
                 assert_eq!((r, &b.bot_paths), (AStarResult::Next(1), &plain), "weight {weight}");

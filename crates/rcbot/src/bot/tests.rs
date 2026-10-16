@@ -94,6 +94,15 @@ impl BotWorld for Plane {
     fn inventory(&self, _: u32) -> Option<Vec<InventoryWeapon>> {
         self.inventory.borrow().clone()
     }
+    fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
+        let ents = self.ents.borrow();
+        let hit = |e: &&Entity| match key {
+            EntityKey::Classname => e.classname == value,
+            EntityKey::Target => e.target == value,
+            EntityKey::Targetname => e.targetname == value,
+        };
+        ents.iter().filter(hit).map(|e| e.index).collect()
+    }
     fn player_model(&self, index: u32) -> String {
         self.models.iter().flatten().find(|(i, _)| *i == index).map_or(String::new(), |(_, m)| (*m).into())
     }
@@ -217,6 +226,7 @@ fn walks_along_waypoints() {
             rep_ids: &extra.reps,
             chat: &extra.chat,
             map_name: "test",
+            danger: None,
         };
         let f = bot.frame(&mut g, &plane, &mut rng);
         if let Some(cmd) = f.cmd {
@@ -251,6 +261,7 @@ fn attacks_a_visible_enemy() {
             rep_ids: &extra.reps,
             chat: &extra.chat,
             map_name: "test",
+            danger: None,
         };
         let f = bot.frame(&mut g, &plane, &mut rng);
         if let Some(cmd) = f.cmd {
@@ -365,6 +376,7 @@ impl Rig {
             rep_ids: &self.extra.reps,
             chat: &self.extra.chat,
             map_name: "ts_test",
+            danger: None,
         };
         f(&mut self.bot, &mut g)
     }
@@ -391,6 +403,7 @@ impl Rig {
                 rep_ids: &self.extra.reps,
                 chat: &self.extra.chat,
                 map_name: "ts_test",
+                danger: None,
             };
             mgr.combat_event(&mut g, w, ev, &mut rng);
         }
@@ -694,27 +707,34 @@ fn sounds_are_told_apart_and_an_enemy_is_listened_to() {
     let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
     mgr.get_mut(1).unwrap().me = w.entity(1).unwrap();
     mgr.sound(&w, 2, None, 1.0, "player/pl_step2.wav");
-    let t = *mgr.get(1).unwrap().tasks().current().unwrap();
-    // Upstream's listen task has no entity, so it fails as soon as it runs (design §5).
-    assert_eq!((t.kind, t.edict), (TaskKind::ListenToSound, None));
+    // Remembered and glanced at, no task taking over (upstream's listen task had no entity and
+    // failed at once, design §5.58).
+    let b = mgr.get(1).unwrap();
+    assert!(b.tasks().is_empty());
+    let h = *b.hearing.newest_new().unwrap();
+    assert_eq!((h.origin, h.source.map(|s| s.index)), (Vector::new(300.0, 0.0, 0.0), Some(2)));
+    assert_eq!((b.look_task, b.pre_aim.watch), (LookTask::PreAim, Vector::new(300.0, 0.0, 0.0)));
     // Too far to hear.
     let mut mgr2 = BotManager::default();
     mgr2.add(setup(false).1);
     let w2 = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(900.0, 0.0, 0.0), 0)]);
     mgr2.get_mut(1).unwrap().me = w2.entity(1).unwrap();
     mgr2.sound(&w2, 2, None, 1.0, "player/pl_step2.wav");
-    assert!(mgr2.get(1).unwrap().tasks().is_empty());
+    assert!(mgr2.get(1).unwrap().hearing.newest_new().is_none());
     // Where the game played it counts, not where the entity is.
     mgr2.sound(&w2, 2, Some(Vector::new(200.0, 0.0, 0.0)), 1.0, "player/pl_step2.wav");
-    let t = *mgr2.get(1).unwrap().tasks().current().unwrap();
-    assert_eq!((t.kind, t.vector), (TaskKind::ListenToSound, Vector::new(200.0, 0.0, 0.0)));
-    // Silent sounds, and kinds no bot reacts to, aren't heard.
+    assert_eq!(mgr2.get(1).unwrap().hearing.newest_new().unwrap().origin, Vector::new(200.0, 0.0, 0.0));
+    // Silent sounds, kinds no bot reacts to, and teammates aren't heard.
     let mut mgr3 = BotManager::default();
     mgr3.add(setup(false).1);
     mgr3.get_mut(1).unwrap().me = w.entity(1).unwrap();
     mgr3.sound(&w, 2, None, 0.0, "player/pl_step2.wav");
     mgr3.sound(&w, 2, None, 1.0, "weapons/glock.wav");
-    assert!(mgr3.get(1).unwrap().tasks().is_empty());
+    let mut team = plane(vec![player(1, Vector::ZERO, 1), player(2, Vector::new(300.0, 0.0, 0.0), 1)]);
+    team.teamplay = true;
+    mgr3.get_mut(1).unwrap().state = team.entity(1).unwrap().player.unwrap();
+    mgr3.sound(&team, 2, None, 1.0, "player/pl_step2.wav");
+    assert!(mgr3.get(1).unwrap().hearing.newest_new().is_none());
     assert!(SoundKind::Player.is_heard() && SoundKind::PlayerPain.is_heard() && !SoundKind::Door.is_heard());
 }
 
@@ -898,20 +918,29 @@ impl BotWorld for WithObjectives {
     }
 }
 
-/// `LookForNewTasks`' TS objectives: team 1 defends one, team 2 uses the `ts_hack` by its
-/// waypoint for 9 s, each after the path to that waypoint; sometimes they roam instead.
+/// `LookForNewTasks`' TS objectives by what they ask of the bot's team (design §4): one it can
+/// complete is gone for and its `ts_hack` used for 9 s; one to defend is held from a waypoint
+/// that sees it; sometimes the bot roams instead. Upstream: team 1 defended and team 2 attacked
+/// whatever the objective said.
 #[test]
 fn teamplay_bots_go_for_the_ts_objectives() {
     let at = Vector::new(300.0, 0.0, 0.0);
     let mut hack = player(5, at + Vector::new(20.0, 0.0, 0.0), 0);
     hack.classname = "ts_hack".into();
     hack.flags = 0;
-    let objective = TsObjective { id: 0, origin: at, name: "Hack the computer".into() };
+    hack.player = None;
     let mut seen = std::collections::HashSet::new();
-    for team in [1, 2] {
+    for (text, attack) in [("Hack the computer", true), ("Defend the computer", false), ("", false)] {
+        let objective = TsObjective { id: 0, origin: at, name: text.into(), ..TsObjective::default() };
         for seed in 1..40 {
             let mut rig = Rig::new(Config::default());
-            let mut plane = plane(vec![player(1, Vector::ZERO, team), hack.clone()]);
+            // Waypoint 2 (at 300) is the objective's; 3 and 4 see it from 150 and 300 units.
+            for i in 0..6 {
+                for j in 0..6 {
+                    rig.wp.visibility.set(i, j, true);
+                }
+            }
+            let mut plane = plane(vec![player(1, Vector::ZERO, 1), hack.clone()]);
             plane.teamplay = true;
             let w = WithObjectives(plane, vec![objective.clone()]);
             let mut rng = XorShiftRandom::new(seed);
@@ -922,15 +951,18 @@ fn teamplay_bots_go_for_the_ts_objectives() {
                 b.tasks().iter().map(|t| (t.kind, t.int, t.float, t.edict.is_some())).collect::<Vec<_>>()
             });
             match kinds.as_slice() {
-                [(TaskKind::FindPath, 2, -1.0, false), (TaskKind::Defend, ..)] => assert_eq!(team, 1),
-                [(TaskKind::FindPath, 2, -1.0, false), (TaskKind::Use, 0, 9.0, true)] => assert_eq!(team, 2),
+                [(TaskKind::FindPath, 2, -1.0, false), (TaskKind::Use, 0, 9.0, true)] => assert!(attack, "{text}"),
+                [(TaskKind::FindPath, spot, -1.0, false), (TaskKind::Defend, ..)] => {
+                    assert!(!attack, "{text}");
+                    assert!([0, 4, 5].contains(spot), "{spot}: 200-900 units from the objective, seeing it");
+                }
                 [(TaskKind::FindPath, ..)] | [] => {} // roaming: the end-level waypoints, or none
-                other => panic!("team {team}: {other:?}"),
+                other => panic!("{text}: {other:?}"),
             }
-            seen.insert((team, kinds.len()));
+            seen.insert((attack, kinds.len()));
         }
     }
-    assert!(seen.contains(&(1, 2)) && seen.contains(&(2, 2)), "{seen:?}");
+    assert!(seen.contains(&(true, 2)) && seen.contains(&(false, 2)), "{seen:?}");
 }
 
 /// Runs the rig's bot in `w` for `frames` frames of 20 ms, applying its usercmds; `each` sees
@@ -1603,4 +1635,676 @@ fn learning_replays_exactly_from_the_same_seed() {
     let a = learn();
     assert_eq!(a, learn());
     assert!(a.0.contains("stance all"), "{}", a.0);
+}
+
+/// A shipped TS waypoint file (`data/rcbot/waypoints/ts`).
+fn real_map(name: &str) -> Waypoints {
+    let path = format!("{}/../../data/rcbot/waypoints/ts/{name}.rcw", env!("CARGO_MANIFEST_DIR"));
+    let bytes = std::fs::read(path).unwrap();
+    Waypoints::from_rcw(&bytes, name).unwrap().0
+}
+
+/// The waypoints a bot may go to: not deleted, aiming or unreachable, and with a path out.
+fn live_waypoints(wp: &Waypoints) -> Vec<usize> {
+    (0..wp.len())
+        .filter(|&i| wp.flags(i as i32) & (fl::DELETED | fl::AIMING | fl::UNREACHABLE) == 0 && !wp.successors(i, -1).is_empty())
+        .collect()
+}
+
+/// The rig's bot on a real waypoint graph in the plane (no walls, no floors: each frame the bot is
+/// put at the height of the waypoint it heads for). `frozen` frames don't move it (something in
+/// the way); `each` sees every frame.
+fn walk_real(
+    rig: &mut Rig,
+    w: &mut Plane,
+    rng: &mut XorShiftRandom,
+    frames: usize,
+    frozen: impl Fn(usize) -> bool,
+    mut each: impl FnMut(&Bot, usize),
+) {
+    for i in 0..frames {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, w, rng));
+        if let Some(cmd) = f.cmd {
+            if frozen(i) {
+                block(w, &cmd);
+            } else {
+                w.apply(1, &cmd);
+            }
+        }
+        let z = usize::try_from(rig.bot.current_waypoint).ok().map(|c| rig.wp.origin(c as i32).z);
+        if let Some(z) = z {
+            let mut ents = w.ents.borrow_mut();
+            let me = &mut ents[0];
+            me.origin.z = z;
+            me.absmin = me.origin - Vector::new(16.0, 16.0, 36.0);
+            me.absmax = me.origin + Vector::new(16.0, 16.0, 36.0);
+        }
+        each(&rig.bot, i);
+    }
+}
+
+/// Something in the bot's way: its usercmd turns it and presses its buttons, but it doesn't move.
+fn block(w: &Plane, cmd: &BotCmd) {
+    let mut ents = w.ents.borrow_mut();
+    let me = &mut ents[0];
+    me.v_angle = cmd.angles;
+    me.button = cmd.buttons;
+    me.velocity = Vector::ZERO;
+}
+
+/// A bot on `map` at its first live waypoint.
+fn real_rig(map: &str) -> (Rig, Plane) {
+    let mut rig = Rig::new(Config::default());
+    rig.wp = real_map(map);
+    let start = rig.wp.origin(live_waypoints(&rig.wp)[0] as i32);
+    (rig, plane(vec![player(1, start, 0)]))
+}
+
+#[test]
+fn roaming_goals_cover_the_whole_map() {
+    // Upstream drew roaming goals from the first 50 waypoints only (17-37% of these maps).
+    for map in ["ts_dojo", "ts_lobby", "ts_awaken", "ts_theatre"] {
+        let (mut rig, _) = real_rig(map);
+        let live = live_waypoints(&rig.wp);
+        let mut rng = XorShiftRandom::new(11);
+        let mut seen = std::collections::HashSet::new();
+        let mut upstream = std::collections::HashSet::new();
+        let mut now = 10.0;
+        for _ in 0..live.len() * 12 {
+            now += 1.0;
+            let goal = rig.with(|b, g| b.roam_goal(g, now, &mut rng));
+            assert!(goal >= 0, "{map}");
+            seen.insert(goal as usize);
+            rig.bot.explore.touch(goal, now);
+            upstream.insert(rig.wp.find_random_goal(-1, 0, &[], &mut rng).unwrap());
+        }
+        let covered = live.iter().filter(|i| seen.contains(i)).count();
+        assert!(covered * 100 >= live.len() * 95, "{map}: {covered} of {}", live.len());
+        assert!(upstream.len() <= 50, "{map}");
+    }
+}
+
+#[test]
+fn a_bot_roams_over_a_real_map() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let mut rng = XorShiftRandom::new(5);
+    let (mut touched, mut goals) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        9000,
+        |_| false,
+        |b, _| {
+            touched.insert(b.current_waypoint);
+            goals.insert(b.goal_waypoint);
+        },
+    );
+    // Three minutes: half the map, and goals all over it (upstream's could only be the first 50
+    // waypoints).
+    let touched = live.iter().filter(|&&i| touched.contains(&(i as i32))).count();
+    assert!(touched * 2 >= live.len(), "{touched} of {} waypoints", live.len());
+    assert!(goals.iter().filter(|&&g| g >= 50).count() >= 15, "{goals:?}");
+    assert_eq!(rig.bot.stuck_suicides, 0);
+}
+
+#[test]
+fn a_stuck_bot_goes_back_once_then_fails_the_path_within_3_s() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(8);
+    // Walk until the bot is on its way between two waypoints.
+    let mut frames = 0;
+    let between = |b: &Bot, wp: &Waypoints| {
+        b.prev_waypoint >= 0
+            && b.current_waypoint >= 0
+            && b.prev_waypoint != b.current_waypoint
+            && wp.distance(b.me.origin, b.prev_waypoint) > 64.0
+            && wp.distance(b.me.origin, b.current_waypoint) > 64.0
+    };
+    while !between(&rig.bot, &rig.wp) && frames < 3000 {
+        walk_real(&mut rig, &mut w, &mut rng, 1, |_| false, |_, _| {});
+        frames += 1;
+    }
+    let (prev, cur) = (rig.bot.prev_waypoint, rig.bot.current_waypoint);
+    assert!(prev >= 0 && cur >= 0, "never got going");
+    // Something blocks the way for 3 s.
+    let mut currents = Vec::new();
+    let mut failed_at = None;
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        150,
+        |_| true,
+        |b, i| {
+            currents.push(b.current_waypoint);
+            // The 2 s step: the path it was stuck on fails (A* forgets it again at once when no
+            // other way is left) and the next search starts from another waypoint.
+            if failed_at.is_none() && b.unstick.last > 0.0 {
+                assert_eq!(b.unstick.edge, (prev, cur));
+                failed_at = Some(i);
+            }
+        },
+    );
+    // Back to the previous waypoint once (upstream: one index down each frame for a second).
+    let before_fail = &currents[..failed_at.unwrap_or(currents.len())];
+    assert!(before_fail.iter().all(|&c| c == prev || c == cur), "{prev} -> {cur}: {before_fail:?}");
+    let failed_at = failed_at.expect("the path it was stuck on fails");
+    assert!(failed_at < 150, "{failed_at}");
+    assert!(!rig.bot.kill);
+}
+
+#[test]
+fn stuck_again_at_the_same_place_escalates_and_never_kills_in_a_fight() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(8);
+    walk_real(&mut rig, &mut w, &mut rng, 100, |_| false, |_, _| {});
+    let mut levels = Vec::new();
+    let mut backed_up = false;
+    let mut dived_or_wall_jumped = false;
+    for _ in 0..800 {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        if let Some(cmd) = f.cmd {
+            backed_up |= rig.bot.unstick.back_until > w.time;
+            dived_or_wall_jumped |= cmd.buttons & buttons::ALT1 != 0;
+            block(&w, &cmd);
+        }
+        if levels.last() != Some(&rig.bot.unstick.level) {
+            levels.push(rig.bot.unstick.level);
+        }
+    }
+    assert!(levels.contains(&3), "{levels:?}");
+    assert!(backed_up && dived_or_wall_jumped, "{backed_up} {dived_or_wall_jumped} {levels:?}");
+    // 16 s without moving: not yet the last resort (upstream killed the bot after 8 s).
+    assert_eq!(rig.bot.stuck_suicides, 0);
+    let mut killed_at = None;
+    for _ in 0..2000 {
+        w.time += 0.02;
+        let f = rig.with(|b, g| b.frame(g, &w, &mut rng));
+        if f.actions.contains(&Action::Kill) {
+            killed_at = Some(w.time);
+            break;
+        }
+        if let Some(cmd) = f.cmd {
+            block(&w, &cmd);
+        }
+    }
+    assert_eq!(rig.bot.stuck_suicides, 1, "killed at {killed_at:?}");
+    // Blocked since about 3 s.
+    assert!(killed_at.unwrap() > 3.0 + movement::STUCK_SUICIDE);
+}
+
+#[test]
+fn a_dive_holds_duck_through_the_landing_and_gets_up_if_prone() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.dive(1.0);
+    assert_ne!(rig.bot.button & buttons::ALT1, 0);
+    // Duck held from just after the dive through the landing.
+    for t in [1.2, 1.8, 2.4] {
+        let cmd = rig.bot.run_player_move(t, 0.02).unwrap();
+        assert_ne!(cmd.buttons & buttons::DUCK, 0, "{t}");
+    }
+    // Landed prone anyway: it jumps up.
+    rig.bot.state.stunt_state = TS_STATE_STUNT;
+    rig.bot.dive_landing(2.0);
+    let cmd = rig.bot.run_player_move(2.05, 0.02).unwrap();
+    assert_ne!(cmd.buttons & buttons::JUMP, 0);
+    assert_eq!(rig.bot.dive_time, 0.0);
+}
+
+/// An item lying at `at`: a `ts_powerup` with `bits` or a `ts_groundweapon` of `weapon`.
+fn item_at(index: u32, at: Vector, powerup: i32, weapon: i32) -> Entity {
+    let class = if weapon != 0 { "ts_groundweapon" } else { "ts_powerup" };
+    let mut e = brush(index, class, at, Vector::new(16.0, 16.0, 16.0));
+    e.solid = SOLID_TRIGGER;
+    let kind = if weapon != 0 { ItemKind::GroundWeapon } else { ItemKind::Powerup };
+    e.item = Some(ItemInfo { kind, weapon, powerup, available: true, ..ItemInfo::default() });
+    e
+}
+
+#[test]
+fn items_are_worth_what_the_bot_can_use() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        // Unarmed with room: any gun is worth a lot, a better one more.
+        b.state.free_slots = 81;
+        let (glock, m4) = (b.weapon_value(g, 1), b.weapon_value(g, 5));
+        assert!(glock >= 60.0 && m4 > glock, "{glock} {m4}");
+        // No room for a Barrett (70 slots).
+        b.state.free_slots = 40;
+        assert_eq!(b.weapon_value(g, 18), 0.0);
+        // Armed with a Glock: an M4 is better, another pistol isn't.
+        b.weapons.weapon_info(1, 17, 34, g.weapons, g.presets);
+        assert!(b.weapon_value(g, 5) > 0.0);
+        assert_eq!(b.weapon_value(g, 9), 0.0);
+        // Its own gun low on ammo: worth picking up for the ammo.
+        b.weapons.weapon_info(1, 17, 0, g.weapons, g.presets);
+        assert!(b.weapon_value(g, 1) > 0.0);
+        // Power-ups: none while one is held (taking one with `+use` swaps it), health when hurt.
+        assert!(b.powerup_value(1) > 0.0);
+        b.state.stored_powerup = 4;
+        assert_eq!(b.powerup_value(1), 0.0);
+        assert_eq!(b.powerup_value(64), 0.0);
+        b.me.health = 40.0;
+        assert_eq!(b.powerup_value(64), 60.0);
+    });
+}
+
+#[test]
+fn an_item_behind_the_bot_is_remembered_and_gone_for() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let me = w.entity(1).unwrap().origin;
+    // The farthest waypoint from the start: certainly not in view.
+    let far = *live.iter().max_by(|&&a, &&b| rig.wp.distance(me, a as i32).total_cmp(&rig.wp.distance(me, b as i32))).unwrap();
+    let at = rig.wp.origin(far as i32);
+    w.ents.borrow_mut().push(item_at(20, at, 2, 0));
+    let mut rng = XorShiftRandom::new(4);
+    let mut went = false;
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        50,
+        |_| false,
+        |b, _| {
+            went |= b.tasks().iter().any(|t| t.kind == TaskKind::PickupItem);
+        },
+    );
+    assert!(went, "{:?}", rig.bot.tasks().iter().map(|t| t.kind).collect::<Vec<_>>());
+}
+
+#[test]
+fn an_item_the_game_wont_give_is_tried_once_then_left_alone() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let me = w.entity(1).unwrap().origin;
+    // A power-up near the start that the fake game never hands over.
+    let live = live_waypoints(&rig.wp);
+    let near = *live
+        .iter()
+        .filter(|&&i| rig.wp.distance(me, i as i32) > 150.0)
+        .min_by(|&&a, &&b| rig.wp.distance(me, a as i32).total_cmp(&rig.wp.distance(me, b as i32)))
+        .unwrap();
+    let item = item_at(20, rig.wp.origin(near as i32), 2, 0);
+    w.ents.borrow_mut().push(item.clone());
+    let mut rng = XorShiftRandom::new(4);
+    let (mut tries, mut was_picking) = (0, false);
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        3000,
+        |_| false,
+        |b, _| {
+            let picking = b.tasks().current().is_some_and(|t| t.kind == TaskKind::PickupItem);
+            if picking && !was_picking {
+                tries += 1;
+            }
+            was_picking = picking;
+        },
+    );
+    // Upstream pressed use for 10 s, waited 5-10 s and went back, for the whole minute.
+    assert!((1..=2).contains(&tries), "{tries} tries");
+    assert!(rig.bot.items.ignored(item.handle(), w.time) || rig.bot.items.get(item.handle()).is_some_and(|k| k.ignore_until > 0.0));
+}
+
+#[test]
+fn a_sound_heard_is_gone_to_and_searched_around() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let me = w.entity(1).unwrap().origin;
+    // A sound 400-600 units away (within hearing), from an enemy that then goes out of the world.
+    let at = live.iter().map(|&i| rig.wp.origin(i as i32)).find(|o| (400.0..600.0).contains(&(*o - me).length())).unwrap();
+    let mut mgr = BotManager::default();
+    w.ents.borrow_mut().push(player(2, at, 0));
+    rig.bot.me = w.entity(1).unwrap();
+    mgr.add(std::mem::replace(&mut rig.bot, setup(false).1));
+    mgr.sound(&w, 2, Some(at), 1.0, "player/pl_step1.wav");
+    rig.bot = mgr.remove(1).unwrap();
+    w.ents.borrow_mut().retain(|e| e.index != 2);
+    let mut rng = XorShiftRandom::new(2);
+    let (mut nearest, mut searched_moving) = (f32::MAX, false);
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        1000,
+        |_| false,
+        |b, _| {
+            nearest = nearest.min((b.me.origin - at).length_2d());
+            searched_moving |=
+                b.tasks().current().is_some_and(|t| t.kind == TaskKind::SearchForEnemy && t.vector != Vector::ZERO) && b.move_to_valid;
+        },
+    );
+    assert!(nearest < 150.0, "came within {nearest} of the sound");
+    assert!(searched_moving);
+}
+
+#[test]
+fn an_enemy_lost_is_hunted_where_it_may_have_gone() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let live = live_waypoints(&rig.wp);
+    let me = w.entity(1).unwrap().origin;
+    let at = live.iter().map(|&i| rig.wp.origin(i as i32)).find(|o| (500.0..800.0).contains(&(*o - me).length())).unwrap();
+    let mut rng = XorShiftRandom::new(3);
+    walk_real(&mut rig, &mut w, &mut rng, 1, |_| false, |_, _| {});
+    rig.bot.tasks.flush();
+    // Seen 4 s ago, then gone.
+    rig.bot.remembered.tick(w.time - 4.0);
+    rig.bot.remembered.add(at, Some(EntRef { index: 3, serial: 1 }), 0, me);
+    rig.bot.remembered.tick(w.time);
+    let mut hunted = None;
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        400,
+        |_| false,
+        |b, _| {
+            if hunted.is_none() && b.looking_for_enemy {
+                hunted = b.tasks().iter().find(|t| t.kind == TaskKind::FindPath).map(|t| t.int);
+            }
+        },
+    );
+    let goal = hunted.expect("it went after the enemy");
+    // Where the enemy could have walked in 4 s (up to 800 units on), not where it was.
+    let d = (rig.wp.origin(goal) - at).length();
+    assert!(d < 900.0, "{goal} is {d} from where it was seen");
+    // The position isn't hunted twice, and it is forgotten after 15 s.
+    assert!(rig.bot.remembered.iter().all(|p| p.hunted));
+    rig.bot.remembered.tick(w.time + 20.0);
+    assert!(!rig.bot.remembered.any());
+}
+
+#[test]
+fn a_dead_enemy_is_forgotten() {
+    let mut mgr = BotManager::default();
+    let (_, mut bot, mut wp, mut weapons, presets, mut learned, config) = setup(true);
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(400.0, 0.0, 0.0), 0)]);
+    bot.me = w.entity(1).unwrap();
+    bot.remembered.add(Vector::new(400.0, 0.0, 0.0), Some(w.entity(2).unwrap().handle()), 0, Vector::ZERO);
+    mgr.add(bot);
+    let mut extra = Extra::default();
+    let mut g = BotGlobals {
+        config: &config,
+        waypoints: &mut wp,
+        weapons: &mut weapons,
+        presets: &presets,
+        learned: &mut learned,
+        team_scores: [0; 4],
+        masters: &[],
+        other_bots: Vec::new(),
+        squads: &mut extra.squads,
+        botcam: &mut extra.cam,
+        rep_ids: &extra.reps,
+        chat: &extra.chat,
+        map_name: "test",
+        danger: None,
+    };
+    mgr.death(&mut g, &w, 0, 2, &mut XorShiftRandom::new(1));
+    assert!(!mgr.get(1).unwrap().remembered.any());
+}
+
+#[test]
+fn pre_aim_checks_what_comes_into_view() {
+    // A path 0 -> 1 along x; 2 is seen from 1 only, 3 from both, 4 from neither.
+    let mut rig = Rig::new(Config::default());
+    let mut wp = Waypoints::new();
+    for o in [(0.0, 0.0), (300.0, 0.0), (400.0, 400.0), (300.0, -400.0), (600.0, 600.0)] {
+        wp.add_origin(Vector::new(o.0, o.1, 0.0), 0, None);
+    }
+    for (a, b) in [(0, 1), (1, 2), (1, 3), (0, 3), (1, 4)] {
+        wp.visibility.set(a, b, true);
+        wp.visibility.set(b, a, true);
+    }
+    wp.visibility.set(4, 1, false);
+    wp.visibility.set(1, 4, false);
+    rig.wp = wp;
+    let mut rng = XorShiftRandom::new(1);
+    let (t, standing) = rig.with(|b, g| (b.pre_aim_target(g, 0, 1, 5.0, &mut rng), b.pre_aim_target(g, 1, 1, 5.0, &mut rng)));
+    assert_eq!(t, Some(2));
+    // Standing at 1: what 1 sees.
+    assert!(matches!(standing, Some(2 | 3)), "{standing:?}");
+    // A danger map makes the dangerous one first.
+    struct Hot;
+    impl crate::nav::DangerSource for Hot {
+        fn danger(&self, w: usize, _team: i32) -> f32 {
+            if w == 3 { 1.0 } else { 0.0 }
+        }
+    }
+    let g = BotGlobals {
+        config: &rig.config,
+        waypoints: &mut rig.wp,
+        weapons: &mut rig.weapons,
+        presets: &rig.presets,
+        learned: &mut rig.learned,
+        team_scores: [0; 4],
+        masters: &[],
+        other_bots: Vec::new(),
+        squads: &mut rig.extra.squads,
+        botcam: &mut rig.extra.cam,
+        rep_ids: &rig.extra.reps,
+        chat: &rig.extra.chat,
+        map_name: "ts_test",
+        danger: Some(&Hot),
+    };
+    assert_eq!(rig.bot.pre_aim_target(&g, 1, 1, 5.0, &mut rng), Some(3));
+    // Looked at, it waits its turn.
+    rig.bot.current_waypoint = 1;
+    rig.bot.look_task = LookTask::PreAim;
+    rig.bot.update_pre_aim(&g, 5.0, &mut rng);
+    assert_eq!(rig.bot.pre_aim.point, Vector::new(300.0, -400.0, 8.0));
+    rig.bot.update_pre_aim(&g, 7.0, &mut rng);
+    assert_ne!(rig.bot.pre_aim.point, Vector::new(300.0, -400.0, 8.0));
+}
+
+/// A CTB world: the plane with game mode CTB.
+struct Ctb(Plane);
+
+impl World for Ctb {
+    fn trace_line(&self, s: Vector, e: Vector, m: Monsters, g: Glass, i: Option<u32>) -> Trace {
+        self.0.trace_line(s, e, m, g, i)
+    }
+    fn point_contents(&self, at: Vector) -> i32 {
+        self.0.point_contents(at)
+    }
+}
+
+impl BotWorld for Ctb {
+    fn time(&self) -> f32 {
+        self.0.time()
+    }
+    fn max_entities(&self) -> u32 {
+        self.0.max_entities()
+    }
+    fn max_clients(&self) -> u32 {
+        self.0.max_clients()
+    }
+    fn entity(&self, index: u32) -> Option<Entity> {
+        self.0.entity(index)
+    }
+    fn in_pvs(&self, v: u32, o: Vector) -> bool {
+        self.0.in_pvs(v, o)
+    }
+    fn entities_in_sphere(&self, o: Vector, r: f32) -> Vec<u32> {
+        self.0.entities_in_sphere(o, r)
+    }
+    fn teamplay(&self) -> bool {
+        true
+    }
+    fn find_entities(&self, key: EntityKey, value: &str) -> Vec<u32> {
+        self.0.find_entities(key, value)
+    }
+    fn game_mode(&self) -> GameMode {
+        GameMode { mode: 1, ctb: true, round: 0 }
+    }
+}
+
+#[test]
+fn ctb_bots_take_the_case_home_and_escort_or_cut_off_carriers() {
+    let ctb_ent = |index: u32, class: &str, x: f32, kind: ItemKind, team: i32| {
+        let mut e = brush(index, class, Vector::new(x, 0.0, 0.0), Vector::new(16.0, 16.0, 16.0));
+        e.item = Some(ItemInfo { kind, team, available: true, ..ItemInfo::default() });
+        e
+    };
+    let world = |me: Entity, others: Vec<Entity>| {
+        let mut ents = vec![
+            me,
+            ctb_ent(5, "ts_flag", 600.0, ItemKind::CtbFlag, 2),
+            ctb_ent(6, "ts_briefcase", 0.0, ItemKind::CtbBase, 1),
+            ctb_ent(7, "ts_briefcase", 750.0, ItemKind::CtbBase, 2),
+        ];
+        ents.extend(others);
+        Ctb(plane(ents))
+    };
+    let tasks = |w: &Ctb, rig: &mut Rig| {
+        let mut rng = XorShiftRandom::new(1);
+        rig.with(|b, g| {
+            b.me = w.entity(1).unwrap();
+            b.state = b.me.player.unwrap();
+            b.tasks.flush();
+            b.look_for_new_tasks(g, w, &mut rng);
+            b.tasks().iter().map(|t| (t.kind, t.edict.map(|e| e.index))).collect::<Vec<_>>()
+        })
+    };
+    let mut rig = Rig::new(Config::default());
+    let me = player(1, Vector::new(300.0, 0.0, 0.0), 1);
+    // The other team's case lies there: go and take it.
+    let w = world(me.clone(), vec![]);
+    assert_eq!(tasks(&w, &mut rig)[0], (TaskKind::FindPath, Some(5)));
+    // Carrying it: home to team 1's point.
+    let mut carrying = me.clone();
+    carrying.player.as_mut().unwrap().has_flag = true;
+    assert_eq!(tasks(&world(carrying, vec![]), &mut rig)[0], (TaskKind::FindPath, Some(6)));
+    // A teammate carries it far away: escort; an enemy does: wait at its point.
+    let mut mate = player(2, Vector::new(-400.0, 0.0, 0.0), 1);
+    mate.player.as_mut().unwrap().has_flag = true;
+    assert_eq!(tasks(&world(me.clone(), vec![mate]), &mut rig)[0], (TaskKind::FindPath, Some(2)));
+    let mut enemy = player(3, Vector::new(700.0, 0.0, 0.0), 2);
+    enemy.player.as_mut().unwrap().has_flag = true;
+    assert_eq!(tasks(&world(me, vec![enemy]), &mut rig)[0], (TaskKind::FindPath, Some(7)));
+}
+
+#[test]
+fn stealth_squads_and_stay_near_waypoints_slow_down_at_once() {
+    let mut rig = Rig::new(Config::default());
+    let leader = player(2, Vector::new(-100.0, 0.0, 0.0), 0);
+    let w = plane(vec![player(1, Vector::ZERO, 0), leader.clone()]);
+    let speed = |rig: &mut Rig| {
+        rig.with(|b, g| {
+            b.me = w.entity(1).unwrap();
+            b.ideal_move_speed = b.max_speed;
+            b.set_move_vector(Vector::new(500.0, 0.0, 0.0));
+            b.work_move_direction(&w, g);
+            b.move_speed.hypot(b.strafe_speed)
+        })
+    };
+    assert!((speed(&mut rig) - 290.0).abs() < 1.0);
+    // A stay-near waypoint: half speed in the same frame (upstream: the next one).
+    rig.bot.current_waypoint_flags = fl::STAY_NEAR;
+    assert!(speed(&mut rig) <= 145.5);
+    rig.bot.current_waypoint_flags = 0;
+    // A stealthy squad: half speed (upstream overwrote it before it was read, design §5.62).
+    let me = w.entity(1).unwrap();
+    let id = rig.extra.squads.add_member(&leader, &me, false).unwrap();
+    rig.extra.squads.get_mut(id).unwrap().set_combat_type(squad::CombatType::Stealth);
+    rig.bot.squad = Some(id);
+    assert!(speed(&mut rig) <= 145.5);
+}
+
+#[test]
+fn teammates_share_sightings_claims_and_paths() {
+    let mut rig = Rig::new(Config::default());
+    for i in 0..6 {
+        for j in 0..6 {
+            rig.wp.visibility.set(i, j, true);
+        }
+    }
+    let mut w = plane(vec![player(1, Vector::ZERO, 1), player(3, Vector::new(900.0, 0.0, 0.0), 1)]);
+    w.teamplay = true;
+    let enemies = [EntRef { index: 5, serial: 1 }, EntRef { index: 6, serial: 1 }];
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        b.now = 10.0;
+        let board = g.squads.boards.get_mut(1).unwrap();
+        // Teammate 3 goes to waypoint 4 by 2, 3, 4 and goes for an item.
+        board.post(3, Vector::new(1200.0, 0.0, 0.0), &[4, 3, 2], 10.0);
+        board.claim(board::Claim { by: 3, waypoint: 4, item: Some(EntRef { index: 9, serial: 1 }), until: 40.0 });
+        assert_eq!(b.crowded_waypoints(g), vec![2, 3, 4]);
+        assert!(b.claim_factor(g, 4) < 0.25 && b.claim_factor(g, 0) == 1.0);
+        assert_eq!(b.claim_item_factor(g, EntRef { index: 9, serial: 1 }), 0.1);
+        // Two enemies seen near the bot, no teammate near: regroup with the teammate.
+        assert_eq!(b.regroup_point(g, 10.0), None);
+        for (i, e) in enemies.iter().enumerate() {
+            g.squads.boards.get_mut(1).unwrap().sight(3, *e, Vector::new(200.0, 100.0 * i as f32, 0.0), 9.0);
+        }
+        assert_eq!(b.regroup_point(g, 10.0), Some(Vector::new(1200.0, 0.0, 0.0)));
+        // A teammate's sighting is worth going to see; its sightings are threats for tactical paths.
+        let (goal, _) = b.choose_goal(g, &w, 10.0);
+        assert!(matches!(goal, goals::Goal::Regroup(_)), "{goal:?}");
+        assert!(!b.threat_waypoints(g, &w).is_empty());
+        // Deathmatch: no board.
+        b.state.team = 0;
+        assert_eq!(b.claim_factor(g, 4), 1.0);
+    });
+}
+
+#[test]
+fn a_bot_never_stands_at_a_reached_goal() {
+    let (mut rig, mut w) = real_rig("ts_dojo");
+    let mut rng = XorShiftRandom::new(5);
+    let (mut still, mut last) = (0, Vector::ZERO);
+    walk_real(
+        &mut rig,
+        &mut w,
+        &mut rng,
+        6000,
+        |_| false,
+        |b, _| {
+            if (b.me.origin - last).length_2d() < 0.5 {
+                still += 1;
+            }
+            last = b.me.origin;
+        },
+    );
+    // Upstream stopped at every goal (`StopMoving` and half a second without a waypoint): about
+    // one frame in ten on this map.
+    assert!(still * 100 < 6000 * 4, "{still} of 6000 frames standing");
+}
+
+#[test]
+fn a_sniper_holds_a_spot_that_sees_far() {
+    let mut rig = Rig::new(Config::default());
+    // Waypoint 3 sees all the others; the rest see only their neighbours.
+    for i in 0..12 {
+        rig.wp.add_origin(Vector::new(900.0 + i as f32 * 100.0, 300.0, 0.0), 0, None);
+    }
+    for j in 0..rig.wp.len() {
+        rig.wp.visibility.set(3, j, true);
+    }
+    let w = plane(vec![player(1, Vector::new(300.0, 0.0, 0.0), 0)]);
+    rig.with(|b, g| {
+        b.me = w.entity(1).unwrap();
+        b.state = b.me.player.unwrap();
+        b.current_weapon = Some(1);
+        assert!(b.hold_spot(g, 5.0).is_none(), "a pistol roams");
+        b.current_weapon = Some(18);
+        let (spot, _) = b.hold_spot(g, 5.0).unwrap();
+        assert_eq!(spot, 3);
+        let mut rng = XorShiftRandom::new(2);
+        b.look_for_new_tasks(g, &w, &mut rng);
+        let kinds: Vec<_> = b.tasks().iter().map(|t| (t.kind, t.int)).collect();
+        assert_eq!(kinds, [(TaskKind::FindPath, 3), (TaskKind::Defend, 0)]);
+        // Then it roams a while before holding again.
+        assert!(b.hold_again >= 16.0);
+    });
 }

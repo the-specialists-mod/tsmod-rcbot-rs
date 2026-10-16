@@ -213,7 +213,8 @@ quoted), `bot_playerids.ini` (`"name"` per line; the line number is the reputati
 
 Where the port behaves differently from upstream on purpose. Everything else, quirks included, is
 kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the team checks, the
-50-candidate random goals, the bucket search order.
+50-candidate random goals (`find_random_goal`, which the bots no longer use for roaming), the
+bucket search order.
 
 * **Waypoints outside ±4096 on load**: upstream marks one deleted at the origin but doesn't count
   it, which misaligns every later index and the path section; the port marks it the same way and
@@ -570,12 +571,13 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   kills and damage `f32`s); a file for another map or waypoint count starts afresh. API:
   `Heatmap::danger(waypoint, team)` (RCBot team, -1 none: deaths + 0.3 × damage, squashed to 0..1),
   `ambush_value(waypoint)` (kills from it, any team, 0..1), `cover_penalty(waypoint, team)` (up to
-  256 units), `Bot::waypoint_danger(g, waypoint)`. Hooks, opt-in so upstream's results stay bit for
-  bit: `nav::DangerSource` (the heatmap implements it) and `AStar::search_with_danger(…, Some((source,
-  weight)))`, which makes each edge `length × (1 + weight × danger(successor))` (`search` is the
-  same with none); `Waypoints::cover_waypoint_weighted(…, penalty)`, the cover search with a
-  per-waypoint distance penalty (`cover_waypoint` passes 0). The navigation and combat code choose
-  when to use them.
+  256 units), `Bot::waypoint_danger(g, waypoint)`. Where it is used: the heatmap implements
+  `nav::DangerSource` (`danger(waypoint, team)`), which tactical paths, goal choice and pre-aiming
+  read through `BotGlobals::danger_at` (a test may set `BotGlobals::danger` instead);
+  `run_for_cover` uses `Waypoints::cover_waypoint_weighted(…, cover_penalty)` (`cover_waypoint`
+  passes 0, upstream's choice). The opponent model's threat (square-rooted) scales the enemy
+  choice, and the weapon table's learned damage a second corrects the weapon scores (0.5-1.4×,
+  once the bot has enough time with that weapon at that range).
 * **Loadouts by a bandit** (`learn/loadout.rs`): the loadout bought before each spawn is chosen
   among 24 curated ones (a primary and a sidearm a TS player carries, at most 60 slots so the bot
   can still dive, within the slots it has) by discounted UCB1 (every arm's weight × 0.97 per
@@ -600,6 +602,110 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   (`accuracy`, `favourite_weapon`, `kf_block_rate`, the fields). Saved as
   `botprofiles/players.rop` (text, `rcbot-players 1`, `p <rep id>` / `b <profile id>` and 56
   numbers).
+
+Navigation, movement and tactics (#1, phase 3: bots that move like experienced TS players):
+
+* **Stuck recovery** (`movement.rs` `Unstick`): upstream's `CheckStuck` ran `gotStuck` on every
+  frame between 1 and 2 s of being stuck, each time one waypoint *index* back (§5.52), then failed
+  whatever path that left, and killed the bot after 8 s without progress, in a fight or not. The
+  port reacts once per stuck event: back to the previous waypoint (the one it was heading for
+  goes back on the path after it); at 2 s the path it was on when it got stuck fails and the bot
+  finds another way from the nearest waypoint but that one. Stuck again at the same place within
+  4 s escalates: backing up and strafing, a crouch jump, then a wall jump when facing a wall or
+  else a dive. Suicide is the last resort: 20 s at one place (or without progress), never with an
+  enemy in sight in the last 5 s, counted (`Bot::stuck_suicides`, `stuck_kills` in the host's
+  log). Being stuck compares the speed with the whole speed asked for, sideways included (a bot
+  pre-aiming walks partly with the strafe; upstream compared the forward speed).
+* **Roaming** (`roam_goal`, `Waypoints::find_weighted_goal`): upstream's random goal is one of
+  the first 50 usable waypoints (`int indexes[50]`), 17-37% of the shipped maps; the port draws
+  from all of them, weighted by how long the bot hasn't been there (`goals.rs` `Explore`, up to
+  2 min) and less for goals within 400 units. A goal reached stays off the roaming list until the
+  next clear (upstream took a goal it reached twice off the list instead).
+* **Dives** (`Bot::dive`): TS 3.0 dives (`+alt1`) land prone unless duck, jump or the stunt key is
+  held; upstream pressed the key alone at stunt waypoints, and `DEFEND` pressed it on every think
+  until prone, which standing still does nothing outside slow motion. A bot's own dive holds duck
+  from 0.15 to 1.5 s, so it rolls out of the landing, and a bot that lands prone anyway jumps to
+  get up; `DEFEND` no longer presses it.
+* **Task timeouts**: `SetTimeToCompleteSchedule` times out `secs` from now (upstream's `2 * now +
+  secs` never came, §5.50); a `FIND_PATH` that found its path has 30 s to reach the first waypoint
+  (upstream: no limit until a waypoint was touched, then 20-30 s per touch, as now). A goal A*
+  can't reach stays failed instead of being taken off the list by a second failure, and is backed
+  off for 30-60 s (`AStarBot::backed_off_goals`, past upstream's clear of every failed goal 5-10 s
+  after the last failure); `SearchOptions::UPSTREAM` keeps upstream's search for the reference
+  tests.
+* **Goals** (`goals.rs` `choose_goal`, `items.rs` `ItemMemory`): upstream's TS bot went for the
+  nearest weapon or power-up in its 60° view, wanted or not (`CanPickup` checked only the class),
+  so it never went for one behind it and pressed use for 10 s on ones it couldn't take (no
+  inventory space, a power-up already held: `+use` on another swaps it), waited 5-10 s and went
+  back. The port knows the map's items (`BotWorld::items`: `ts_groundweapon`, `ts_powerup`, plus
+  what it sees; the host fills `Entity::item` from the plugin API's `entity_info`), sees whether
+  the ones in view are there, learns how long a taken one takes to come back (from 20 s for
+  weapons, 60 s for power-ups), and scores each as `value * 1000 / (distance * 1.3 + 200 + 300
+  danger)` against roaming (10): a gun it has room for (`TSSpace` against TS's weapon slots) by
+  `bot_weapons.ini` priority over its best loaded gun (60 + 5 priority when unarmed), its own gun
+  when low on reserve, health by what it lacks, armour, other power-ups only with none held or
+  running (more unarmed, kung fu most). `CanPickup` asks the same. An item still there 2 s after
+  the bot touched it, or after 1.5 s of pressing use on it, is left alone for 30 s.
+* **Hearing** (`hearing.rs`): an enemy's footsteps (the `sound` callback) and enemies firing
+  (`IN_ATTACK`, now within 1500 units, 350 with a silencer, `TSA_SILENCER`; upstream: the nearest
+  player within 750, teammates included) are remembered for 8 s with where, when, how loud and
+  who; the bot glances at a new one for 0.8 s and, if it was only roaming, chooses its goal
+  again. Investigating a sound is a goal (`Investigate`: 30 x loudness, fresher and more for a
+  healthy, armed bot): a path there (15 s at most) and a moving search around it. Upstream's
+  listen task had no entity and failed at once (§5.58) after `AddPriorityTask` made every later
+  task forget its path, and gunfire led to a "find the path and finish" task that never walked it.
+* **Enemy memory** (`remember.rs`): remembered positions carry the time and are forgotten after
+  15 s or when their player dies (every bot hears the death); at most 8 are kept (upstream 9), and
+  positions without an entity are one only when within 64 units (§5.53). A lost enemy is a goal
+  (`Hunt`: 45, fresher and more for a ready bot) instead of half of all roaming going to the
+  newest position whatever its age: the bot paths (15 s at most) to a waypoint the enemy could have
+  walked to since (200 units/s along the graph, at most 1500, one the bot can't see from where it
+  is), pre-aiming, then searches around it on the move for 3-6 s (upstream's search after roaming
+  had duration 0 and ended at the next think; its searches stood still). Each position is hunted
+  once.
+* **Pre-aim** (`preaim.rs`, `LookTask::PreAim`): following a path, the bot looks at the waypoints
+  the next waypoint sees and the current one doesn't (the places about to come into view),
+  150-1500 units away and not straight ahead, most dangerous first (the heat map, places enemies
+  were seen near), each for 0.6-1.2 s, not again within 4 s; standing (defending), at what its
+  waypoint sees. Upstream looked at the waypoint it walked to.
+* **Objectives** (`objective_tasks`): upstream picked a random objective; team 1 defended it and
+  team 2 used it, whatever it was. The port gives each a role for the bot's team: the team the
+  port reports for the objective's entity if any (API v5 gives none for `ts_hack`/`ts_bomb`), else
+  defend one whose use by this team failed in the last 60 s (still active after the 9 s use) or
+  whose text for the team is empty or says to defend, protect, guard, prevent, stop or hold, else
+  complete it. Attackers go for one (1 in 8 roam instead), defenders hold a waypoint 200-900 units
+  from it that sees it (the visibility table) for 10-20 s, pre-aiming, then rotate to another (1
+  in 4 roam). `DEFEND` stands still for 10-20 s (upstream 20-80 s, diving until prone).
+* **Capture the briefcase** (`ctb_tasks`, `GameState::ctb`; upstream had none for TS): a bot with
+  the case (`PlayerInfo::has_flag`) takes it to the nearest `ts_briefcase` its team may capture
+  at; a teammate carrying it is escorted (kept within 300 units); an enemy carrier is cut off at
+  the point it must reach; otherwise the bot goes for a case lying in the map that its team may
+  take (`ts_flag` of another team or any).
+* **Team boards** (`board.rs`, kept in `Squads::boards`, one per rules team, none in
+  deathmatch): each bot posts every think where it is and the path it has left, the enemy it
+  sees and the sounds it hears, and the goal it took (30 s). Teammates' goals within 500 units
+  are worth less (down to a fifth; an item a teammate goes for a tenth), their sightings and
+  sounds are goals too (worth less than the bot's own), their paths are `crowded` in tactical
+  paths and their sightings threats; an outnumbered bot (two or more enemies seen near in 5 s
+  beyond the teammates within 1000 units) regroups with the nearest teammate. A player's death
+  clears its sightings and posts. Upstream's bots shared nothing but squads.
+* **Moving on** (`look_for_new_tasks`, `update_waypoint`): upstream stopped the bot at every new
+  task pass, waited half a second whenever no next waypoint was set (every goal reached), and
+  waited out the last search's half second before searching the next goal's path, so it stood
+  still at every goal; now only a bot with no waypoint near waits. A bot holds a spot instead of
+  roaming (`Hold`: the waypoint within 600 units that sees the most, seeing at least 8, untaken)
+  with a long gun (the Barrett most, scoped rifles), when hurt or right after a fight, for 10-20
+  s, then roams 15-30 s before holding again. Searches move (above).
+* **Speeds**: a stay-near waypoint halves the speed in the frame the move is worked out
+  (upstream set it in `RunPlayerMove`, a frame late), and a stealthy squad walks at half speed
+  (upstream overwrote it before it was read, §5.62).
+* **Tactical paths** (on by default; `rcbot config tactical_paths 0` gives upstream's shortest
+  paths; `nav::Tactics`): an edge into waypoint `w` costs its length times `1 + 2 danger(w) +
+  1.5 exposure(w) + 0.5 crowded(w)`: `danger` from the learned heat map for the bot's team
+  (`BotGlobals::danger_at`), `exposure` the waypoints near where enemies were lately seen that
+  see `w` (the visibility table), `crowded` teammates' paths. The heuristic is then the distance to
+  the goal alone (upstream adds the distance from the bot, which overestimates), admissible as
+  every factor is at least 1 (teleports, which cost nothing, excepted).
 
 ## 5. Upstream bugs found
 
@@ -754,14 +860,16 @@ Found while porting; not filed upstream.
     cover and press reload, as upstream means to. `CanReload` and `LowOnAmmo` now ask the clip
     and reserve instead of `m_iAmmo1` (**Fixed**, §4 partial reloads).
 50. **`SetTimeToCompleteSchedule` adds the time twice** (`bot.h:1134`): schedules time out at
-    `2 * time + secs`. Kept.
+    `2 * time + secs`. **Fixed** (§4).
 51. **`EnemyFound` sets `m_fStrafeTime` to 2-6 s since the map started** (`bot.cpp:715`), not
     from now (with a strafe speed of 1). **Fixed**: the fight's own strafe replaces it (§4).
 52. **`gotStuck` decrements the waypoint index** (`bot.cpp:8000`) instead of going back to the
-    previous waypoint. Kept.
+    previous waypoint, and `CheckStuck` calls it on every frame of the second second of being
+    stuck (about 100 decrements at 100 Hz), then fails the path that left. **Fixed** (§4).
 53. **Remembered positions**: up to 9 are kept (`Size() > MAX_REMEMBER_POSITIONS`), positions
     without an entity all compare equal (`bot.h:1888`), and `EnemyDown` runs after
-    `NORMAL_ATTACK` cleared the enemy, so nothing is removed. Kept.
+    `NORMAL_ATTACK` cleared the enemy, so nothing is removed: a dead enemy's position is hunted
+    for ever. **Fixed** (§4: 8 kept, entity-less ones by place, forgotten on death and after 15 s).
 54. **The remembered-point check is always true** (`UpdateVisibles`, `bot.cpp:6091`): it checks
     the bot against its own PVS. Kept.
 55. **The enemy-cost buckets all get the same cost** (`workEnemyCosts`, `bot.cpp:16873`): the
@@ -776,7 +884,8 @@ Found while porting; not filed upstream.
 
 58. **The listen task a sound starts has no entity** (`HearSound`, `bot.cpp:10285`): `SOUND_PLAYER`
     adds `BOT_TASK_LISTEN_TO_SOUND` with a `NULL` edict, which the task fails at once, so hearing
-    an enemy's footsteps only costs the bot its current task's place. Kept.
+    an enemy's footsteps only costs the bot its current task's place. **Fixed** (§4: sounds are
+    remembered and investigated).
 59. **Grenade-throw waypoints ask for HL's hand grenade** (`BotNavigate_UpdateWaypoint`,
     `bot_navigate.cpp:1580`): `HasWeapon(VALVE_WEAPON_HANDGRENADE)` is id 12, TS's Desert Eagle,
     and `BOT_TASK_THROW_GRENADE` fails for TS anyway (only Opposing Force throws), so a bot with a
@@ -788,7 +897,7 @@ Found while porting; not filed upstream.
     `SquadCanShoot` is removed on the next line, before any task reads it (and TS's
     `WantToFindEnemy` ignores it). Kept.
 62. **Stealth squads don't slow down** (`Think`, `bot.cpp:3150`): the half speed is overwritten
-    with the full speed before anything reads it. Kept.
+    with the full speed before anything reads it. **Fixed** (§4).
 63. **An enemy's priority only counts if it is also nearer** (`FindEnemy`, `bot.cpp:9184`):
     `iPriority >= iBestPriority && fFitness < fBestFitness`, so a disliked player seen after a
     nearer stranger isn't chosen; a higher priority seen first does keep lower ones out.
@@ -903,6 +1012,27 @@ those by going through the port's own code when that code is ported.
   without pre-aiming through the wall; the grenade thrown behind cover, throw pitches that land,
   fleeing grenades out of view; power-ups used when they help; TS 3.0's gun table.
 
+* **Navigation** (`bot/tests.rs`, on shipped `.rcw` graphs in the plane world, the bot put at
+  the height of the waypoint it heads for): roaming goals cover at least 95% of four maps' usable
+  waypoints (upstream's at most 50); a bot roaming ts_dojo for three minutes touches half the map
+  with goals all over it; a bot blocked between two waypoints goes back to the previous one once
+  (no index jumps) and fails that path within 3 s; blocked for good, it escalates (backing up, a
+  dive or wall jump) and kills itself only after 20 s; a dive holds duck through the landing and
+  jumps up from prone. A* unit tests: failed goals backed off, tactical costs (danger, exposure,
+  teammates' paths), zero tactics giving shortest paths. Items: what weapons and power-ups are
+  worth (room, priority, ammo, a held power-up, health); an item at the far end of ts_dojo is gone
+  for at once; a power-up the game never hands over is tried at most twice in a minute (upstream:
+  10 s of use, then again every 5-10 s); respawn times learned; untakeable items left alone.
+  Hearing and hunting: footsteps heard are remembered (not teammates', not silent ones or too far),
+  and on ts_dojo the bot walks to the sound and searches around it on the move; an enemy lost 4 s
+  ago is hunted where it could have gone, once, and forgotten after 15 s or when it dies;
+  pre-aim picks the waypoint coming into view, the dangerous one first, then another; objectives
+  by their text (attack: path and 9 s use; defend: a waypoint 200-900 units off that sees it); CTB
+  (take the other team's case, carry it home, escort a teammate, cut off an enemy carrier).
+  Team boards: teammates' paths, claims and sightings, regrouping when outnumbered; a bot roaming
+  ts_dojo stands still less than 4% of the time (upstream stopped at every goal); a sniper holds
+  the spot that sees the most, a pistol roams; stay-near waypoints and stealth squads halve the
+  speed in the same frame.
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the
   visibility table and its rows, RCZ, `.rcw` save/load/reject, the GraveBot import, A*'s rules,

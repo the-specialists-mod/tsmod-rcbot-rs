@@ -5,7 +5,9 @@
 use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use ts_plugin_api::{BotBackend, BotCmd, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, WeaponEntry, ham};
+use ts_plugin_api::{
+    BotBackend, BotCmd, EntityInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PluginApi, PluginId, WeaponEntry, ham,
+};
 
 /// The plugin API table and our plugin id.
 #[derive(Clone, Copy)]
@@ -97,6 +99,14 @@ impl Api {
         let n = unsafe { (self.table.player_inventory)(player, out.as_mut_ptr(), out.len() as c_int) };
         out.truncate(usize::try_from(n).ok()?);
         Some(out)
+    }
+
+    /// `entity_info`: what a game entity is (kind, weapon, power-up, team, availability), `None`
+    /// for a free or invalid index.
+    pub fn entity_info(&self, entity: i32) -> Option<EntityInfo> {
+        let mut i = EntityInfo::default();
+        // SAFETY: `i` is writable.
+        (unsafe { (self.table.entity_info)(entity, &mut i) } == OK).then_some(i)
     }
 
     /// `game_state`.

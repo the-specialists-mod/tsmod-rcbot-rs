@@ -305,7 +305,10 @@ fn the_barrett_waits_for_its_spread_and_stands_still() {
     assert!(fired.len() >= 3, "{}", fired.len());
     // One shot fills the penalty (0.1); at 1000 units and skill 50 it must fall to 0.027 first.
     assert!(fired.windows(2).all(|p| p[1].0 - p[0].0 >= 0.7), "{:?}", fired.iter().map(|s| s.0).collect::<Vec<_>>());
-    assert!(c.iter().all(|s| s.3 == 0.0 && s.4 == 0.0));
+    // Still once in the fight (before it sees the enemy it walks its path: the bot doesn't
+    // stand at a reached goal, design §4).
+    let engaged = fired[0].0;
+    assert!(c.iter().filter(|s| s.0 > engaged).all(|s| s.3 == 0.0 && s.4 == 0.0));
 }
 
 /// The longest run of commands holding `+attack`.

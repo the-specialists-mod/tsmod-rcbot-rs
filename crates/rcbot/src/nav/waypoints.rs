@@ -360,6 +360,41 @@ impl Waypoints {
         c.get(i as usize).copied()
     }
 
+    /// A random usable waypoint with all of `flags`, not in `ignore`, drawn from **all** of them
+    /// with a chance proportional to `weight` (0 or less: never). The bots' roaming goals (design
+    /// §4): upstream's [`Waypoints::find_random_goal`] draws from the first 50 in index order, so
+    /// on a map of 150-300 waypoints bots only ever roamed to a sixth to a third of it.
+    pub fn find_weighted_goal(
+        &self,
+        team: i32,
+        flags: u32,
+        ignore: &[usize],
+        weight: impl Fn(usize) -> f32,
+        rng: &mut dyn Random,
+    ) -> Option<usize> {
+        let failed = Self::ignore_set(ignore);
+        let candidates: Vec<(usize, f32)> = self
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter(|&(i, w)| !failed[i] && Self::usable_goal(w, team) && w.flags & flags == flags && w.flags & fl::UNREACHABLE == 0)
+            .map(|(i, _)| (i, weight(i)))
+            .filter(|&(_, wt)| wt > 0.0)
+            .collect();
+        let total: f32 = candidates.iter().map(|&(_, wt)| wt).sum();
+        if candidates.is_empty() || total <= 0.0 {
+            return None;
+        }
+        let mut r = rng.random_float(0.0, total);
+        for &(i, wt) in &candidates {
+            if r < wt {
+                return Some(i);
+            }
+            r -= wt;
+        }
+        candidates.last().map(|&(i, _)| i)
+    }
+
     /// `WaypointFindNearestAiming`: the nearest aiming waypoint within 40 units.
     pub fn find_nearest_aiming(&self, v_origin: Vector) -> Option<usize> {
         let mut min_index = None;
@@ -623,6 +658,14 @@ mod tests {
             let g = w.find_random_goal_near(Vector::ZERO, 350.0, -1, 0, &[], &mut rng).unwrap();
             assert!(g < 4);
         }
+        // Weighted: every waypoint can come up, in proportion to its weight.
+        let mut counts = [0; 5];
+        for _ in 0..2000 {
+            counts[w.find_weighted_goal(-1, 0, &[1], |i| if i == 4 { 3.0 } else { 1.0 }, &mut rng).unwrap()] += 1;
+        }
+        assert_eq!(counts[1], 0);
+        assert!(counts[4] > counts[0] * 2 && counts[0] > 200, "{counts:?}");
+        assert_eq!(w.find_weighted_goal(-1, fl::HEALTH, &[], |i| if i == 3 { 0.0 } else { 1.0 }, &mut rng), Some(4));
         assert_eq!(w.find_nearest(Vector::new(120.0, 0.0, 0.0), Vector::new(120.0, 0.0, 0.0), None, 400.0, -1, &EmptyWorld), Some(1));
         let a = w.add_aiming(Vector::ZERO, Vector::new(10.0, 90.0, 0.0)).unwrap();
         assert_eq!(w.find_nearest_aiming(Vector::new(0.0, 25.0, 0.0)), Some(a));

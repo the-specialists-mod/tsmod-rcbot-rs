@@ -11,16 +11,21 @@
 //! ([`PlayerState`]), which is also how teams are known (upstream compared model strings, which
 //! TS 3.0's teams don't use; the-specialistsmod-rs#104).
 
+pub mod board;
 pub mod botcam;
 mod combat;
 pub mod events;
 mod fire;
+mod goals;
+mod hearing;
+mod items;
 pub mod kungfu;
 pub mod learning;
 mod look;
 mod manager;
 mod movement;
 mod navigate;
+mod preaim;
 mod remember;
 pub(crate) mod special;
 pub mod squad;
@@ -162,6 +167,58 @@ pub struct PlayerState {
     pub time_scale: f32,
     /// Permanent kung fu picked up this life.
     pub kungfu: bool,
+    /// Carries the capture-the-briefcase case.
+    pub has_flag: bool,
+}
+
+/// What a game item is ([`ItemInfo::kind`], the plugin API's `entity_info` kinds).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ItemKind {
+    /// Anything else.
+    #[default]
+    Other,
+    /// A weapon lying in the map (`ts_groundweapon`): [`ItemInfo::weapon`] is its TS id.
+    GroundWeapon,
+    /// `ts_powerup`: [`ItemInfo::powerup`] is its bits.
+    Powerup,
+    /// A thrown grenade, knife or gun.
+    Projectile,
+    /// A gun a player holds or dropped.
+    Gun,
+    /// The capture-the-briefcase case lying in the map: [`ItemInfo::team`] owns it.
+    CtbFlag,
+    /// A capture point: [`ItemInfo::team`] may capture there (0 any).
+    CtbBase,
+    /// A team or score objective (`ts_wingiver`, `ts_scoregiver`).
+    Objective,
+}
+
+/// The port's `entity_info` for a game item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemInfo {
+    /// What it is.
+    pub kind: ItemKind,
+    /// TS weapon id (ground weapons, guns), else 0.
+    pub weapon: i32,
+    /// Power-up bits, else 0.
+    pub powerup: i32,
+    /// The responsible player (thrower, holder), 0 for none.
+    pub owner: u32,
+    /// Its rules team, 0 for none or any.
+    pub team: i32,
+    /// It can be picked up or used now (visible, not waiting to respawn).
+    pub available: bool,
+}
+
+/// The game's mode as the port reports it (`GameState`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GameMode {
+    /// `CTSGameRules::m_mode`: 0 deathmatch, 1 team deathmatch, 3 objective.
+    pub mode: i32,
+    /// The map has a capture-the-briefcase case.
+    pub ctb: bool,
+    /// 0 no rounds, 1 a round running, 2 a round over.
+    pub round: i32,
 }
 
 /// What [`BotWorld::entity`] says about an entity: the `entvars_t` fields the bot reads, and for
@@ -236,6 +293,8 @@ pub struct Entity {
     pub groundentity: Option<u32>,
     /// A connected player's TS state.
     pub player: Option<PlayerState>,
+    /// What a game item is (weapons, power-ups, CTB entities), from the port.
+    pub item: Option<ItemInfo>,
 }
 
 impl Entity {
@@ -327,6 +386,17 @@ pub trait BotWorld: World {
         let _ = index;
         None
     }
+    /// The items lying in the map a bot may want (`ts_groundweapon`, `ts_powerup`): an experienced
+    /// player knows where they spawn.
+    fn items(&self) -> Vec<u32> {
+        let mut out = self.find_entities(EntityKey::Classname, "ts_groundweapon");
+        out.extend(self.find_entities(EntityKey::Classname, "ts_powerup"));
+        out
+    }
+    /// The game's mode, CTB and rounds; deathmatch by default.
+    fn game_mode(&self) -> GameMode {
+        GameMode::default()
+    }
     /// The TS objectives player `index` has been told of (`m_TSObjectives`, from the `TSObjective`
     /// messages): the HUD's objective list that can still be completed. None by default.
     fn ts_objectives(&self, index: u32) -> Vec<TsObjective> {
@@ -336,10 +406,12 @@ pub trait BotWorld: World {
 }
 
 /// `TSObjective`: an objective the `TSObjective` message listed.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TsObjective {
     /// `m_iId`: the message's index.
     pub id: i32,
+    /// The objective's entity (`ts_hack`, `ts_bomb`, ...), if the port says (port addition).
+    pub entity: Option<u32>,
     /// `m_vOrigin`: the objective's centre.
     pub origin: Vector,
     /// `m_szName`: its text for the bot's team.
@@ -431,6 +503,21 @@ pub struct BotGlobals<'a> {
     pub chat: &'a crate::chat::bot_chat::BotChatMessages,
     /// `gpGlobals->mapname`.
     pub map_name: &'a str,
+    /// A danger source to use instead of the learned heat map (`learned.heatmap`) for tactical
+    /// paths, goals and looking around ([`BotGlobals::danger_at`]); tests set it, the host leaves
+    /// it `None` (port addition, design §4).
+    pub danger: Option<&'a dyn crate::nav::DangerSource>,
+}
+
+impl BotGlobals<'_> {
+    /// How dangerous `waypoint` is for `team`: the test's danger source if any, else the learned
+    /// heat map (design §4).
+    pub(crate) fn danger_at(&self, waypoint: usize, team: i32) -> f32 {
+        match self.danger {
+            Some(d) => d.danger(waypoint, team),
+            None => self.learned.heatmap.danger(waypoint, team),
+        }
+    }
 }
 
 /// `eBotCondition` bits (`bot_const.h`) the TS bot uses.
@@ -492,6 +579,8 @@ pub enum LookTask {
     FaceTaskVector,
     /// `BOT_LOOK_TASK_FACE_TASK_EDICT`.
     FaceTaskEdict,
+    /// Port addition: look where an enemy may appear next (`preaim.rs`, design §4).
+    PreAim,
 }
 
 /// `eClimbType`, TS's cases.
@@ -567,6 +656,14 @@ pub struct Bot {
     pub(crate) velocity_2d: f32,
     pub(crate) last_no_move: f32,
     pub(crate) stuck_time: f32,
+    /// What the bot tried against getting stuck at the place it is stuck now (design §4).
+    pub(crate) unstick: movement::Unstick,
+    /// Times the bot killed itself after being stuck for [`movement::STUCK_SUICIDE`] seconds with
+    /// nothing else working (for `debug` and the host's log).
+    pub stuck_suicides: u32,
+    /// When the bot last dived (TS's `+alt1` stunt) on its own: it holds duck through the
+    /// landing and gets up if it lands prone (design §4). 0 for none.
+    pub(crate) dive_time: f32,
 
     pub(crate) turn_speed: f32,
     /// `gBotGlobals.m_fTurnSpeed`, what `SetViewAngles` resets the turn speed to.
@@ -593,6 +690,8 @@ pub struct Bot {
     pub(crate) paths: AStarBot,
     /// Waypoints touched since spawning (for `debug` and the e2e check).
     pub touched_waypoints: u32,
+    /// When the bot was last at each waypoint, for roaming (design §4).
+    pub(crate) explore: goals::Explore,
 
     pub(crate) enemy: Option<EntRef>,
     pub(crate) last_enemy: Option<EntRef>,
@@ -618,6 +717,18 @@ pub struct Bot {
     pub(crate) looking_for_enemy: bool,
     pub(crate) listen_to_sound_time: f32,
     pub(crate) investigate_sound_time: f32,
+    /// The sounds heard lately (design §4).
+    pub(crate) hearing: hearing::Hearing,
+    /// Where the bot pre-aims (design §4).
+    pub(crate) pre_aim: preaim::PreAim,
+    /// Where a moving search goes next (`SEARCH_FOR_ENEMY` with a centre).
+    pub(crate) search_point: Option<Vector>,
+    /// When the bot may hold a spot again (it roams in between; design §4).
+    pub(crate) hold_again: f32,
+    /// The objective the bot last tried to complete, and when it should be done by.
+    pub(crate) objective_attempt: Option<(i32, f32)>,
+    /// Objectives the bot's team couldn't complete, defended instead until the time.
+    pub(crate) objective_failed: Vec<(i32, f32)>,
     pub(crate) used_melee: bool,
     pub(crate) prev_health: f32,
     pub(crate) chat_message_time: f32,
@@ -640,6 +751,8 @@ pub struct Bot {
     pub(crate) fight: fire::Fight,
     pub(crate) pickup_entity: Option<EntRef>,
     pub(crate) pickup_item_time: f32,
+    /// The map's items as the bot knows them (design §4).
+    pub(crate) items: items::ItemMemory,
 
     pub(crate) spawn_time: f32,
     pub(crate) spawn_position: Vector,
@@ -717,6 +830,9 @@ impl Bot {
             velocity_2d: 0.0,
             last_no_move: 0.0,
             stuck_time: 0.0,
+            unstick: movement::Unstick::default(),
+            stuck_suicides: 0,
+            dive_time: 0.0,
             turn_speed: config.turn_speed,
             base_turn_speed: config.turn_speed,
             ladder_angles: None,
@@ -738,6 +854,7 @@ impl Bot {
             astar: AStar::new(),
             paths: AStarBot::default(),
             touched_waypoints: 0,
+            explore: goals::Explore::default(),
             enemy: None,
             last_enemy: None,
             enemy_rep: None,
@@ -762,6 +879,12 @@ impl Bot {
             looking_for_enemy: false,
             listen_to_sound_time: 0.0,
             investigate_sound_time: 0.0,
+            hearing: hearing::Hearing::default(),
+            pre_aim: preaim::PreAim::default(),
+            search_point: None,
+            hold_again: 0.0,
+            objective_attempt: None,
+            objective_failed: Vec::new(),
             used_melee: false,
             prev_health: 0.0,
             chat_message_time: 0.0,
@@ -776,6 +899,7 @@ impl Bot {
             fight: fire::Fight::default(),
             pickup_entity: None,
             pickup_item_time: 0.0,
+            items: items::ItemMemory::default(),
             spawn_time: 0.0,
             spawn_position: Vector::ZERO,
             need_to_init: false,

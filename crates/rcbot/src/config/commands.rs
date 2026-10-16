@@ -345,6 +345,7 @@ impl CommandId {
                 "ts_kungfu (bots use kung fu only in TS",
                 "disable_weapon_learning (bots choose random weapons)",
                 "disable_bot_squads (bots dont make squads)",
+                "tactical_paths (paths avoid danger and exposure)",
                 "-----------------------",
                 "Integer commands",
                 "these commands take integers as parameters only",
@@ -1358,6 +1359,7 @@ impl Run<'_, '_> {
             "unstick" => flags::UNSTICK,
             "bots_leave_and_join" => flags::BOTS_LEAVE_AND_JOIN,
             "bots_wait_for_bots" => flags::BOTS_WAIT_FOR_BOTS,
+            "tactical_paths" => flags::TACTICAL_PATHS,
             _ => 0,
         };
         if flag == 0 {

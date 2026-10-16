@@ -5,8 +5,9 @@
 //! TS only. Tasks no TS bot creates are not ported (design §2). Upstream's death-time `buy` /
 //! `menuselect 7` (marked "doesn't work") is replaced by the loadout the gun choice buys.
 
+use super::goals::Goal;
 use super::look::make_vectors;
-use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, LookTask, TS_STATE_STUNT, Task, TaskKind, buttons, cond};
+use super::{Action, Bot, BotGlobals, BotWorld, EF_NODRAW, Entity, Frame, ItemKind, LookTask, Task, TaskKind, TsObjective, buttons, cond};
 use crate::config::flags as cfg;
 use crate::learn::BotLearnedData;
 use crate::nav::{Glass, MAX_JUMP_HEIGHT, Monsters, REACHABLE_RANGE, flags as fl};
@@ -18,6 +19,24 @@ use crate::{Random, Vector};
 const INVENTORY_SYNC: f32 = 1.0;
 /// Seconds a weapon switch waits for the game before it may be asked again.
 const SWITCH_WAIT: f32 = 1.0;
+
+/// What the bot's team does with an objective ([`Bot::objective_role`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectiveRole {
+    /// Complete it.
+    Attack,
+    /// Keep the other team from it.
+    Defend,
+}
+
+/// Seconds a hunt or investigation may take to reach its place.
+const HUNT_TIME: f32 = 15.0;
+
+/// Seconds of pressing use on an item before the bot gives it up as one the game won't give it.
+const PICKUP_TRIES: f32 = 1.5;
+
+/// Seconds to reach the first waypoint of a path found (then each touch gives 20-30 s more).
+const PATH_TIMEOUT: f32 = 30.0;
 
 /// A move this long in one frame is a teleport (nothing in TS runs a player 256 units in a
 /// frame at any usual frame rate).
@@ -136,6 +155,7 @@ impl Bot {
         self.update_waypoint_time = 0.0;
         self.stuck_time = 0.0;
         self.last_no_move = 0.0;
+        self.unstick = Default::default();
         self.ladder_angles = None;
     }
 
@@ -188,6 +208,8 @@ impl Bot {
         self.prev_waypoint_dist = 4096.0;
         self.last_see_waypoint = 0.0;
         self.stuck_time = 0.0;
+        self.unstick = Default::default();
+        self.dive_time = 0.0;
         self.move_speed = 0.0;
         self.up_speed = 0.0;
         self.strafe_speed = 0.0;
@@ -248,6 +270,7 @@ impl Bot {
         if !self.paths.failed_goals.is_empty() && self.paths.next_clear_failed_goals < now {
             self.paths.failed_goals.clear();
         }
+        self.paths.expire_backed_off_goals(now);
         self.squad_think(g, w);
         if !self.has(cond::WANT_TO_LEAVE_GAME) && g.config.is_on(cfg::BOTS_LEAVE_AND_JOIN) && self.want_to_leave_game(w, rng) {
             self.set(cond::WANT_TO_LEAVE_GAME);
@@ -287,15 +310,13 @@ impl Bot {
             self.spawn_position = self.me.origin;
         }
         self.need_to_init = true;
-        // A stealthy squad walks at half speed; `Think` resets the speed before anything reads
-        // it, so this never shows (design §5). Kept.
-        if self.squad.and_then(|id| g.squads.get(id)).is_some_and(|s| s.is_stealth()) {
-            self.ideal_move_speed = self.max_speed / 2.0;
-        }
 
+        self.remembered.tick(now);
+        self.hearing.tick(now);
         self.work_view_angles(w, rng);
         self.work_move_direction(w, g);
         self.check_stuck(w, g, rng);
+        self.dive_landing(now);
 
         if self.last_think_time >= now {
             return;
@@ -304,6 +325,7 @@ impl Bot {
 
         // A bot the port handed over alive (`adopt_bot`) picks here, as upstream.
         self.select_loadout(g, rng);
+        self.learn_items(w, now);
 
         self.ideal_move_speed = self.max_speed;
         self.want_to_find_enemy = !g.config.is_on(cfg::DONT_SHOOT);
@@ -390,8 +412,11 @@ impl Bot {
             }
         }
 
-        if !self.follow_formation(g, w) && self.update_waypoint_time < now && !self.update_waypoint(g, w, rng) {
-            self.update_waypoint_time = now + 0.5;
+        // Upstream waited half a second whenever there was no next waypoint, so a bot stood still
+        // at every goal it reached; only a bot without any waypoint near waits now
+        // (`update_waypoint`, design §4).
+        if !self.follow_formation(g, w) && self.update_waypoint_time < now {
+            self.update_waypoint(g, w, rng);
         }
 
         if self.enemy.is_none() {
@@ -401,11 +426,16 @@ impl Bot {
                 && self.listen_to_sound_time < now
             {
                 self.listen_to_sound_time = now + self.reaction_time + rng.random_float(0.3, 0.75);
-                if let Some(p) = self.update_sounds(w)
-                    && !self.tasks.has_task(TaskKind::ListenToSound)
+                // Gunfire heard is remembered and glanced at (upstream: a listen task, then a
+                // path to the shooter that ended once found; design §4).
+                for p in self.update_sounds(w) {
+                    self.hearing.add(p.origin, now, super::hearing::LOUD_GUNFIRE, Some(p.handle()));
+                }
+                if let Some(h) = self.hearing.newest_new().copied()
+                    && now - h.time < 1.0
                 {
-                    let f = rng.random_float(2.0, 3.0);
-                    self.add_priority_task(Task::new(TaskKind::ListenToSound, 0, Some(p.handle()), 0, f, Vector::ZERO));
+                    self.watch(h.origin, now, 0.8);
+                    self.drop_roaming_for_sound(now);
                 }
             } else if self.chat_message_time < now {
                 if !self.tasks.has_task(TaskKind::TypeMessage) {
@@ -435,8 +465,26 @@ impl Bot {
         if self.look_for_new_tasks {
             self.look_for_new_tasks(g, w, rng);
         }
+        self.update_pre_aim(g, now, rng);
         // `WantToFindEnemy`, TS: unless `dont_shoot` is on.
         self.enemy = if self.want_to_find_enemy { self.find_enemy(g, w, rng) } else { None };
+        self.share_with_team(g, w);
+    }
+
+    /// The map's items ([`super::items::ItemMemory`]): the list now and then, and whether the ones
+    /// in view are there.
+    fn learn_items(&mut self, w: &dyn BotWorld, now: f32) {
+        self.items.scan(w, now);
+        // Items in sight the map's list doesn't name (a weapon a player dropped, say).
+        for i in self.visibles.iter() {
+            if let Some(e) = w.entity(i).filter(|e| e.item.is_some()) {
+                self.items.learn(&e);
+            }
+        }
+        let (forward, _) = make_vectors(self.v_angle);
+        let eye = self.gun_position();
+        let in_view = move |o: Vector| super::look::dot((o - eye).normalize(), forward) > 0.5 || (o - eye).length() < 200.0;
+        self.items.look(w, eye, self.index, in_view, now);
     }
 
     /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0). The
@@ -454,35 +502,59 @@ impl Bot {
         true
     }
 
-    /// `UTIL_UpdateSounds`: the nearest other living player within 750 units firing (`IN_ATTACK`;
-    /// TS doesn't listen for footsteps), more than 128 units away for a teammate, 64 for others.
-    fn update_sounds(&self, w: &dyn BotWorld) -> Option<Entity> {
-        let mut nearest = 750.0;
-        let mut found = None;
-        for i in 1..=w.max_clients() {
-            if i == self.index {
-                continue;
-            }
-            let Some(p) = w.entity(i) else { continue };
-            if !p.is_alive() || p.netname.is_empty() || p.button & buttons::ATTACK == 0 {
-                continue;
-            }
-            let same_team = p.player.map(|s| s.team) == Some(self.state.team);
-            let d = (self.me.origin - p.origin).length();
-            if d < nearest && ((same_team && d > 128.0) || (!same_team && d > 64.0)) {
-                nearest = d;
-                found = Some(p);
-            }
-        }
-        found
+    /// `UTIL_UpdateSounds`: the enemies firing (`IN_ATTACK`) that the bot hears: within 1500
+    /// units, 350 with a silencer (upstream: the nearest player within 750 units, teammates
+    /// included, whatever the gun; design §4).
+    fn update_sounds(&self, w: &dyn BotWorld) -> Vec<Entity> {
+        use super::hearing::{GUNFIRE_RANGE, SILENCED_RANGE, TSA_SILENCER};
+        (1..=w.max_clients())
+            .filter(|&i| i != self.index)
+            .filter_map(|i| w.entity(i))
+            .filter(|p| p.is_alive() && !p.netname.is_empty() && p.button & buttons::ATTACK != 0)
+            .filter(|p| {
+                let silenced = p.player.is_some_and(|s| s.attachments & TSA_SILENCER != 0);
+                let range = if silenced { SILENCED_RANGE } else { GUNFIRE_RANGE };
+                (self.me.origin - p.origin).length() < range && self.is_enemy(w, p)
+            })
+            .collect()
     }
 
-    /// `CBot::CanPickup`, TS: power-ups and ground weapons in reach.
-    fn can_pickup(&self, now: f32, e: &Entity) -> bool {
+    /// A sound was just heard: a bot only roaming drops that to choose again (the sound is
+    /// among its goals); anything else it was doing goes on (upstream's priority listen task made
+    /// every later task forget its path).
+    fn drop_roaming_for_sound(&mut self, now: f32) {
+        let Some(t) = self.tasks.current().copied() else { return };
+        if t.kind == TaskKind::FindPath
+            && t.float == -1.0
+            && self.tasks.iter().filter(|x| x.schedule_id == t.schedule_id).count() == 1
+            && t.edict.is_none()
+        {
+            let _ = now;
+            self.tasks.finish_schedule(t.schedule_id);
+            if t.schedule_id == 0 {
+                self.tasks.finished_current(false);
+            }
+        }
+    }
+
+    /// `CBot::CanPickup`, TS: power-ups and ground weapons in reach, that are there, that the bot
+    /// can take and wants ([`Bot::item_value`]: a weapon it has room for and that is better than
+    /// what it has, a power-up it doesn't have to swap for), and that it didn't just fail to take.
+    /// Upstream took any it saw, held or not, so a bot pressed use on one it couldn't take for
+    /// 10 s, waited, and did it again (design §4).
+    fn can_pickup(&self, g: &BotGlobals<'_>, now: f32, e: &Entity) -> bool {
         if self.pickup_item_time > now || e.effects & EF_NODRAW != 0 || e.origin.z > self.me.origin.z + MAX_JUMP_HEIGHT {
             return false;
         }
-        e.classname.starts_with("ts_powerup") || e.classname == "ts_groundweapon"
+        if !(e.classname.starts_with("ts_powerup") || e.classname == "ts_groundweapon") || self.items.ignored(e.handle(), now) {
+            return false;
+        }
+        match e.item {
+            Some(i) if !i.available => false,
+            Some(i) if i.kind == ItemKind::GroundWeapon => self.weapon_value(g, i.weapon) > 0.0,
+            Some(i) if i.kind == ItemKind::Powerup => self.powerup_value(i.powerup) > 0.0,
+            _ => true,
+        }
     }
 
     /// `UTIL_IsFacingEntity`: the view line at the entity's distance ends inside its box.
@@ -498,118 +570,257 @@ impl Bot {
             && dst.z >= e.absmin.z
     }
 
-    /// `LookForNewTasks`' TS objectives: a random one of the objectives the bot was told of
-    /// ([`BotWorld::ts_objectives`], upstream's `m_TSObjectives.Random()`), unless the bot roams
-    /// instead (1 in 3 on team 1, 1 in 11 on team 2): the path to its nearest waypoint, then team 1
-    /// `DEFEND`s it and team 2 `USE`s a `ts_hack` / `ts_bomb` within 100 units of that waypoint for
-    /// 9 s. False when there is nothing to do (no objective, roaming, no waypoint): the end-level
-    /// waypoints come next.
+    /// `LookForNewTasks`' TS objectives, by what each asks of the bot's team (design §4; upstream:
+    /// a random one, team 1 `DEFEND`s it and team 2 `USE`s it, whoever it belongs to): capture
+    /// the briefcase first on a CTB map ([`Bot::ctb_tasks`]); then an objective the bot can
+    /// complete is gone for and used (a `ts_hack` / `ts_bomb` within 100 units of its waypoint, for
+    /// 9 s, as upstream), one of the other team's is defended from a waypoint that sees it, for
+    /// 10-20 s at a time. Sometimes the bot roams instead (1 in 8 attacking, 1 in 4 defending).
+    /// False when there is nothing to do: the end-level waypoints come next.
     fn objective_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random, id: i32) -> bool {
+        let now = w.time();
+        if w.game_mode().ctb && self.ctb_tasks(w, id) {
+            return true;
+        }
         let objectives = w.ts_objectives(self.index);
         if objectives.is_empty() {
             return false;
         }
-        let obj = &objectives[rng.random_long(0, objectives.len() as i32 - 1) as usize];
+        // An attempt that left the objective as it was: this team can't complete it.
+        if let Some((oid, until)) = self.objective_attempt
+            && until < now
+        {
+            self.objective_attempt = None;
+            if objectives.iter().any(|o| o.id == oid) {
+                self.objective_failed.retain(|&(f, _)| f != oid);
+                self.objective_failed.push((oid, now + 60.0));
+            }
+        }
+        self.objective_failed.retain(|&(_, until)| until > now);
+        let attack: Vec<&TsObjective> = objectives.iter().filter(|o| self.objective_role(w, o) == ObjectiveRole::Attack).collect();
+        let (obj, role) = if !attack.is_empty() {
+            (attack[rng.random_long(0, attack.len() as i32 - 1) as usize], ObjectiveRole::Attack)
+        } else {
+            (&objectives[rng.random_long(0, objectives.len() as i32 - 1) as usize], ObjectiveRole::Defend)
+        };
+        let roam = match role {
+            ObjectiveRole::Attack => rng.random_long(0, 7) == 0,
+            ObjectiveRole::Defend => rng.random_long(0, 3) == 0,
+        };
         let wpt = self.nearest_waypoint(g, w, obj.origin, REACHABLE_RANGE, self.last_failed_waypoint, false, false, true);
-        let team = self.team_number();
-        let roam = (team == 1 && rng.random_long(0, 2) == 0) || (team == 2 && rng.random_long(0, 10) == 0);
         if roam || wpt == -1 {
             return false;
         }
-        self.add_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO));
-        let at = g.waypoints.origin(wpt);
-        let target = w.entities_in_sphere(at, 100.0).into_iter().find_map(|i| {
-            let e = w.entity(i)?;
-            (e.classname == "ts_hack" || e.classname == "ts_bomb").then_some(e)
-        });
-        if team == 1 {
-            self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, Vector::ZERO));
-        } else if let Some(t) = target {
-            self.add_task(Task::new(TaskKind::Use, id, Some(t.handle()), 0, 9.0, Vector::ZERO));
+        match role {
+            ObjectiveRole::Attack => {
+                let at = g.waypoints.origin(wpt);
+                let target = w.entities_in_sphere(at, 100.0).into_iter().find_map(|i| {
+                    let e = w.entity(i)?;
+                    (e.classname == "ts_hack" || e.classname == "ts_bomb").then_some(e)
+                });
+                self.add_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO));
+                match target {
+                    Some(t) => {
+                        self.add_task(Task::new(TaskKind::Use, id, Some(t.handle()), 0, 9.0, Vector::ZERO));
+                        self.objective_attempt = Some((obj.id, now + 30.0));
+                    }
+                    None => self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, obj.origin)),
+                }
+            }
+            ObjectiveRole::Defend => {
+                let spot = self.defend_spot(g, wpt, rng);
+                self.add_task(Task::new(TaskKind::FindPath, id, None, spot, -1.0, Vector::ZERO));
+                self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, obj.origin));
+            }
         }
         true
     }
 
-    /// `CBot::LookForNewTasks`, TS: pick up the nearest visible weapon or power-up; in teamplay
-    /// go to a random end-level waypoint; else roam (follow the squad leader; or a remembered
-    /// enemy position half the time, otherwise a random goal).
-    pub(crate) fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
-        let now = w.time();
-        self.stop_moving();
-        self.look_task = if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) {
-            LookTask::SearchForLastEnemy
+    /// Whether the bot's team completes an objective or keeps the other team from it: the team
+    /// the port gives the objective's entity, if any; else an objective whose use failed lately is
+    /// defended, and so is one whose text for the bot's team is empty or says to defend it.
+    fn objective_role(&self, w: &dyn BotWorld, o: &TsObjective) -> ObjectiveRole {
+        if let Some(team) = o.entity.and_then(|e| w.entity(e)).and_then(|e| e.item).map(|i| i.team).filter(|&t| t != 0) {
+            return if team == self.state.team { ObjectiveRole::Attack } else { ObjectiveRole::Defend };
+        }
+        if self.objective_failed.iter().any(|&(f, _)| f == o.id) {
+            return ObjectiveRole::Defend;
+        }
+        let text = o.name.to_ascii_lowercase();
+        if text.is_empty() || ["defend", "protect", "guard", "prevent", "stop", "hold"].iter().any(|k| text.contains(k)) {
+            ObjectiveRole::Defend
         } else {
-            LookTask::LookAround
+            ObjectiveRole::Attack
+        }
+    }
+
+    /// A waypoint to defend `target` (a waypoint) from: 200-900 units from it, seeing it, not the
+    /// one the bot is at (defenders rotate); `target` itself if none.
+    fn defend_spot(&self, g: &BotGlobals<'_>, target: i32, rng: &mut dyn Random) -> i32 {
+        let Ok(t) = usize::try_from(target) else { return target };
+        let wp = &*g.waypoints;
+        let to = wp.origin(target);
+        let spots: Vec<usize> = (0..wp.len())
+            .filter(|&i| i != t && i as i32 != self.current_waypoint)
+            .filter(|&i| {
+                wp.flags(i as i32) & (fl::DELETED | fl::AIMING | fl::UNREACHABLE) == 0 && fl::team_allows(wp.flags(i as i32), self.team)
+            })
+            .filter(|&i| (200.0..900.0).contains(&(wp.origin(i as i32) - to).length()) && wp.visibility.get(i, t))
+            .filter(|&i| self.claim_factor(g, i) >= 1.0)
+            .collect();
+        if spots.is_empty() {
+            return target;
+        }
+        spots[rng.random_long(0, spots.len() as i32 - 1) as usize] as i32
+    }
+
+    /// Capture the briefcase (`ts_flag` cases, `ts_briefcase` capture points; design §4; upstream
+    /// had none for TS): a bot carrying the case takes it to a point its team may capture at, a
+    /// teammate's carrier is escorted, an enemy carrier is cut off at the point it must reach, and
+    /// otherwise the bot goes for a case its team may take. False on a map without them.
+    fn ctb_tasks(&mut self, w: &dyn BotWorld, id: i32) -> bool {
+        let now = w.time();
+        let team = self.state.team;
+        let of_kind = |class: &str, kind: ItemKind| -> Vec<Entity> {
+            w.find_entities(super::EntityKey::Classname, class)
+                .into_iter()
+                .filter_map(|i| w.entity(i))
+                .filter(|e| e.item.is_some_and(|it| it.kind == kind))
+                .collect()
         };
-        let mut nearest_pickup: Option<(Entity, f32)> = None;
-        for i in self.visibles.iter() {
-            if i == self.index {
-                continue;
+        let cases = of_kind("ts_flag", ItemKind::CtbFlag);
+        let bases = of_kind("ts_briefcase", ItemKind::CtbBase);
+        let nearest = |list: &[Entity], from: Vector, ok: &dyn Fn(&Entity) -> bool| -> Option<Entity> {
+            list.iter()
+                .filter(|e| ok(e))
+                .min_by(|a, b| (a.entity_origin() - from).length().total_cmp(&(b.entity_origin() - from).length()))
+                .cloned()
+        };
+        let base_for = |t: i32| move |b: &Entity| b.item.is_some_and(|i| i.team == t || i.team == 0);
+        if self.state.has_flag
+            && let Some(base) = nearest(&bases, self.me.origin, &base_for(team))
+        {
+            self.add_task(Task::new(TaskKind::FindPath, id, Some(base.handle()), 0, 0.0, Vector::ZERO).with_timeout(now, 60.0));
+            self.add_task(Task::new(TaskKind::MoveToVector, id, Some(base.handle()), 0, 0.0, Vector::ZERO));
+            return true;
+        }
+        let carrier = (1..=w.max_clients())
+            .filter(|&i| i != self.index)
+            .filter_map(|i| w.entity(i))
+            .find(|p| p.is_alive() && p.player.is_some_and(|s| s.has_flag));
+        if let Some(c) = carrier {
+            let their_team = c.player.map_or(0, |s| s.team);
+            if their_team == team && team != 0 {
+                // Escort: keep near the carrier.
+                if self.distance_from(c.origin, false) > 300.0 {
+                    self.add_task(Task::new(TaskKind::FindPath, id, Some(c.handle()), 0, 0.0, Vector::ZERO).with_timeout(now, 8.0));
+                } else {
+                    self.add_task(Task::new(TaskKind::Defend, id, None, 0, 4.0, c.origin));
+                }
+                return true;
             }
-            let Some(e) = w.entity(i) else { continue };
-            let d = self.distance_from(e.entity_origin(), false);
-            if nearest_pickup.as_ref().is_none_or(|(_, nd)| d < *nd) && self.can_pickup(now, &e) {
-                nearest_pickup = Some((e, d));
+            if let Some(base) = nearest(&bases, c.origin, &base_for(their_team)) {
+                self.add_task(Task::new(TaskKind::FindPath, id, Some(base.handle()), 0, 0.0, Vector::ZERO).with_timeout(now, 30.0));
+                self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, base.entity_origin()));
+                return true;
             }
         }
+        let takeable = |c: &Entity| c.effects & EF_NODRAW == 0 && c.item.is_some_and(|i| i.available && (i.team == 0 || i.team != team));
+        if let Some(case) = nearest(&cases, self.me.origin, &takeable) {
+            self.add_task(Task::new(TaskKind::FindPath, id, Some(case.handle()), 0, 0.0, Vector::ZERO).with_timeout(now, 60.0));
+            self.add_task(Task::new(TaskKind::MoveToVector, id, Some(case.handle()), 0, 0.0, Vector::ZERO));
+            return true;
+        }
+        false
+    }
+
+    /// `CBot::LookForNewTasks`, TS. Upstream picked up the nearest weapon or power-up in sight,
+    /// went for a random objective, or roamed (following the squad leader, or half the time to the
+    /// newest remembered enemy position whatever its age, else to a random goal). The port scores
+    /// its goals ([`Bot::choose_goal`], design §4): an item worth the way, an enemy seen lately
+    /// (to where it may have gone, then a moving search), a sound heard; then the objectives, the
+    /// end-level waypoints in teamplay, the squad leader, and roaming.
+    pub(crate) fn look_for_new_tasks(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, rng: &mut dyn Random) {
+        let now = w.time();
+        // Upstream stopped here, so a bot stood still for a moment at every goal it reached; the
+        // tasks below give it its next move (design §4).
+        self.look_task =
+            if self.resolve(w, self.last_enemy).is_some_and(|e| e.is_alive()) { LookTask::SearchForLastEnemy } else { LookTask::PreAim };
         let id = self.tasks.new_schedule_id();
-        let mut roam = true;
-        if !g.config.is_on(cfg::TS_DONT_PICKUP_WEAPONS)
-            && let Some((p, _)) = nearest_pickup
-        {
-            let h = Some(p.handle());
-            self.add_task(Task::new(TaskKind::FindPath, id, h, 0, 0.0, Vector::ZERO));
-            self.add_task(Task::new(TaskKind::PickupItem, id, h, 0, 0.0, Vector::ZERO));
-            self.add_task(Task::new(TaskKind::Use, id, h, 0, 0.0, Vector::ZERO));
-            roam = false;
-        } else if w.teamplay() && self.objective_tasks(g, w, rng, id) {
-            roam = false;
-        } else if w.teamplay() {
+        self.looking_for_enemy = false;
+        // A new goal's path may be searched at once (upstream waited out the last search's half
+        // second, standing at the goal it had reached).
+        self.find_path_time = 0.0;
+        let (goal, _) = self.choose_goal(g, w, now);
+        match goal {
+            Goal::Item(item) => {
+                if !g.config.is_on(cfg::TS_DONT_PICKUP_WEAPONS)
+                    && let Some(p) = self.resolve(w, Some(item))
+                    && self.can_pickup(g, now, &p)
+                {
+                    let h = Some(p.handle());
+                    self.add_task(Task::new(TaskKind::FindPath, id, h, 0, 0.0, Vector::ZERO));
+                    self.add_task(Task::new(TaskKind::PickupItem, id, h, 0, 0.0, Vector::ZERO));
+                    self.add_task(Task::new(TaskKind::Use, id, h, 0, 0.0, Vector::ZERO));
+                    self.claim(g, -1, Some(item));
+                    return;
+                }
+            }
+            Goal::Hunt(origin, seen) => {
+                self.remembered.hunted(origin);
+                let wpt = self.predict_enemy(g, w, origin, now - seen, rng);
+                if wpt != -1 && !self.paths.ignored_goals(now).contains(&(wpt as usize)) {
+                    self.add_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO).with_timeout(now, HUNT_TIME));
+                    let search = rng.random_float(3.0, 6.0);
+                    self.add_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, search, g.waypoints.origin(wpt)));
+                    self.looking_for_enemy = true;
+                    self.claim(g, wpt, None);
+                    return;
+                }
+            }
+            Goal::Investigate(origin) => {
+                self.hearing.investigate(origin);
+                self.add_task(Task::new(TaskKind::FindPath, id, None, 0, 0.0, origin).with_timeout(now, HUNT_TIME));
+                let search = rng.random_float(3.0, 5.0);
+                self.add_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, search, origin));
+                self.looking_for_enemy = true;
+                let wpt = self.nearest_waypoint(g, w, origin, 400.0, -1, false, false, false);
+                self.claim(g, wpt, None);
+                return;
+            }
+            Goal::Hold(spot) => {
+                self.hold_again = now + rng.random_float(15.0, 30.0);
+                self.add_task(Task::new(TaskKind::FindPath, id, None, spot, -1.0, Vector::ZERO).with_timeout(now, HUNT_TIME));
+                self.add_task(Task::new(TaskKind::Defend, id, None, 0, 0.0, g.waypoints.origin(spot)));
+                self.claim(g, spot, None);
+                return;
+            }
+            Goal::Regroup(mate) => {
+                self.add_task(Task::new(TaskKind::FindPath, id, None, 0, 0.0, mate).with_timeout(now, HUNT_TIME));
+                return;
+            }
+            Goal::Roam => {}
+        }
+        if w.teamplay() && self.objective_tasks(g, w, rng, id) {
+            return;
+        }
+        if w.teamplay() {
             let wpt = g
                 .waypoints
                 .find_random_goal_near(self.me.origin, 4096.0, -1, fl::ENDLEVEL, &self.paths.failed_goals, rng)
                 .map_or(-1, |i| i as i32);
             if self.current_waypoint != wpt && wpt != -1 {
                 self.add_task(Task::new(TaskKind::FindPath, 0, None, wpt, -1.0, Vector::ZERO));
-                roam = false;
+                return;
             }
-        }
-        if !roam {
-            return;
         }
         // In a squad (one a player made: TS bots never assemble their own), follow the leader.
         if self.squad_leader.is_some() {
             self.add_task(Task::new(TaskKind::FollowLeader, id, None, 0, 0.0, Vector::ZERO));
             return;
         }
-        self.looking_for_enemy = false;
-        let check_enemy = rng.random_long(0, 1) != 0 && self.remembered.any();
-        if !check_enemy {
-            if self.tasks.is_empty() {
-                // TS bots never assemble squads.
-                self.add_priority_task(Task::new(TaskKind::FindPath, id, None, -1, -1.0, Vector::ZERO));
-            }
-        } else if let Some(pos) = self.remembered.newest().copied() {
-            let spotted = pos.origin;
-            let mut v = pos.origin;
-            let mut wpt = self.nearest_waypoint(g, w, v, REACHABLE_RANGE, -1, true, false, false);
-            if wpt == -1 {
-                v = pos.visible_origin;
-                wpt = self.nearest_waypoint(g, w, v, REACHABLE_RANGE, -1, true, false, false);
-            }
-            if wpt != -1 && !self.paths.failed_goals.contains(&(wpt as usize)) {
-                if spotted != v {
-                    self.add_priority_task(Task::new(TaskKind::WaitAndFaceVector, id, None, 0, 1.0, spotted));
-                }
-                self.add_priority_task(Task::new(TaskKind::FindPath, id, None, wpt, -1.0, Vector::ZERO));
-                self.looking_for_enemy = true;
-            }
-        }
         if self.tasks.is_empty() {
             self.add_priority_task(Task::new(TaskKind::FindPath, id, None, -1, -1.0, Vector::ZERO));
-        }
-        if self.looking_for_enemy {
-            self.add_task(Task::new(TaskKind::SearchForEnemy, id, None, 0, 0.0, Vector::ZERO));
         }
     }
 
@@ -640,7 +851,12 @@ impl Bot {
                     failed = true;
                 } else {
                     self.look_task = LookTask::SearchForEnemy;
-                    self.stop_moving();
+                    if task.vector == Vector::ZERO {
+                        self.stop_moving();
+                    } else {
+                        // Searching around a place, on the move (design §4; upstream stood still).
+                        self.search_move(g, w, task.vector, rng);
+                    }
                     if task.int == 0 {
                         let t = self.tasks.current_mut().expect("current task");
                         t.float += now;
@@ -745,10 +961,20 @@ impl Bot {
                     t.set_time_to_complete(now, 10.0);
                 }
                 match self.resolve(w, self.pickup_entity) {
-                    Some(p) if self.can_pickup(now, &p) => {
+                    Some(p) if self.can_pickup(g, now, &p) => {
                         self.set_move_vector(p.entity_origin());
                         if self.distance_from(p.entity_origin(), false) < 64.0 {
                             self.use_button();
+                            // Pressing use on it for a while and it's still there: the game
+                            // won't give it (full, or a power-up held). Leave it alone instead of
+                            // trying for the rest of the 10 s, and again later (design §4).
+                            let t = self.tasks.current_mut().expect("current task");
+                            if t.float == 0.0 {
+                                t.float = now;
+                            } else if now - t.float > PICKUP_TRIES {
+                                self.items.untakeable(p.handle(), now);
+                                failed = true;
+                            }
                         }
                     }
                     _ => failed = true,
@@ -768,17 +994,21 @@ impl Bot {
                 }
             }
             TaskKind::Defend => {
-                if task.float == 0.0 {
-                    let f = now + rng.random_float(20.0, 80.0);
-                    self.tasks.current_mut().expect("current task").float = f;
+                // Held for 10-20 s (a set time when given), then the bot moves to another spot
+                // (upstream: 20-80 s, diving until prone, which standing still does nothing in TS
+                // 3.0 outside slow motion), watching the approaches (design §4).
+                if task.int == 0 {
+                    let secs = if task.float > 0.0 { task.float } else { rng.random_float(10.0, 20.0) };
+                    let t = self.tasks.current_mut().expect("current task");
+                    t.float = now + secs;
+                    t.int = 1;
                 }
                 if self.tasks.current().is_some_and(|t| t.float < now) {
                     done = true;
                 }
-                if self.state.stunt_state != TS_STATE_STUNT {
-                    self.alt_button();
-                } else {
-                    self.stop_moving();
+                self.stop_moving();
+                if self.enemy.is_none() {
+                    self.look_task = LookTask::PreAim;
                 }
             }
             TaskKind::ListenToSound => self.task_listen(w, rng, task, &mut done, &mut failed, &mut to_add),
@@ -886,7 +1116,7 @@ impl Bot {
                         self.nearest_waypoint(g, w, self.me.origin, REACHABLE_RANGE, self.last_failed_waypoint, true, false, true);
                 }
                 let q = query(self, self.current_waypoint, self.goal_waypoint);
-                match self.astar.search(&mut self.paths, &q, true, g.waypoints, w, rng) {
+                match self.search_path(g, w, rng, &q, true) {
                     crate::nav::AStarResult::NoPath => {
                         *failed = true;
                         return;
@@ -897,6 +1127,7 @@ impl Bot {
                 self.push_current_on_path();
                 self.move_to_valid = true;
                 *path_found = true;
+                self.path_deadline(now);
                 let t = self.tasks.current_mut().expect("current task");
                 t.found_path = true;
                 self.paths.failed_goals.clear();
@@ -907,7 +1138,7 @@ impl Bot {
             } else if task.float == -2.0 || self.find_path_time < now {
                 self.find_path_time = now + 0.5;
                 if task.float == -1.0 && task.int == -1 {
-                    let goal = g.waypoints.find_random_goal(self.team, 0, &self.paths.failed_goals, rng).map_or(-1, |i| i as i32);
+                    let goal = self.roam_goal(g, now, rng);
                     self.goal_waypoint = goal;
                     let t = self.tasks.current_mut().expect("current task");
                     t.int = goal;
@@ -952,7 +1183,7 @@ impl Bot {
                     return;
                 }
                 let q = query(self, self.current_waypoint, self.goal_waypoint);
-                match self.astar.search(&mut self.paths, &q, false, g.waypoints, w, rng) {
+                match self.search_path(g, w, rng, &q, false) {
                     crate::nav::AStarResult::NoPath => {
                         *failed = true;
                         return;
@@ -966,6 +1197,7 @@ impl Bot {
                 self.push_current_on_path();
                 self.move_to_valid = true;
                 *path_found = true;
+                self.path_deadline(now);
                 if task.float == -2.0 {
                     *done = true;
                 }
@@ -977,7 +1209,8 @@ impl Bot {
                 self.look_task = LookTask::SearchForLastEnemy;
                 self.search_enemy_time = now + 0.5;
             } else {
-                self.look_task = LookTask::NextWaypoint;
+                // Upstream looked where it walked; the port checks where enemies may appear.
+                self.look_task = LookTask::PreAim;
             }
             if self.current_waypoint == -1 || self.goal_waypoint != task.int || task.int == -1 {
                 self.tasks.current_mut().expect("current task").found_path = false;
@@ -990,6 +1223,18 @@ impl Bot {
                 *done = true;
             }
             self.move_to_valid = true;
+        }
+    }
+
+    /// A path just found must be walked within [`PATH_TIMEOUT`] unless the task has a time
+    /// already: upstream's had none until the first waypoint was touched (then 20-30 s from each
+    /// touch), so a bot that never reached it kept the task for ever (design §4).
+    fn path_deadline(&mut self, now: f32) {
+        if let Some(t) = self.tasks.current_mut()
+            && t.kind == TaskKind::FindPath
+            && t.time_to_complete == -1.0
+        {
+            t.set_time_to_complete(now, PATH_TIMEOUT);
         }
     }
 

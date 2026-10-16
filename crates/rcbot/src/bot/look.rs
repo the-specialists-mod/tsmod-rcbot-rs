@@ -227,6 +227,7 @@ impl Bot {
                 Some(v) => self.set_view_angles(v),
                 None => self.look_task = LookTask::NextWaypoint,
             },
+            LookTask::PreAim => self.pre_aim_look(),
             LookTask::FaceTaskEdict => {
                 self.look_task = LookTask::FaceTaskVector;
                 if let Some(e) = self.resolve(w, self.tasks.current().and_then(|t| t.edict)) {
