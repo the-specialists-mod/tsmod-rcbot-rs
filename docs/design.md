@@ -352,7 +352,8 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   kicks within 72 units are replaced by a fighter built on TS 3.0's `CCombatAttack` and
   `CCombatBlock`. It reads the opponent's weapon and new presses (`pev->button`: attacks, blocks),
   picks a defensive or offensive stance every 2-4 s from what each earned (damage dealt less
-  taken), its health, the opponent's and its power (estimated: 100, -33 a block, +15/s); answers
+  taken), its health, the opponent's and its power (the game's bar, which the port reports as the clip
+  while kung fu is out; else estimated: 100, -33 a block, +15/s); answers
   an attack it sees, after a skill-scaled reaction time, by blocking (`+reload`), ducking,
   stepping back or aside, scored by whether it was hit, then counters; and attacks in combos
   (move sequences pressed as TS reads them: fresh or held `+attack`/`+attack2`, with `+duck`,

@@ -451,10 +451,15 @@ impl KungFu {
 }
 
 impl Bot {
-    /// The power estimate now: TS's bar regenerates at 15 a second up to 100.
+    /// The power now: with kung fu out the game reports its bar as the clip (`KFuPower`, the
+    /// port's `PlayerInfo::clip`); otherwise an estimate (TS's bar regenerates at 15 a second up
+    /// to 100, a block costs 33).
     fn kf_power(&mut self, now: f32) -> f32 {
+        let reported = (self.state.alive && self.state.weapon == 0).then_some(self.state.clip);
         let f = &mut self.kungfu.fight;
-        if f.power_time == 0.0 {
+        if let Some(bar) = reported {
+            f.power = (bar as f32).clamp(0.0, 100.0);
+        } else if f.power_time == 0.0 {
             f.power = 100.0;
         } else {
             f.power = (f.power + (now - f.power_time).max(0.0) * POWER_REGEN).min(100.0);
@@ -945,6 +950,20 @@ impl Bot {
 mod tests {
     use super::*;
     use crate::XorShiftRandom;
+
+    #[test]
+    fn the_power_is_the_games_bar_when_kung_fu_is_out() {
+        let config = crate::config::Config::default();
+        let mut rng = XorShiftRandom::new(1);
+        let profile = crate::config::BotProfile::init(&config, &mut rng);
+        let mut b = Bot::new(1, "kf".into(), profile, &config, &mut rng);
+        b.state = super::super::PlayerState { alive: true, weapon: 0, clip: 20, ..Default::default() };
+        assert_eq!(b.kf_power(1.0), 20.0);
+        // Not reported (a gun in hand): the estimate, full at first, back up 15 a second.
+        b.state.weapon = 1;
+        b.kungfu.fight.power = 10.0;
+        assert_eq!(b.kf_power(2.0), 25.0);
+    }
 
     #[test]
     fn saves_and_loads_what_it_learned() {

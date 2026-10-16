@@ -986,7 +986,7 @@ fn an_empty_gun_is_dropped_and_the_game_picks_the_next() {
 fn unarmed_it_takes_cover_from_a_gunman_aiming_at_it() {
     let mut rig = Rig::new(Config::default());
     let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(500.0, 0.0, 0.0), 0)]);
-    arm(&w, 1, 0, 0, 0);
+    arm(&w, 1, 0, 100, 0);
     w.ents.borrow_mut()[1].v_angle = Vector::new(0.0, 180.0, 0.0);
     let mut rng = XorShiftRandom::new(6);
     let mut attacked = false;
@@ -1001,7 +1001,7 @@ fn unarmed_it_rushes_a_gunman_looking_away() {
     let mut rig = Rig::new(Config::default());
     // The gunman at 500 looks along +x, away from the bot.
     let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(500.0, 0.0, 0.0), 0)]);
-    arm(&w, 1, 0, 0, 0);
+    arm(&w, 1, 0, 100, 0);
     let mut rng = XorShiftRandom::new(6);
     run(&mut rig, &mut w, &mut rng, 100, |w, _| w.ents.borrow_mut()[1].origin = Vector::new(500.0, 0.0, 0.0));
     assert!(!rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover));
@@ -1027,8 +1027,8 @@ fn kung_fu_answers_attacks_and_strikes_back() {
     let mut rig = Rig::new(Config::default());
     // Kung fu both, 64 units apart, the opponent facing the bot.
     let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(64.0, 0.0, 0.0), 0)]);
-    arm(&w, 1, 0, 0, 0);
-    arm(&w, 2, 0, 0, 0);
+    arm(&w, 1, 0, 100, 0);
+    arm(&w, 2, 0, 100, 0);
     w.ents.borrow_mut()[1].v_angle = Vector::new(0.0, 180.0, 0.0);
     let mut rng = XorShiftRandom::new(8);
     let (mut defended, mut attacks) = (0, 0);
@@ -1066,8 +1066,8 @@ fn kung_fu_duel(moves: &[kungfu::Move], x: f32) -> (Rig, Plane) {
     rig.bot.kungfu.combos = vec![kungfu::Combo { moves: moves.to_vec(), value: 0.0, uses: 0 }];
     let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(x, 0.0, 0.0), 0)]);
     w.physics.set(true);
-    arm(&w, 1, 0, 0, 0);
-    arm(&w, 2, 0, 0, 0);
+    arm(&w, 1, 0, 100, 0);
+    arm(&w, 2, 0, 100, 0);
     (rig, w)
 }
 
