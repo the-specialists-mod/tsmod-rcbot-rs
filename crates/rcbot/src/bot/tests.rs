@@ -368,6 +368,34 @@ impl Rig {
         };
         f(&mut self.bot, &mut g)
     }
+
+    /// The event-replay harness: the host's damage and kill events, each at its game time, go
+    /// through a bot manager holding the rig's bot (so the globals' learners see them too).
+    fn replay(&mut self, w: &mut Plane, script: &[(f32, crate::learn::CombatEvent)]) {
+        let mut mgr = BotManager::default();
+        mgr.add(self.bot.clone());
+        let mut rng = XorShiftRandom::new(1);
+        for (t, ev) in script {
+            w.time = *t;
+            let mut g = BotGlobals {
+                config: &self.config,
+                waypoints: &mut self.wp,
+                weapons: &mut self.weapons,
+                presets: &self.presets,
+                learned: &mut self.learned,
+                team_scores: [0; 4],
+                masters: &[],
+                other_bots: Vec::new(),
+                squads: &mut self.extra.squads,
+                botcam: &mut self.extra.cam,
+                rep_ids: &self.extra.reps,
+                chat: &self.extra.chat,
+                map_name: "ts_test",
+            };
+            mgr.combat_event(&mut g, w, ev, &mut rng);
+        }
+        self.bot = mgr.remove(self.bot.index).expect("the bot");
+    }
 }
 
 fn plane(ents: Vec<Entity>) -> Plane {
@@ -1072,8 +1100,26 @@ fn kung_fu_answers_attacks_and_strikes_back() {
     assert!(attacks > 3, "attacks {attacks}");
     // It scored what it did.
     let k = &rig.bot.kungfu;
-    assert!(k.reaction_value.iter().any(|&v| v != 0.0), "{:?}", k.reaction_value);
+    assert!(k.reaction_all.iter().any(|a| a.n > 0.0), "{:?}", k.reaction_all);
     assert!(k.combos.iter().any(|c| c.uses > 0));
+}
+
+#[test]
+fn a_kung_fu_fight_is_settled_by_how_it_ends() {
+    // A kill scores the open stance +2; a death -2.
+    for (ev, want) in [(kill(1, 2, 0), 2.0), (kill(2, 1, 0), -2.0)] {
+        let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 200.0);
+        let mut rng = XorShiftRandom::new(5);
+        run(&mut rig, &mut w, &mut rng, 10, |_, _| {});
+        assert_eq!(rig.bot.kungfu.opponent(), Some(2));
+        rig.with(|b, g| b.combat_event(g, &w, &ev, &mut rng));
+        let k = &rig.bot.kungfu;
+        assert!(k.stance_all.iter().any(|a| a.value == want && a.n > 0.0), "{:?}", k.stance_all);
+        // Settled once: the fight going on doesn't score it again.
+        let before = k.stance_all;
+        rig.with(|b, g| b.combat_event(g, &w, &ev, &mut rng));
+        assert_eq!(rig.bot.kungfu.stance_all, before);
+    }
 }
 
 /// A kung fu bot that knows only `moves`, against a passive kung fu opponent at `x`, with the
@@ -1299,4 +1345,262 @@ fn the_visible_list_keeps_its_order_and_membership() {
     assert!(v.contains(7) && v.contains(2) && !v.contains(300) && !v.contains(5) && !v.contains(9000));
     v.set(300, true);
     assert_eq!(v.to_vec(), vec![7, 2, 300]);
+}
+
+/// A damage event from the host (`player_damaged`), the attacker its own inflictor.
+fn damage(victim: u32, attacker: u32, amount: f32) -> crate::learn::CombatEvent {
+    crate::learn::CombatEvent::Damage(crate::learn::DamageEvent {
+        victim,
+        attacker,
+        inflictor: attacker as i32,
+        amount,
+        bits: 0,
+        health: 0.0,
+    })
+}
+
+/// A kill event from the host (`kill_scored`).
+fn kill(killer: u32, victim: u32, weapon: i32) -> crate::learn::CombatEvent {
+    crate::learn::CombatEvent::Kill(crate::learn::KillEvent {
+        killer,
+        victim,
+        weapon,
+        headshot: false,
+        close_combat: false,
+        kung_fu: weapon == 0,
+    })
+}
+
+#[test]
+fn the_ledger_keeps_what_passed_with_each_opponent() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(0.0, 800.0, 0.0), 0)]);
+    arm(&w, 3, 5, 30, 60);
+    let mut rng = XorShiftRandom::new(1);
+    rig.with(|b, g| {
+        for ev in [damage(2, 1, 30.0), damage(1, 3, 50.0), damage(3, 2, 10.0), kill(1, 2, 1)] {
+            b.combat_event(g, &w, &ev, &mut rng);
+        }
+    });
+    let l = rig.bot.ledger();
+    // Not the bot's: the damage between 2 and 3.
+    assert_eq!(l.entries().count(), 3);
+    assert!((l.reward_since(0.0, 2) - 1.3).abs() < 1e-6);
+    assert!((l.reward_since(0.0, 3) + 0.5).abs() < 1e-6);
+    let e: Vec<_> = l.entries().map(|e| (e.other, e.weapon, e.range_bin)).collect();
+    assert_eq!(e, [(2, 1, 2), (3, 5, 4), (2, 1, 2)]);
+    // The kill closed the fight with 2; the one with 3 is open.
+    assert!(l.episode(2).is_none() && l.episode(3).is_some());
+    rig.with(|b, g| b.combat_event(g, &w, &kill(3, 1, 5), &mut rng));
+    assert!(rig.bot.ledger().open_episodes().is_empty());
+    assert_eq!(rig.bot.ledger().closed_episodes().last().map(|e| e.reward()), Some(-1.5));
+}
+
+#[test]
+fn the_learned_strafe_goes_both_ways() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(60.0, 0.0, 0.0), 0)]);
+    w.time = 10.0;
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.enemy = Some(w.entity(2).unwrap().handle());
+    // Personal genes 10-14 weigh the strafe perceptron's inputs (speed, distance, height, size,
+    // on ground): strongly negative, the sigmoid is near 0, which upstream turned into a slow
+    // strafe right; now it is a full strafe left.
+    let mut genes = vec![0.0; crate::learn::data::PERSONAL_GENES];
+    genes[13] = -20.0;
+    genes[14] = -20.0;
+    rig.bot.learned.personal = crate::learn::BotGaValues::from_values(genes.clone());
+    rig.bot.decide_jump_duck_strafe(&w, 60.0, Vector::new(60.0, 0.0, 0.0));
+    assert_eq!(rig.bot.strafe_speed, -rig.bot.max_speed * (2.0 * rig.bot.learned.strafe.output() - 1.0).abs());
+    assert!(rig.bot.strafe_speed < -0.9 * rig.bot.max_speed);
+    genes[13] = 20.0;
+    genes[14] = 20.0;
+    rig.bot.learned.personal = crate::learn::BotGaValues::from_values(genes);
+    rig.bot.decide_jump_duck_strafe(&w, 60.0, Vector::new(60.0, 0.0, 0.0));
+    assert!(rig.bot.strafe_speed > 0.9 * rig.bot.max_speed);
+}
+
+#[test]
+fn kung_fu_lives_dont_breed_the_personal_genes() {
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 60.0);
+    let mut rng = XorShiftRandom::new(2);
+    run(&mut rig, &mut w, &mut rng, 50, |_, _| {});
+    assert_eq!(rig.bot.kungfu.opponent(), Some(2));
+    assert!(!rig.bot.used_melee);
+}
+
+#[test]
+fn the_cheapest_cost_bucket_is_away_from_the_danger() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(200.0, 50.0, 0.0), 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    let mut rng = XorShiftRandom::new(1);
+    rig.bot.learned.seed_survival(&mut rng);
+    rig.bot.lowest_enemy_cost = 99999.0;
+    let enemy = w.entity(2).unwrap();
+    rig.bot.work_enemy_costs(&w, &enemy, 206.0);
+    // Upstream: always origin + (-192, -192, origin.z). Now the bucket farthest from the enemy.
+    let v = rig.bot.lowest_enemy_cost_vec;
+    assert_eq!((v.x, v.y, v.z), (-192.0, -192.0, 0.0));
+    let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(-200.0, 150.0, 0.0), 0)]);
+    let enemy = w.entity(2).unwrap();
+    rig.bot.range_costs = [[0.0; BOT_COST_BUCKETS]; BOT_COST_BUCKETS];
+    rig.bot.work_enemy_costs(&w, &enemy, 250.0);
+    let v = rig.bot.lowest_enemy_cost_vec;
+    assert_eq!((v.x, v.y), (192.0, -192.0));
+}
+
+#[test]
+fn time_in_sight_hits_and_rounds_go_to_the_weapon_table() {
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(9);
+    let pin = |w: &Plane, _: &Frame| w.ents.borrow_mut()[0].origin = Vector::ZERO;
+    run(&mut rig, &mut w, &mut rng, 100, pin);
+    let seen = rig.bot.weapon_stats().samples(1, 300.0);
+    assert!(seen > 0.5, "{seen}");
+    assert!(rig.with(|b, g| b.learned_weapon_score(g, 1, 300.0)).is_none());
+    // Two rounds fired, one hit for 24.
+    arm(&w, 1, 1, 15, 34);
+    run(&mut rig, &mut w, &mut rng, 3, pin);
+    rig.with(|b, g| b.combat_event(g, &w, &damage(2, 1, 24.0), &mut rng));
+    let t = rig.bot.weapon_stats();
+    assert_eq!(t.accuracy(1, 300.0), Some(0.5));
+    assert!(t.dps(1, 300.0).is_some_and(|(v, _)| v > 0.0));
+    assert!(rig.learned.weapon_prior.samples(1, 300.0) >= seen);
+    // A score once five seconds are in.
+    run(&mut rig, &mut w, &mut rng, 250, pin);
+    let score = rig.with(|b, g| b.learned_weapon_score(g, 1, 300.0));
+    assert!(score.is_some_and(|s| s > 0.0), "{score:?}");
+}
+
+#[test]
+fn replayed_fights_fill_the_ledger_heatmap_and_weapon_table() {
+    let mut rig = Rig::new(Config::default());
+    rig.learned.heatmap = crate::learn::Heatmap::new("ts_test", rig.wp.len());
+    // The bot at waypoint 0, a player at waypoint 2 (300 units), another at 5 (750).
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(750.0, 0.0, 0.0), 0)]);
+    arm(&w, 3, 18, 5, 10);
+    let script =
+        [(1.0, damage(1, 2, 30.0)), (1.2, damage(2, 1, 50.0)), (1.5, kill(1, 2, 1)), (3.0, damage(1, 3, 100.0)), (3.0, kill(3, 1, 18))];
+    rig.replay(&mut w, &script);
+    let l = rig.bot.ledger();
+    assert_eq!(l.entries().count(), 5);
+    assert!((l.reward_since(0.0, 2) - 1.2).abs() < 1e-6);
+    assert_eq!(l.reward_since(0.0, 3), -2.0);
+    assert!(l.open_episodes().is_empty());
+    let h = &rig.learned.heatmap;
+    assert_eq!((h.deaths_at(2, 0), h.kills_from(0, 0), h.deaths_at(0, 0), h.kills_from(5, 0)), (1.0, 1.0, 1.0, 1.0));
+    assert!((h.damage_taken_at(0, 0) - 1.3).abs() < 1e-6 && (h.damage_taken_at(2, 0) - 0.5).abs() < 1e-6);
+    assert!(h.danger(0, -1) > h.danger(1, -1));
+    assert_eq!(rig.bot.weapon_stats().cell(1, 300.0).map(|c| c.hits), Some(1.0));
+    assert_eq!(rig.learned.weapon_prior.cell(1, 300.0).map(|c| c.damage), Some(50.0));
+}
+
+#[test]
+fn the_loadout_bought_is_credited_only_when_the_inventory_shows_it() {
+    use crate::learn::loadout::LOADOUTS;
+    let mut rig = Rig::new(Config::default());
+    let dead = || {
+        let mut d = player(1, Vector::ZERO, 0);
+        d.health = 0.0;
+        d.player.as_mut().unwrap().alive = false;
+        d
+    };
+    let mut w = plane(vec![dead(), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    let mut rng = XorShiftRandom::new(6);
+    let bought = |f: &Frame| f.actions.iter().find_map(|a| if let Action::Loadout(l) = a { Some(l.clone()) } else { None });
+    // Dead: a curated loadout is bought.
+    let ids = rig.with(|b, g| bought(&b.frame(g, &w, &mut rng))).expect("a loadout");
+    let arm = LOADOUTS.iter().position(|l| *l == ids.as_slice()).expect("curated");
+    // Alive with it: credited; a kill and 100 damage in 30 s, then a death.
+    w.ents.borrow_mut()[0] = player(1, Vector::ZERO, 0);
+    *w.inventory.borrow_mut() = owned(&[(ids[0], 10, 10), (ids[1], 7, 7)]);
+    run(&mut rig, &mut w, &mut rng, 10, |_, _| {});
+    assert_eq!(rig.bot.learning.credited_loadout, Some(arm));
+    rig.with(|b, g| {
+        b.combat_event(g, &w, &damage(2, 1, 100.0), &mut rng);
+        b.combat_event(g, &w, &kill(1, 2, ids[0]), &mut rng);
+    });
+    w.time += 30.0;
+    w.ents.borrow_mut()[0] = dead();
+    let next = rig.with(|b, g| bought(&b.frame(g, &w, &mut rng)));
+    let a = rig.bot.learning.loadout.arms[arm];
+    // (1 kill - 0.5 death + 100/200) per minute over about half a minute.
+    assert!((a.value - 2.0).abs() < 0.05 && a.n == 1.0, "{a:?}");
+    assert_eq!(rig.learned.loadout_prior.arms[arm].n, 1.0);
+    assert!(next.is_some(), "a new pick for the next life");
+    // The buy didn't come through: no credit, nothing learned.
+    w.ents.borrow_mut()[0] = player(1, Vector::ZERO, 0);
+    *w.inventory.borrow_mut() = owned(&[(28, 10, 10)]);
+    run(&mut rig, &mut w, &mut rng, 200, |_, _| {});
+    assert_eq!(rig.bot.learning.credited_loadout, None);
+    w.ents.borrow_mut()[0] = dead();
+    let before = rig.bot.learning.loadout.arms.iter().map(|a| a.n).sum::<f32>();
+    rig.with(|b, g| b.frame(g, &w, &mut rng));
+    assert_eq!(rig.bot.learning.loadout.arms.iter().map(|a| a.n).sum::<f32>(), before);
+}
+
+#[test]
+fn replayed_fights_teach_the_opponent_model() {
+    use crate::learn::opponents::OpponentKey;
+    let mut rig = Rig::new(Config::default());
+    rig.extra.reps[2] = 20;
+    rig.extra.reps[3] = 30;
+    let mut w =
+        plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(750.0, 0.0, 0.0), 0)]);
+    arm(&w, 3, 18, 5, 10);
+    arm(&w, 2, 0, 100, 0);
+    let script = [
+        (1.0, damage(1, 2, 10.0)),
+        (1.5, kill(1, 2, 1)),
+        (3.0, damage(1, 3, 100.0)),
+        (3.0, kill(3, 1, 18)),
+        // Not about a bot: the model ignores it.
+        (4.0, damage(2, 3, 50.0)),
+    ];
+    rig.replay(&mut w, &script);
+    let m = &rig.learned.opponents;
+    let sniper = m.profile(OpponentKey::Player(30)).unwrap();
+    assert_eq!((sniper.hits_on_bots, sniper.kills_of_bots, sniper.range), (1.0, 1.0, 750.0));
+    assert_eq!(sniper.favourite_weapon(), Some((18, 1.0)));
+    let brawler = m.profile(OpponentKey::Player(20)).unwrap();
+    assert_eq!((brawler.deaths_to_bots, brawler.kungfu_share), (1.0, 1.0));
+    assert!(rig.with(|b, g| b.learned_threat(g, 3)) > rig.with(|b, g| b.learned_threat(g, 2)));
+    assert_eq!(rig.with(|b, g| b.learned_threat(g, 4)), 1.0);
+    // Time in the bot's sight counts as exposure, its sideways speed as dodging.
+    w.ents.borrow_mut()[2].velocity = Vector::new(0.0, 250.0, 0.0);
+    let mut rng = XorShiftRandom::new(3);
+    w.ents.borrow_mut().remove(1);
+    run(&mut rig, &mut w, &mut rng, 100, |w, _| w.ents.borrow_mut()[0].origin = Vector::ZERO);
+    let sniper = rig.learned.opponents.profile(OpponentKey::Player(30)).unwrap();
+    assert!(sniper.exposure > 0.5 && sniper.dodge > 0.5, "{sniper:?}");
+}
+
+#[test]
+fn learning_replays_exactly_from_the_same_seed() {
+    // The same fight and events with the same seed learn the same, to the saved text.
+    let learn = || {
+        let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch, kungfu::Move::Kick], 60.0);
+        rig.learned.heatmap = crate::learn::Heatmap::new("ts_test", rig.wp.len());
+        let mut rng = XorShiftRandom::new(12);
+        let mut n = 0;
+        run(&mut rig, &mut w, &mut rng, 400, |w, _| {
+            n += 1;
+            w.ents.borrow_mut()[1].button = if n % 25 < 2 { buttons::ATTACK2 } else { 0 };
+        });
+        let t = w.time;
+        rig.replay(&mut w, &[(t, damage(2, 1, 20.0)), (t + 0.5, damage(1, 2, 35.0)), (t + 1.0, kill(1, 2, 0))]);
+        (
+            rig.bot.kungfu.save(),
+            rig.bot.weapon_stats().save(),
+            rig.bot.learning.loadout.save(),
+            rig.learned.opponents.save(),
+            rig.learned.heatmap.to_bytes(),
+        )
+    };
+    let a = learn();
+    assert_eq!(a, learn());
+    assert!(a.0.contains("stance all"), "{}", a.0);
 }

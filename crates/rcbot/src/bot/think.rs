@@ -167,6 +167,8 @@ impl Bot {
         self.switch_pending = None;
         self.next_inventory_sync = 0.0;
         self.next_reload_time = 0.0;
+        let now = self.now;
+        self.kf_settle(g, now, super::kungfu::FightEnd::Broken, rng);
         self.kungfu.reset_fight();
         self.fight = super::fire::Fight::default();
         self.last_enemy = None;
@@ -211,15 +213,19 @@ impl Bot {
         self.touched_waypoints = 0;
     }
 
-    /// `Think`'s TS weapon choice (`BOT_CONDITION_SELECTED_GUN`): the GA's pick (or seeded
-    /// values), bought unless `BOT_CONFIG_TS_KUNGFU`.
+    /// `Think`'s TS weapon choice (`BOT_CONDITION_SELECTED_GUN`), bought unless
+    /// `BOT_CONFIG_TS_KUNGFU`. Upstream's GA still picks its genes (they feed the stunt
+    /// perceptron and breed as upstream), but the loadout bought is the bandit's (design §4).
     fn select_loadout(&mut self, g: &mut BotGlobals<'_>, rng: &mut dyn Random) {
         if self.has(cond::SELECTED_GUN) {
             return;
         }
-        let picks = self.learned.select_ts_weapons(&mut g.learned.ts_weapon_choices, g.config.is_on(cfg::DISABLE_WEAPON_LEARN), rng);
-        if !g.config.is_on(cfg::TS_KUNGFU) {
-            self.actions.push(Action::Loadout(picks.to_vec()));
+        let _ga_picks = self.learned.select_ts_weapons(&mut g.learned.ts_weapon_choices, g.config.is_on(cfg::DISABLE_WEAPON_LEARN), rng);
+        let loadout = self.choose_loadout(g, rng);
+        if g.config.is_on(cfg::TS_KUNGFU) {
+            self.learning.pending_loadout = None;
+        } else {
+            self.actions.push(Action::Loadout(loadout));
         }
         self.set(cond::SELECTED_GUN);
     }
@@ -256,6 +262,7 @@ impl Bot {
                 let team_score_since = g.team_scores[team] - self.prev_team_score;
                 self.prev_team_score = g.team_scores[team];
                 let fitness = BotLearnedData::death_fitness(survival, frags_since, team_score_since);
+                self.learn_on_death(g, now, rng);
                 let used_melee = self.used_melee;
                 self.learned.on_death(fitness, used_melee, &mut g.learned.ts_weapon_choices, &mut g.learned.enemy_costs[team], rng);
                 self.spawn_init(g, rng);
@@ -423,6 +430,7 @@ impl Bot {
         self.clear(cond::CANT_SHOOT);
         self.enemy = None;
         self.do_tasks(g, w, rng);
+        self.learn_think(g, w);
         self.clear(cond::TASK_EDICT_PAIN);
         if self.look_for_new_tasks {
             self.look_for_new_tasks(g, w, rng);

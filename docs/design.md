@@ -182,6 +182,15 @@ bytes alone) still load. See §5.1.
   enemy-cost `CGA()` (16 genes). `tsweaps.rld`: the TS loadout `CGA()` (8 genes), no header.
   Both uncompressed.
 
+**The port's learned files** (`learn/store.rs`; design §4 has what they hold): small text files
+whose first line is `rcbot-<kind> <version>`; loaders read the versions they know and leave their
+data as it was for anything else or a damaged line; numbers are written as Rust prints them, so
+they round-trip exactly. `botprofiles/<key>.rkf` (kung fu, version 2), `.rwr` (weapons by range),
+`.rlo` (loadouts), where `<key>` is the profile id or `default-<name>`; `weaponstats.rwr`,
+`loadouts.rlo` and `botprofiles/players.rop` (every bot's); and one binary file,
+`waypoints/ts/<map>.rhm` (the heatmap). The host writes every data file to `<file>.tmp` and
+renames it over the old one.
+
 **HAL brain** (`chat/brain.rs`), `botprofiles/<id>_hal.brn`, as the 32-bit builds write it
 (`unsigned long` is 4 bytes): `"RCBOTHAL\0"`, `u8` order (5), the forward then the backward tree
 depth first (each node `u16` symbol, `u32` usage, `u16` count, `u16` children, then the children),
@@ -307,8 +316,11 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   port's step 4 skipped bots), so bots have reputations of each other.
 * **Bots without a profile**: with no `bot_profiles.ini`, or none free, upstream adds no bot; the
   port has to (its quota asks), so the bot gets `BotFunc_InitProfile`'s defaults with id 0, a
-  MegaHAL brain in memory (pretrained from `botprofiles0_hal.trn` if there is one) and no files
-  of its own (brain, `.rld`, `.rcr`), which would be shared by every such bot.
+  MegaHAL brain in memory (pretrained from `botprofiles0_hal.trn` if there is one) and no brain or
+  `.rcr` of its own, which would be shared by every such bot. Its learned files (`.rld`, `.rkf`
+  and the port's own) are kept under `botprofiles/default-<name>.<ext>` (the name cut to letters,
+  digits, `-`, `_`; `default` if nothing is left), so it keeps what it learns (upstream would save
+  nothing).
 * **Bots kept across a level change**: upstream's `RESPAWN_NEED_TO_REJOIN` bots rejoin through
   `BotFunc_AddBot`; the port keeps its bots and hands them back (`adopt_bot`), so they get the
   profile they had again (saved at `ServerDeactivate`, as upstream saves at `ClientDisconnect`).
@@ -362,10 +374,11 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   (move sequences pressed as TS reads them: fresh or held `+attack`/`+attack2`, with `+duck`,
   `+back`, crouch jumps (`+jump` `+duck`), a run-up flying kick, and wall jumps (`+alt1` facing a
   wall with the opponent behind) into the back kick or, turning in the air, the flying kick).
-  Combos are scored the same way; every 5 the worst well-tried one is replaced by a crossover or
-  mutation of the best. What it learned is saved per profile in `botprofiles/<id>.rkf` (text:
-  `rcbot-kungfu 1`, `stance`, `reaction`, `combo <value> <uses> <move codes>`), beside the
-  byte-compatible `.rld`. While a wall jump turns its back to the opponent, the bot keeps it seen
+  Combos are scored per second and tried by UCB1; every 20 a crossover or mutation of the best
+  is bred (see the learning entries below). What it learned is saved per profile in
+  `botprofiles/<id>.rkf` (text: `rcbot-kungfu 2`, `stance all|<class> <value> <count>...`,
+  `reaction all|<kind> <value> <count>...`, `combo <value> <uses> <move codes>`; version 1 files
+  still load), beside the byte-compatible `.rld`. While a wall jump turns its back to the opponent, the bot keeps it seen
   if the line is clear. Unarmed against a gun more than 220 units away it takes out a gun with
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
@@ -499,6 +512,94 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   health or armour under 60% health, the rest at once), at most every 2 s. An infinite clip
   doubles the spread allowance and stops partial reloads; double fire rate halves the recoil per
   shot and lets semi-automatic guns fire while held.
+
+### Learning from fights (port additions)
+
+Upstream's learners hardly help in TS: one fitness per life (`survival * 0.001 + frags * 0.2 +
+team score * 0.2`, 0/0.2/0.4 in deathmatch) grades the loadout, the stunts, the survival genes and
+the personal genes at once. The port adds learners scored by what actually happened between the
+bot and each opponent; upstream's objects still load and save byte for byte.
+
+* **Combat ledger** (`learn/ledger.rs`, `bot/learning.rs`): the host passes every field of
+  `player_damaged` (victim, attacker, inflictor, damage, bits, health; upstream's port dropped all
+  but the attacker) and subscribes to `kill_scored` (killer, victim, weapon, headshot, close
+  combat, kung fu). Each bot keeps a ring of 128 entries (time, other player, weapon, dealt or
+  taken, range bin 0-64/64-192/192-384/384-768/768-1500/over 1500, its waypoint) and one episode
+  per opponent: opened when the bot engages or first trades damage, closed after 4 s without
+  contact, at a kill or a death. Reward: `(dealt - taken) / 100`, +1 a kill, -1 a death, only
+  between the bot and that opponent; a decision gets `exp(-dt / 1 s)`-discounted credit for what
+  follows it. API: `Ledger::reward_since(t, opponent)`, `dealt_since`, `taken_since`, `credit`,
+  `episode`; `Bot::ledger()`. `player_killed` still drives upstream's death events.
+* **Kung fu rewards** (`bot/kungfu.rs`, `learn/bandit.rs`): every score comes from the ledger
+  (damage between the bot and this opponent only; health deltas mixed in third parties).
+  Whatever is open when the fight ends is settled: +2 a kill, -2 a death (also when the bot's
+  first dead think comes before the kill is scored), what it earned so far when broken off
+  (another opponent, the opponent hidden or killed by someone else, a respawn); nothing is scored
+  twice. Answers are scored only for attacks the bot saw (a predicted one used to earn a free +1),
+  against a fifth answer, not reacting, which is the baseline (an offensive bot mid-combo takes
+  it); a block also pays 0.3 for its 33 power. Combo rewards are per second (at least 0.5 s).
+  Combos are chosen by UCB1 among those that fit now (upstream-style 12% blind exploration is
+  gone); a child starts at its parent's mean with 0 runs, which UCB1 tries first. Breeding every 20
+  combos; a full pool replaces only a combo run 8 times or more, outside the best 3, whose upper
+  bound is below the best's lower bound. Answers are learned per attack kind (punch, kick, low,
+  air, back), stances per opponent class (human or bot × attacking at least every 1.2 s or not),
+  each blended from this opponent (per map) into its class into the profile, shrunk by count (3
+  samples); counts decay 1% a fight and human fights weigh 2.5.
+* **Harmful upstream learners gated** (their objects still load and save byte for byte): kung fu
+  lives no longer breed the personal genes (only knife and katana fights, which read them, do);
+  the learned strafe maps the sigmoid to -1..1 (`2 out - 1`, dead band |s| < 0.5), so it goes both
+  ways; the enemy-cost buckets measure from each bucket to the entity, with the gene's size only
+  (a cost repels), so the cheapest bucket is away from the danger instead of always
+  `(-192, -192)` (§5.55). The combat code decides how it moves by them.
+* **Saving**: data files are written to `<file>.tmp` and renamed over the old one, so a crash
+  mid-save leaves the last good file.
+* **Weapon effectiveness by range** (`learn/weapon_stats.rs`): per bot and TS weapon id × range
+  bin, the seconds it saw its enemy with that weapon in hand (exposure), the damage it dealt
+  (ledger), the rounds it fired (the clip going down) and the hits, fading with exposure (half
+  weight after 600 s). Score: damage per second of exposure, shrunk toward every bot's results
+  (`(n v + 5 p) / (n + 5)`, `n` the exposure), themselves shrunk toward 10/s. API for the weapon
+  choice: `Bot::learned_weapon_score(g, weapon, dist) -> Option<f32>` (`None` under 5 s of the bot's own
+  data), `Bot::weapon_stats()` (`dps`, `accuracy`, `samples`, `score`). Saved as
+  `botprofiles/<key>.rwr` and the prior as `weaponstats.rwr` (text, `rcbot-weapons 1`, `w <id>
+  <bin> <exposure> <damage> <shots> <hits>`).
+* **Map heatmap** (`learn/heatmap.rs`, `GlobalLearnedData::heatmap`): per waypoint and rules team
+  (0-4), deaths at, kills from and damage taken at (per 100), counted at the nearest waypoint of
+  the player concerned (a bot's current one), from the host's events; faded ×0.9 at each map load.
+  Saved as `waypoints/ts/<map>.rhm` (binary, little-endian: `"RCHM"`, `u32` version 1, `u16` name
+  length and the map name, `u32` waypoints (≤ 1024), `u32` teams (5), then per team the deaths,
+  kills and damage `f32`s); a file for another map or waypoint count starts afresh. API:
+  `Heatmap::danger(waypoint, team)` (RCBot team, -1 none: deaths + 0.3 × damage, squashed to 0..1),
+  `ambush_value(waypoint)` (kills from it, any team, 0..1), `cover_penalty(waypoint, team)` (up to
+  256 units), `Bot::waypoint_danger(g, waypoint)`. Hooks, opt-in so upstream's results stay bit for
+  bit: `nav::DangerSource` (the heatmap implements it) and `AStar::search_with_danger(…, Some((source,
+  weight)))`, which makes each edge `length × (1 + weight × danger(successor))` (`search` is the
+  same with none); `Waypoints::cover_waypoint_weighted(…, penalty)`, the cover search with a
+  per-waypoint distance penalty (`cover_waypoint` passes 0). The navigation and combat code choose
+  when to use them.
+* **Loadouts by a bandit** (`learn/loadout.rs`): the loadout bought before each spawn is chosen
+  among 24 curated ones (a primary and a sidearm a TS player carries, at most 60 slots so the bot
+  can still dive, within the slots it has) by discounted UCB1 (every arm's weight × 0.97 per
+  life; untried arms first, ties broken at random), each bot's estimate shrunk toward every bot's
+  (2 samples). An arm is credited only if the inventory the game reports within 3 s of the spawn
+  holds it (or is exactly another curated loadout); the reward is `(kills - 0.5 deaths + dealt /
+  200)` per minute of the life (at least half a minute), at the death. `BOT_CONFIG_TS_KUNGFU` buys
+  nothing (and credits nothing); `disable_weapon_learn` picks at random. Upstream's loadout GA
+  still picks, breeds and saves its genes byte for byte (`tsweaps.rld`; they feed the stunt
+  perceptron) but no longer chooses the weapons. Saved as `botprofiles/<key>.rlo` and
+  `loadouts.rlo` (text, `rcbot-loadout 1`, `l <value> <weight> <weapon ids>`, keyed by the weapons
+  so the list can change).
+* **Opponent model** (`learn/opponents.rs`, `GlobalLearnedData::opponents`): per player, humans
+  (and other backends' bots) by reputation id, RCBot's bots by profile id (`PlayerKeys`, refreshed
+  by the manager): damage to bots and hits on them per second some bot had it in sight as its
+  enemy (exposure), kills of and deaths to bots, a weapon histogram, its usual range, its kung fu
+  share, stunts per minute (the host now subscribes to `player_stunt`), dodging (its speed across
+  the bot's view while seen), and from kung fu fights its attack mix, blocks and rhythm (a new fight
+  starts from that rhythm). Counts fade ×0.95 at each map load. API: `Bot::learned_threat(g, player)` and
+  `OpponentModel::threat(key)` (1 for an average or unknown player, 0.25-4: its damage rate shrunk
+  toward everyone's over everyone's, times √(kills/deaths vs bots)), `OpponentModel::profile(key)`
+  (`accuracy`, `favourite_weapon`, `kf_block_rate`, the fields). Saved as
+  `botprofiles/players.rop` (text, `rcbot-players 1`, `p <rep id>` / `b <profile id>` and 56
+  numbers).
 
 ## 5. Upstream bugs found
 
@@ -665,8 +766,9 @@ Found while porting; not filed upstream.
     the bot against its own PVS. Kept.
 55. **The enemy-cost buckets all get the same cost** (`workEnemyCosts`, `bot.cpp:16873`): the
     cheapest is always the first, so `m_vLowestEnemyCostVec`, where bots back off to within 256
-    units of an enemy, is always 192 units to the -x/-y side. Kept for `RunForCover`'s fallback;
-    the fight no longer walks there (§4).
+    units of an enemy, is always 192 units to the -x/-y side. **Fixed** (§4): the buckets are
+    measured from each bucket, so the cheapest is away from the danger; the fight no longer walks
+    there.
 56. **`WantToFollowEnemy` ignores its perceptron** (`bot.cpp:11040`, "Not required?"): the bot
     follows while above 30% health. Kept.
 57. **Auto-waypoints moved to the floor stay in their old location bucket** (`client.cpp:541`,
@@ -746,6 +848,14 @@ The research for #104 lists RCBot's TS bugs elsewhere (weapon switching through 
 model-based teams, the 2.x `WStatus` kung fu id, free weapons instead of buying). The port fixes
 those by going through the port's own code when that code is ported.
 
+* **The TS loadout GA** (`Think`, `UTIL_makeTSweapon`): weapon ids are `(int)(gene * 35)`, so 0
+  (no weapon: an empty slot for good once bred) and 35 (the seal knife) are as likely as any gun,
+  one GA is shared by every bot, whether the weapons came is never checked, and the life fitness
+  can't tell a good loadout from a lucky life. **Replaced** by the loadout bandit (§4).
+* **`decideJumpDuckStrafe` only strafes right** (`bot.cpp`): the strafe is the sigmoid's output
+  (0-1) times the speed, outside 0.25-0.75, so it is never negative. **Fixed** (§4).
+* **Kung fu lives bred the personal genes**: the port's kung fu fighter set `m_bUsedMelee`, so lives
+  spent fighting with kung fu (which never reads the jump/duck/strafe genes) graded them. **Fixed**.
 * **`TeamScore` and TS's team names** (`BotClient_Generic_TeamScore`): the team index comes from
   TFC's colour names (`Blue`, `Red`, `Green`, `Yellow`), so every TS team's score lands in slot 0
   (the last message wins) and the death fitness compares the wrong team's score. The port reads the
@@ -760,7 +870,25 @@ those by going through the port's own code when that code is ported.
   none with a full clip or no reserve; an empty gun dropped once for kung fu; cover from a far
   gunman; blocks, ducks and steps against a punching opponent, with strikes back and learning;
   the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
-  wall jump; `.rkf` round trip and damaged files; combos bred from the best.
+  wall jump; `.rkf` round trip (version 2, version 1 files, damaged files); combos bred from the
+  best, a full pool keeping combos not yet proven worse and the best; untried fitting combos first;
+  answers scored from the ledger (only the opponent's damage, a block's cost, predicted attacks
+  unscored, a death -2); estimates blended opponent → class → profile with human weight and decay;
+  a fight settled +2 by a kill and -2 by a death, once; the learned strafe going both ways, kung fu
+  lives not breeding the personal genes, the cheapest cost bucket away from the danger; the weapon
+  table (rates by range bin, accuracy, shrinkage, fading, file round trip and damaged lines) and a
+  bot filling it from time in sight, rounds fired and hits; the heatmap (counts by waypoint and
+  team, danger and ambush value, decay, `.rhm` round trip and rejected files), the A* danger hook
+  (weight 0 the plain search, a high weight going round a deadly waypoint), weighted cover; the
+  event-replay harness (`Rig::replay`: host events through the bot manager) filling a bot's ledger,
+  the heatmap and the weapon tables from a scripted fight; the loadout bandit (curated loadouts
+  legal and light, rewards per minute, credit only for what the inventory shows, untried first
+  then the best with old lives fading, the prior guiding a new bot, file round trip) and a bot
+  crediting the loadout it bought only when the inventory shows it; the opponent model (keys,
+  threat of a strong and a weak player, stunt rate, kung fu habits, file round trip, map fade) and
+  a replayed fight teaching it (hits, kills and deaths about bots only, range, weapon, kung fu
+  share, exposure and dodging from what the bot saw); a kung fu fight and replayed events learning
+  the same tables, to the saved bytes, from the same seed.
 * **The fight** (`bot/tests/fight.rs`, `weapons/ts_data.rs`): semi-automatic guns pressed one
   usercmd at a time no faster than their rate (Desert Eagle, Barrett), automatic held, akimbo
   semi alternating its buttons; the aim point by gun, skill and what shows; partial reloads (and
@@ -834,6 +962,10 @@ those by going through the port's own code when that code is ported.
   known, a lost one forgotten, a new life without the last one's guns), the weapon in hand as
   the game reports it (a switch asked once, a refused one forgetting the weapon), and the
   waypoint editor (flags, paths, delete, beam colours).
+* **Learning** (`learn/ledger.rs`, `learn/store.rs`, `bot/tests.rs`): range bins, rewards and
+  credit per opponent, episodes opening on contact and closing on timeout or death, the entry
+  ring; a bot's ledger from host events (only its own fights, weapons and range bins); versioned
+  text headers and exact number round trips, the file key of a bot without a profile.
 * **Host unit tests** (`crates/host`): the plugin descriptor, and engine entity searches
   (`collect_search`) ending at the world FWGS and ReHLDS return for "no more" (and at a repeat)
   instead of starting over: upstream's loops stop at `FNullEnt`, the port's first ones only at

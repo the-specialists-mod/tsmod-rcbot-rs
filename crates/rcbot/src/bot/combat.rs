@@ -296,8 +296,13 @@ impl Bot {
 
     /// `CBot::workEnemyCosts`: adds the entity's danger (a survival gene by kind, over distance
     /// squared, scaled by size) to every cost bucket around the bot and remembers the cheapest.
-    /// As upstream, every bucket gets the same cost, so the cheapest is always the first.
-    fn work_enemy_costs(&mut self, w: &dyn BotWorld, e: &Entity, dist: f32) {
+    ///
+    /// Upstream gave every bucket the same cost (the distance from the bot), so the cheapest was
+    /// always the first, `origin + (-192, -192, origin.z)`, whatever the danger. The port measures
+    /// from each bucket to the entity, and takes the gene's size only (a cost repels; the genes'
+    /// signs were bred from a fitness that couldn't tell): the cheapest bucket is away from the
+    /// danger (design §4).
+    pub(crate) fn work_enemy_costs(&mut self, w: &dyn BotWorld, e: &Entity, dist: f32) {
         if self.next_work_range_costs > w.time() || dist > 768.0 {
             return;
         }
@@ -313,15 +318,27 @@ impl Bot {
             2
         };
         let mid = (BOT_COST_BUCKETS / 2) as i32;
-        let add = self.learned.survival.get(state) / (dist * dist) * (e.size.length() / self.me.size.length());
+        let weight = self.learned.survival.get(state).abs() * (e.size.length() / self.me.size.length());
         for x in 0..BOT_COST_BUCKETS {
             for y in 0..BOT_COST_BUCKETS {
-                let c = self.range_costs[x][y] + add;
+                let at =
+                    self.me.origin + Vector::new((x as i32 - mid) as f32 * BOT_COST_RANGE, (y as i32 - mid) as f32 * BOT_COST_RANGE, 0.0);
+                let d = (at - e.origin).length_2d().max(BOT_COST_RANGE / 4.0);
+                let c = self.range_costs[x][y] + weight / (d * d);
                 self.range_costs[x][y] = c;
-                if c < self.lowest_enemy_cost {
-                    let pos =
-                        Vector::new((x as i32 - mid) as f32 * BOT_COST_RANGE, (y as i32 - mid) as f32 * BOT_COST_RANGE, self.me.origin.z);
+            }
+        }
+        // The cheapest after this entity, nearest the bot first on ties (the centre outward).
+        self.lowest_enemy_cost = f32::MAX;
+        let mut best_ring = i32::MAX;
+        for x in 0..BOT_COST_BUCKETS {
+            for y in 0..BOT_COST_BUCKETS {
+                let c = self.range_costs[x][y];
+                let ring = (x as i32 - mid).abs().max((y as i32 - mid).abs());
+                if c < self.lowest_enemy_cost || (c == self.lowest_enemy_cost && ring < best_ring) {
                     self.lowest_enemy_cost = c;
+                    best_ring = ring;
+                    let pos = Vector::new((x as i32 - mid) as f32 * BOT_COST_RANGE, (y as i32 - mid) as f32 * BOT_COST_RANGE, 0.0);
                     self.lowest_enemy_cost_vec = self.me.origin + pos;
                 }
             }
@@ -460,14 +477,16 @@ impl Bot {
             p.input(&inputs);
             p.execute();
         }
-        let (jump, duck, strafe) = (l.jump.fired(), l.duck.fired(), l.strafe.output());
+        // The sigmoid's 0..1 mapped to -1..1: upstream's `output * speed` only ever strafed
+        // right (design §4); the dead band (0.25-0.75 upstream) is the same.
+        let (jump, duck, strafe) = (l.jump.fired(), l.duck.fired(), 2.0 * l.strafe.output() - 1.0);
         if jump {
             self.jump();
         }
         if duck {
             self.jump_and_duck(now);
         }
-        if self.strafe_time + 0.75 < now && !(0.25..0.75).contains(&strafe) {
+        if self.strafe_time + 0.75 < now && strafe.abs() >= 0.5 {
             self.strafe_speed = strafe * self.max_speed;
         }
         self.used_melee = true;

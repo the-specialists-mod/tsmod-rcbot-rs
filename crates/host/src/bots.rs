@@ -13,7 +13,6 @@ use crate::api::{Api, Engine};
 use crate::world::{EngineRandom, HostWorld};
 use crate::{State, say};
 use rcbot::Vector;
-use rcbot::bot::kungfu::kungfu_file_name;
 use rcbot::bot::{Bot, BotCam, BotWorld, NO_CLIENT};
 use rcbot::chat::bot_chat::ChatKind;
 use rcbot::chat::brain::{HalFileNames, HalFileOverrides, cookie_is_valid};
@@ -21,7 +20,7 @@ use rcbot::chat::reply::HalBot;
 use rcbot::config::profile::{ProfileChoice, choose_profile, profile_file_name};
 use rcbot::config::rep::{player_rep_id, rep_file_name};
 use rcbot::config::{BOT_PLAYER_ID_FILE, BOT_PROFILES_FILE, BOT_PROFILES_FOLDER, BotProfile, PlayerId, flags as cfg};
-use rcbot::learn::data::bot_file_name;
+use rcbot::learn::store::profile_key;
 use std::path::PathBuf;
 use ts_plugin_api::log;
 
@@ -58,12 +57,19 @@ impl State {
         std::fs::read(self.path(rel)).ok()
     }
 
-    fn write(&self, rel: &str, bytes: &[u8]) {
+    /// Writes a data file atomically: a temporary file beside it, renamed over it, so a crash
+    /// or a full disk mid-save leaves the last good file (port addition).
+    pub(crate) fn write(&self, rel: &str, bytes: &[u8]) {
         let p = self.path(rel);
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        if let Err(e) = std::fs::write(&p, bytes) {
+        let mut tmp = p.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let r = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &p));
+        if let Err(e) = r {
+            let _ = std::fs::remove_file(&tmp);
             say(log::WARNING, &format!("can't write {}: {e}", p.display()));
         }
     }
@@ -118,18 +124,27 @@ fn wake_hal(s: &State, profile: &BotProfile, name: &str) -> HalBot {
     hal
 }
 
-/// `SaveHALBrainForPersonality` and `CBot::saveLearnedData` (bots with a profile).
+/// The name of a bot's own learned files in the profiles folder: `<key>.<ext>`, the key being
+/// the profile id, or `default-<name>` for a bot without a profile (design §4: upstream saved
+/// nothing for those, so they never kept what they learned).
+fn learned_file(b: &Bot, ext: &str) -> String {
+    format!("{BOT_PROFILES_FOLDER}/{}.{ext}", profile_key(b.profile.profile_id, &b.name))
+}
+
+/// `SaveHALBrainForPersonality` (bots with a profile) and `CBot::saveLearnedData` (every bot,
+/// design §4).
 pub(crate) fn save_bot(s: &State, b: &Bot) {
     let id = b.profile.profile_id;
-    if id == 0 {
-        return;
-    }
-    if let Some(hal) = &b.hal {
+    if id != 0
+        && let Some(hal) = &b.hal
+    {
         let f = HalFileNames::new(id, &HalFileOverrides::default());
         s.write(&f.brain, &hal.save_brain());
     }
-    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id)), &b.learned.save(id));
-    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id)), b.kungfu.save().as_bytes());
+    s.write(&learned_file(b, "rld"), &b.learned.save(id));
+    s.write(&learned_file(b, "rkf"), b.kungfu.save().as_bytes());
+    s.write(&learned_file(b, rcbot::learn::weapon_stats::FILE_EXT), b.learning.weapons.save().as_bytes());
+    s.write(&learned_file(b, rcbot::learn::loadout::FILE_EXT), b.learning.loadout.save().as_bytes());
 }
 
 /// `CBotGlobals::saveLearnedData`: the teams' enemy-cost GAs and the TS loadout GA.
@@ -138,6 +153,30 @@ pub(crate) fn save_globals(s: &State) {
         s.write(&rcbot::learn::data::team_file_name(team), &s.learned.save_team(team));
     }
     s.write(rcbot::learn::data::TS_WEAPONS_FILE, &s.learned.save_ts_weapons());
+    s.write(rcbot::learn::weapon_stats::GLOBAL_FILE, s.learned.weapon_prior.save().as_bytes());
+    s.write(rcbot::learn::loadout::GLOBAL_FILE, s.learned.loadout_prior.save().as_bytes());
+    s.write(&format!("{BOT_PROFILES_FOLDER}/{}", rcbot::learn::opponents::PLAYERS_FILE), s.learned.opponents.save().as_bytes());
+    let h = &s.learned.heatmap;
+    if !h.is_empty() && h.map_name() == s.map {
+        s.write(&heatmap_path(s), &h.to_bytes());
+    }
+}
+
+/// `waypoints/ts/<map>.rhm`: the map's heatmap, beside its waypoints.
+fn heatmap_path(s: &State) -> String {
+    format!("waypoints/{}/{}", s.config.mod_folder, rcbot::learn::heatmap::heatmap_file_name(&s.map))
+}
+
+/// The map's heatmap, for its waypoints as loaded (a new one when the file is missing or was
+/// made for other waypoints), faded once for this load.
+pub(crate) fn load_heatmap(s: &mut State) {
+    let n = s.waypoints.len();
+    let mut h = s
+        .read(&heatmap_path(s))
+        .and_then(|b| rcbot::learn::Heatmap::from_bytes(&b, &s.map, n))
+        .unwrap_or_else(|| rcbot::learn::Heatmap::new(&s.map, n));
+    h.decay(rcbot::learn::heatmap::MAP_DECAY);
+    s.learned.heatmap = h;
 }
 
 /// A profile: `profile_id`'s `<id>.ini` (a bot coming back after a map change), else
@@ -180,13 +219,19 @@ pub(crate) fn new_bot(s: &mut State, e: Engine, index: u32, name: String, profil
     bot.hal = Some(hal);
     bot.join_server_time = e.time();
     let id = bot.profile.profile_id;
+    if let Some(b) = s.read(&learned_file(&bot, "rld")) {
+        bot.learned.load(&b, id);
+    }
+    if let Some(k) = s.read(&learned_file(&bot, "rkf")) {
+        bot.kungfu.load(&String::from_utf8_lossy(&k));
+    }
+    if let Some(t) = s.read(&learned_file(&bot, rcbot::learn::weapon_stats::FILE_EXT)) {
+        bot.learning.weapons.load(&String::from_utf8_lossy(&t));
+    }
+    if let Some(t) = s.read(&learned_file(&bot, rcbot::learn::loadout::FILE_EXT)) {
+        bot.learning.loadout.load(&String::from_utf8_lossy(&t));
+    }
     if id != 0 {
-        if let Some(b) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", bot_file_name(id))) {
-            bot.learned.load(&b, id);
-        }
-        if let Some(k) = s.read(&format!("{BOT_PROFILES_FOLDER}/{}", kungfu_file_name(id))) {
-            bot.kungfu.load(&String::from_utf8_lossy(&k));
-        }
         let rcr = format!("{BOT_PROFILES_FOLDER}/{}", rep_file_name(id));
         for c in s.clients.iter().filter(|c| c.is_used()) {
             if let Some(new) = bot.profile.rep.add_load_rep(c.player_rep_id, s.read(&rcr).as_deref()) {
@@ -320,6 +365,42 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
     let mut rng = EngineRandom(e);
     let mut g = globals!(s, &reps);
     s.bots.death(&mut g, &w, killer, victim, &mut rng);
+}
+
+/// A damage or kill event for the bots' learners (design §4).
+pub(crate) fn combat(s: &mut State, a: Api, e: Engine, ev: &rcbot::learn::CombatEvent) {
+    let reps = s.rep_ids();
+    let w = HostWorld::new(a, e);
+    let mut rng = EngineRandom(e);
+    let mut g = globals!(s, &reps);
+    s.bots.combat_event(&mut g, &w, ev, &mut rng);
+}
+
+/// `kill_scored`: the rules' view of a death (its killer, weapon and tags).
+pub(crate) fn kill_scored(s: &mut State, a: Api, e: Engine, k: &ts_plugin_api::KillInfo) {
+    let (Ok(victim), Ok(killer)) = (u32::try_from(k.victim), u32::try_from(k.killer.max(0))) else { return };
+    if victim == 0 {
+        return;
+    }
+    let tags = k.tags;
+    let ev = rcbot::learn::CombatEvent::Kill(rcbot::learn::KillEvent {
+        killer,
+        victim,
+        weapon: k.weapon,
+        headshot: tags & ts_plugin_api::kill::HEADSHOT != 0,
+        close_combat: tags & ts_plugin_api::kill::CLOSE_COMBAT != 0,
+        kung_fu: tags & ts_plugin_api::kill::KUNG_FU != 0,
+    });
+    combat(s, a, e, &ev);
+}
+
+/// `player_stunt`: for the bots' opponent model.
+pub(crate) fn stunt(s: &mut State, a: Api, e: Engine, player: i32) {
+    let Ok(player) = u32::try_from(player) else { return };
+    let reps = s.rep_ids();
+    let w = HostWorld::new(a, e);
+    let mut g = globals!(s, &reps);
+    s.bots.player_stunt(&mut g, &w, player);
 }
 
 /// `sound`: `pfnEmitSound`'s part for the bots.

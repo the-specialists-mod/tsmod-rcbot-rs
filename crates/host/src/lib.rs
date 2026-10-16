@@ -34,7 +34,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
-use ts_plugin_api::{BotBackend, BotCmd, INVALID, LoadInfo, OK, Plugin, PluginApi, VERSION, log};
+use ts_plugin_api::{BotBackend, BotCmd, INVALID, KillInfo, LoadInfo, OK, Plugin, PluginApi, VERSION, log};
 use world::{EngineRandom, HostWorld};
 
 /// The bot backend name this plugin registers (`ts_bot_backend rcbot`).
@@ -50,8 +50,10 @@ static PENDING: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 enum Event {
     PutInServer(i32, bool),
     Disconnect(i32),
-    Damaged(i32, i32),
+    Damaged(i32, i32, i32, f32, i32, f32),
     Killed(i32, i32),
+    KillScored(KillInfo),
+    Stunt(i32),
     Sound(i32, Option<Vector>, f32, String),
     Say(i32, Vec<String>),
 }
@@ -158,8 +160,12 @@ fn drain(s: &mut State, a: Api, e: Engine) {
         match ev {
             Event::PutInServer(i, is_bot) => bots::put_in_server(s, e, i, is_bot),
             Event::Disconnect(i) => bots::disconnect(s, a, e, i),
-            Event::Damaged(victim, attacker) => damaged(s, e, victim, attacker),
+            Event::Damaged(victim, attacker, inflictor, damage, bits, health) => {
+                damaged(s, a, e, victim, attacker, inflictor, damage, bits, health)
+            }
             Event::Killed(victim, killer) => bots::killed(s, a, e, victim, killer),
+            Event::KillScored(k) => bots::kill_scored(s, a, e, &k),
+            Event::Stunt(player) => bots::stunt(s, a, e, player),
             Event::Sound(entity, origin, volume, sample) => bots::sound(s, a, e, entity, origin, volume, &sample),
             Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
@@ -217,6 +223,8 @@ const DESCRIPTOR: Plugin = Plugin {
     player_damaged: Some(player_damaged),
     player_killed: Some(player_killed),
     sound: Some(sound),
+    kill_scored: Some(kill_scored),
+    player_stunt: Some(player_stunt),
     ..Plugin::EMPTY
 };
 
@@ -253,6 +261,16 @@ extern "C" fn game_init() {
     }
     if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::data::TS_WEAPONS_FILE)) {
         learned.load_ts_weapons(&b);
+    }
+    if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::weapon_stats::GLOBAL_FILE)) {
+        learned.weapon_prior.load(&String::from_utf8_lossy(&b));
+    }
+    if let Ok(b) = std::fs::read(data_dir.join(rcbot::learn::loadout::GLOBAL_FILE)) {
+        learned.loadout_prior.load(&String::from_utf8_lossy(&b));
+    }
+    let players = data_dir.join(rcbot::config::BOT_PROFILES_FOLDER).join(rcbot::learn::opponents::PLAYERS_FILE);
+    if let Ok(b) = std::fs::read(players) {
+        learned.opponents.load(&String::from_utf8_lossy(&b));
     }
     config.mod_folder = "ts".into();
     let mut state = State {
@@ -327,6 +345,8 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
         s.squads.clear();
         s.botcam.clear();
         commands::load_waypoints(s, a, e);
+        bots::load_heatmap(s);
+        s.learned.opponents.new_map();
         // `CBotGlobals::MapInit`.
         s.map_init_time = e.time();
         s.rejoin_time = e.time();
@@ -621,19 +641,51 @@ pub(crate) fn player_say(player: i32, args: Vec<String>) {
     with_state(Some(Event::Say(player, args.clone())), |s, a, e| bots::say_command(s, a, e, player, &args));
 }
 
-/// `BotEvent(BOT_EVENT_HURT)`: the bot looks toward who hurt it.
-fn damaged(s: &mut State, e: Engine, victim: i32, attacker: i32) {
+/// `BotEvent(BOT_EVENT_HURT)`: the bot looks toward who hurt it; then every field of the
+/// damage goes to the bots' combat ledgers (design §4).
+#[allow(clippy::too_many_arguments)] // the callback's fields
+fn damaged(s: &mut State, a: Api, e: Engine, victim: i32, attacker: i32, inflictor: i32, damage: f32, bits: i32, health: f32) {
     let from = e.edict(attacker).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin)));
     if let (Some(b), Some(from)) = (s.bots.get_mut(victim as u32), from) {
         b.hurt(u32::try_from(attacker).ok(), from, e.time());
     }
+    let ev = rcbot::learn::CombatEvent::Damage(rcbot::learn::DamageEvent {
+        victim: victim as u32,
+        attacker: attacker as u32,
+        inflictor,
+        amount: damage,
+        bits,
+        health,
+    });
+    bots::combat(s, a, e, &ev);
 }
 
-extern "C" fn player_damaged(victim: c_int, attacker: c_int, _inflictor: c_int, _damage: f32, _bits: c_int, _health: f32) {
-    if attacker <= 0 || attacker == victim {
+extern "C" fn player_damaged(victim: c_int, attacker: c_int, inflictor: c_int, damage: f32, bits: c_int, health: f32) {
+    if attacker <= 0 || attacker == victim || victim <= 0 {
         return;
     }
-    with_state(Some(Event::Damaged(victim, attacker)), |s, _, e| damaged(s, e, victim, attacker));
+    with_state(Some(Event::Damaged(victim, attacker, inflictor, damage, bits, health)), |s, a, e| {
+        damaged(s, a, e, victim, attacker, inflictor, damage, bits, health)
+    });
+}
+
+/// `kill_scored`: the death as the rules scored it (killer, weapon, headshot), for the bots'
+/// ledgers. `player_killed` still drives upstream's death events.
+unsafe extern "C" fn kill_scored(kill: *const KillInfo) {
+    if kill.is_null() {
+        return;
+    }
+    // SAFETY: a non-NULL `kill` is valid for the call; it is copied out at once.
+    let k = unsafe { *kill };
+    with_state(Some(Event::KillScored(k)), |s, a, e| bots::kill_scored(s, a, e, &k));
+}
+
+/// `player_stunt`: a player started a stunt (for the bots' opponent model).
+extern "C" fn player_stunt(player: c_int, _stunt: c_int) {
+    if player <= 0 {
+        return;
+    }
+    with_state(Some(Event::Stunt(player)), |s, a, e| bots::stunt(s, a, e, player));
 }
 
 // ---- the bot backend -------------------------------------------------------------------------------

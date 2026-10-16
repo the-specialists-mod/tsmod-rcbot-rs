@@ -12,21 +12,31 @@
 //! replays a run exactly (`tests/upstream_learn.rs` checks this against upstream's own code).
 //! `bot_enemy_cost_ga.h` is empty upstream.
 
+pub mod bandit;
 pub mod bits;
 pub mod data;
 pub mod ga;
 pub mod header;
+pub mod heatmap;
 pub mod io;
+pub mod ledger;
+pub mod loadout;
 pub mod nn;
+pub mod opponents;
 pub mod perceptron;
 pub mod som;
+pub mod store;
 pub mod values;
+pub mod weapon_stats;
 
 pub use bits::Bits;
 pub use data::{BotLearnedData, GlobalLearnedData};
 pub use ga::{Ga, GaValue, Individual, Population, PopulationMember, Selection};
+pub use heatmap::Heatmap;
 pub use io::Reader;
+pub use ledger::{CombatEvent, DamageEvent, KillEvent, Ledger, LedgerEntry};
 pub use nn::{Nn, NnGaTrained, NnLayer, TrainSet};
 pub use perceptron::Perceptron;
 pub use som::Som;
 pub use values::{BitsGaValues, BotGaValues, CombatFitnessMetrics, IntGaValues};
+pub use weapon_stats::WeaponStats;

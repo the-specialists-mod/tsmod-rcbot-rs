@@ -7,6 +7,7 @@
 use super::events::BOT_HEAR_DISTANCE;
 use super::{Bot, BotEvent, BotGlobals, BotWorld, Entity, Frame, OtherBot, SoundKind, SquadOrder, cond};
 use crate::config::MAX_PLAYERS;
+use crate::learn::ledger::CombatEvent;
 use crate::{Random, Vector};
 
 /// A bot slot: the bot and the frame it produced.
@@ -103,6 +104,7 @@ impl BotManager {
         // Every bot as the others see it, built once and kept up to date as each one runs (the
         // bots before it this frame are seen as they are now, as upstream's loop sees them).
         let mut all: Vec<(u32, OtherBot)> = self.iter().map(|b| (b.index, Self::other(b))).collect();
+        self.refresh_player_keys(g);
         for i in indices {
             self.apply_squad_orders(g);
             g.other_bots.clear();
@@ -195,6 +197,96 @@ impl BotManager {
                 b.event(g, w, BotEvent::HearTeammateDie(v.handle()), rng);
             }
         }
+    }
+
+    /// The host's damage and kill events (`player_damaged`, `kill_scored`; port addition, design
+    /// §4): the bots that dealt or took it record it.
+    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
+        self.refresh_player_keys(g);
+        self.update_heatmap(g, w, ev);
+        self.update_opponents(g, w, ev);
+        // Every bot hears it: those who dealt or took it keep it, one whose opponent died ends
+        // its fight.
+        for bot in self.iter_mut() {
+            bot.combat_event(g, w, ev, rng);
+        }
+    }
+
+    /// The opponent model: hits on bots and kills of bots by each player, and players' deaths
+    /// to bots (any backend's bots).
+    fn update_opponents(&self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+        let is_bot = |i: u32| w.entity(i).and_then(|e| e.player).is_some_and(|p| p.is_bot) || self.get(i).is_some();
+        let keys = &g.learned.player_keys;
+        match *ev {
+            CombatEvent::Damage(d) => {
+                let (Some(key), Some(a), Some(v)) = (keys.get(d.attacker), w.entity(d.attacker), w.entity(d.victim)) else { return };
+                if d.attacker != d.victim && is_bot(d.victim) {
+                    let weapon = a.player.map_or(-1, |p| p.weapon);
+                    g.learned.opponents.observe_hit_on_bot(key, weapon, (a.origin - v.origin).length(), d.amount);
+                }
+            }
+            CombatEvent::Kill(k) => {
+                if k.killer == 0 || k.killer == k.victim {
+                    return;
+                }
+                if let Some(key) = keys.get(k.killer).filter(|_| is_bot(k.victim)) {
+                    g.learned.opponents.observe_kill_of_bot(key);
+                }
+                if let Some(key) = keys.get(k.victim).filter(|_| is_bot(k.killer)) {
+                    g.learned.opponents.observe_death_to_bot(key);
+                }
+            }
+        }
+    }
+
+    /// The host's `player_stunt`: a player started a stunt (for the opponent model).
+    pub fn player_stunt(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, player: u32) {
+        self.refresh_player_keys(g);
+        if let Some(key) = g.learned.player_keys.get(player) {
+            g.learned.opponents.observe_stunt(key, w.time());
+        }
+    }
+
+    /// The waypoint a player is at (a bot's current one, else the nearest to its origin) and
+    /// its rules team.
+    fn player_waypoint(&self, g: &BotGlobals<'_>, w: &dyn BotWorld, index: u32) -> Option<(usize, i32)> {
+        let e = w.entity(index)?;
+        let team = e.player.map_or(0, |p| p.team);
+        let own = self.get(index).and_then(|b| usize::try_from(b.current_waypoint).ok());
+        let opts = crate::nav::NearestOptions { visible: false, unreachable: true, ..crate::nav::NearestOptions::default() };
+        let wpt = own.or_else(|| g.waypoints.nearest_waypoint(e.origin, crate::nav::REACHABLE_RANGE, None, opts, &[], w))?;
+        Some((wpt, team))
+    }
+
+    /// The map's heatmap: a death at the victim's waypoint, a kill at the killer's, damage taken
+    /// at the victim's.
+    fn update_heatmap(&self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+        if g.learned.heatmap.is_empty() {
+            return;
+        }
+        match *ev {
+            CombatEvent::Damage(d) => {
+                if let Some((wpt, team)) = self.player_waypoint(g, w, d.victim) {
+                    g.learned.heatmap.add_damage(wpt, team, d.amount);
+                }
+            }
+            CombatEvent::Kill(k) => {
+                if let Some((wpt, team)) = self.player_waypoint(g, w, k.victim) {
+                    g.learned.heatmap.add_death(wpt, team);
+                }
+                if k.killer != 0
+                    && k.killer != k.victim
+                    && let Some((wpt, team)) = self.player_waypoint(g, w, k.killer)
+                {
+                    g.learned.heatmap.add_kill(wpt, team);
+                }
+            }
+        }
+    }
+
+    /// Who each player is for the learners: RCBot's bots by profile, the rest by reputation id.
+    fn refresh_player_keys(&self, g: &mut BotGlobals<'_>) {
+        g.learned.player_keys.refresh(g.rep_ids, self.iter().map(|b| (b.index, b.profile.profile_id)));
     }
 
     /// `pfnEmitSound`'s loop: every bot without an enemy within [`BOT_HEAR_DISTANCE`] of the

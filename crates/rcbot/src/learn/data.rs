@@ -13,9 +13,13 @@
 
 use super::ga::{Ga, Individual};
 use super::header::LearnedHeader;
+use super::heatmap::Heatmap;
 use super::io::Reader;
+use super::loadout::LoadoutBandit;
+use super::opponents::{OpponentModel, PlayerKeys};
 use super::perceptron::Perceptron;
 use super::values::{BotGaValues, IntGaValues};
+use super::weapon_stats::WeaponStats;
 use crate::Random;
 use crate::nav::rcz;
 
@@ -319,11 +323,29 @@ pub struct GlobalLearnedData {
     pub enemy_costs: [Ga<BotGaValues>; MAX_TEAMS],
     /// `m_TSWeaponChoices`: breeds [`BotLearnedData::ts_weapon_select`] (`CGA()`, 16).
     pub ts_weapon_choices: Ga<BotGaValues>,
+    /// Who each player slot is, for the port's learners (design §4).
+    pub player_keys: PlayerKeys,
+    /// Every bot's weapon-by-range results together: the prior each bot's own shrinks toward.
+    pub weapon_prior: WeaponStats,
+    /// Where players die, kill from and get hurt on this map.
+    pub heatmap: Heatmap,
+    /// Every bot's loadout estimates together: the prior each bot's own shrinks toward.
+    pub loadout_prior: LoadoutBandit,
+    /// What the bots know of the players they met.
+    pub opponents: OpponentModel,
 }
 
 impl Default for GlobalLearnedData {
     fn default() -> Self {
-        GlobalLearnedData { enemy_costs: std::array::from_fn(|_| Ga::new(0)), ts_weapon_choices: Ga::new(0) }
+        GlobalLearnedData {
+            enemy_costs: std::array::from_fn(|_| Ga::new(0)),
+            ts_weapon_choices: Ga::new(0),
+            player_keys: PlayerKeys::default(),
+            weapon_prior: WeaponStats::default(),
+            heatmap: Heatmap::default(),
+            loadout_prior: LoadoutBandit::default(),
+            opponents: OpponentModel::default(),
+        }
     }
 }
 
