@@ -12,6 +12,7 @@
 //! replays a run exactly (`tests/upstream_learn.rs` checks this against upstream's own code).
 //! `bot_enemy_cost_ga.h` is empty upstream.
 
+pub mod bandit;
 pub mod bits;
 pub mod data;
 pub mod ga;
@@ -19,6 +20,7 @@ pub mod header;
 pub mod io;
 pub mod ledger;
 pub mod nn;
+pub mod opponents;
 pub mod perceptron;
 pub mod som;
 pub mod store;

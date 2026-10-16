@@ -14,6 +14,7 @@
 use super::ga::{Ga, Individual};
 use super::header::LearnedHeader;
 use super::io::Reader;
+use super::opponents::PlayerKeys;
 use super::perceptron::Perceptron;
 use super::values::{BotGaValues, IntGaValues};
 use crate::Random;
@@ -319,11 +320,17 @@ pub struct GlobalLearnedData {
     pub enemy_costs: [Ga<BotGaValues>; MAX_TEAMS],
     /// `m_TSWeaponChoices`: breeds [`BotLearnedData::ts_weapon_select`] (`CGA()`, 16).
     pub ts_weapon_choices: Ga<BotGaValues>,
+    /// Who each player slot is, for the port's learners (design §4).
+    pub player_keys: PlayerKeys,
 }
 
 impl Default for GlobalLearnedData {
     fn default() -> Self {
-        GlobalLearnedData { enemy_costs: std::array::from_fn(|_| Ga::new(0)), ts_weapon_choices: Ga::new(0) }
+        GlobalLearnedData {
+            enemy_costs: std::array::from_fn(|_| Ga::new(0)),
+            ts_weapon_choices: Ga::new(0),
+            player_keys: PlayerKeys::default(),
+        }
     }
 }
 

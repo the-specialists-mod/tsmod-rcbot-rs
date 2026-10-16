@@ -361,10 +361,11 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   (move sequences pressed as TS reads them: fresh or held `+attack`/`+attack2`, with `+duck`,
   `+back`, crouch jumps (`+jump` `+duck`), a run-up flying kick, and wall jumps (`+alt1` facing a
   wall with the opponent behind) into the back kick or, turning in the air, the flying kick).
-  Combos are scored the same way; every 5 the worst well-tried one is replaced by a crossover or
-  mutation of the best. What it learned is saved per profile in `botprofiles/<id>.rkf` (text:
-  `rcbot-kungfu 1`, `stance`, `reaction`, `combo <value> <uses> <move codes>`), beside the
-  byte-compatible `.rld`. While a wall jump turns its back to the opponent, the bot keeps it seen
+  Combos are scored per second and tried by UCB1; every 20 a crossover or mutation of the best
+  is bred (see the learning entries below). What it learned is saved per profile in
+  `botprofiles/<id>.rkf` (text: `rcbot-kungfu 2`, `stance all|<class> <value> <count>...`,
+  `reaction all|<kind> <value> <count>...`, `combo <value> <uses> <move codes>`; version 1 files
+  still load), beside the byte-compatible `.rld`. While a wall jump turns its back to the opponent, the bot keeps it seen
   if the line is clear. Unarmed against a gun more than 220 units away it takes out a gun with
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
@@ -415,6 +416,21 @@ bot and each opponent; upstream's objects still load and save byte for byte.
   between the bot and that opponent; a decision gets `exp(-dt / 1 s)`-discounted credit for what
   follows it. API: `Ledger::reward_since(t, opponent)`, `dealt_since`, `taken_since`, `credit`,
   `episode`; `Bot::ledger()`. `player_killed` still drives upstream's death events.
+* **Kung fu rewards** (`bot/kungfu.rs`, `learn/bandit.rs`): every score comes from the ledger
+  (damage between the bot and this opponent only; health deltas mixed in third parties).
+  Whatever is open when the fight ends is settled: +2 a kill, -2 a death (also when the bot's
+  first dead think comes before the kill is scored), what it earned so far when broken off
+  (another opponent, the opponent hidden or killed by someone else, a respawn); nothing is scored
+  twice. Answers are scored only for attacks the bot saw (a predicted one used to earn a free +1),
+  against a fifth answer, not reacting, which is the baseline (an offensive bot mid-combo takes
+  it); a block also pays 0.3 for its 33 power. Combo rewards are per second (at least 0.5 s).
+  Combos are chosen by UCB1 among those that fit now (upstream-style 12% blind exploration is
+  gone); a child starts at its parent's mean with 0 runs, which UCB1 tries first. Breeding every 20
+  combos; a full pool replaces only a combo run 8 times or more, outside the best 3, whose upper
+  bound is below the best's lower bound. Answers are learned per attack kind (punch, kick, low,
+  air, back), stances per opponent class (human or bot × attacking at least every 1.2 s or not),
+  each blended from this opponent (per map) into its class into the profile, shrunk by count (3
+  samples); counts decay 1% a fight and human fights weigh 2.5.
 
 ## 5. Upstream bugs found
 
@@ -663,7 +679,11 @@ those by going through the port's own code when that code is ported.
   none with a full clip or no reserve; an empty gun dropped once for kung fu; cover from a far
   gunman; blocks, ducks and steps against a punching opponent, with strikes back and learning;
   the run-up crouch-jump flying kick and the wall-jump back kick in a world with jumps and TS's
-  wall jump; `.rkf` round trip and damaged files; combos bred from the best.
+  wall jump; `.rkf` round trip (version 2, version 1 files, damaged files); combos bred from the
+  best, a full pool keeping combos not yet proven worse and the best; untried fitting combos first;
+  answers scored from the ledger (only the opponent's damage, a block's cost, predicted attacks
+  unscored, a death -2); estimates blended opponent → class → profile with human weight and decay;
+  a fight settled +2 by a kill and -2 by a death, once.
 
 * **Unit tests** in each module: path slots and the cursor, the searches (nearest waypoint and
   nearest entity, traced nearest first, against upstream's loop on random worlds with walls), buckets and cover, the

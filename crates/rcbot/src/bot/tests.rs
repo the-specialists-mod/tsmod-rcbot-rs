@@ -1067,8 +1067,26 @@ fn kung_fu_answers_attacks_and_strikes_back() {
     assert!(attacks > 3, "attacks {attacks}");
     // It scored what it did.
     let k = &rig.bot.kungfu;
-    assert!(k.reaction_value.iter().any(|&v| v != 0.0), "{:?}", k.reaction_value);
+    assert!(k.reaction_all.iter().any(|a| a.n > 0.0), "{:?}", k.reaction_all);
     assert!(k.combos.iter().any(|c| c.uses > 0));
+}
+
+#[test]
+fn a_kung_fu_fight_is_settled_by_how_it_ends() {
+    // A kill scores the open stance +2; a death -2.
+    for (ev, want) in [(kill(1, 2, 0), 2.0), (kill(2, 1, 0), -2.0)] {
+        let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 200.0);
+        let mut rng = XorShiftRandom::new(5);
+        run(&mut rig, &mut w, &mut rng, 10, |_, _| {});
+        assert_eq!(rig.bot.kungfu.opponent(), Some(2));
+        rig.with(|b, g| b.combat_event(g, &w, &ev, &mut rng));
+        let k = &rig.bot.kungfu;
+        assert!(k.stance_all.iter().any(|a| a.value == want && a.n > 0.0), "{:?}", k.stance_all);
+        // Settled once: the fight going on doesn't score it again.
+        let before = k.stance_all;
+        rig.with(|b, g| b.combat_event(g, &w, &ev, &mut rng));
+        assert_eq!(rig.bot.kungfu.stance_all, before);
+    }
 }
 
 /// A kung fu bot that knows only `moves`, against a passive kung fu opponent at `x`, with the
@@ -1325,9 +1343,10 @@ fn the_ledger_keeps_what_passed_with_each_opponent() {
     let mut rig = Rig::new(Config::default());
     let w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0), player(3, Vector::new(0.0, 800.0, 0.0), 0)]);
     arm(&w, 3, 5, 30, 60);
+    let mut rng = XorShiftRandom::new(1);
     rig.with(|b, g| {
         for ev in [damage(2, 1, 30.0), damage(1, 3, 50.0), damage(3, 2, 10.0), kill(1, 2, 1)] {
-            b.combat_event(g, &w, &ev);
+            b.combat_event(g, &w, &ev, &mut rng);
         }
     });
     let l = rig.bot.ledger();
@@ -1339,7 +1358,7 @@ fn the_ledger_keeps_what_passed_with_each_opponent() {
     assert_eq!(e, [(2, 1, 2), (3, 5, 4), (2, 1, 2)]);
     // The kill closed the fight with 2; the one with 3 is open.
     assert!(l.episode(2).is_none() && l.episode(3).is_some());
-    rig.with(|b, g| b.combat_event(g, &w, &kill(3, 1, 5)));
+    rig.with(|b, g| b.combat_event(g, &w, &kill(3, 1, 5), &mut rng));
     assert!(rig.bot.ledger().open_episodes().is_empty());
     assert_eq!(rig.bot.ledger().closed_episodes().last().map(|e| e.reward()), Some(-1.5));
 }

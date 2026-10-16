@@ -104,6 +104,7 @@ impl BotManager {
         // Every bot as the others see it, built once and kept up to date as each one runs (the
         // bots before it this frame are seen as they are now, as upstream's loop sees them).
         let mut all: Vec<(u32, OtherBot)> = self.iter().map(|b| (b.index, Self::other(b))).collect();
+        self.refresh_player_keys(g);
         for i in indices {
             self.apply_squad_orders(g);
             g.other_bots.clear();
@@ -200,16 +201,18 @@ impl BotManager {
 
     /// The host's damage and kill events (`player_damaged`, `kill_scored`; port addition, design
     /// §4): the bots that dealt or took it record it.
-    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
-        let (a, b) = match *ev {
-            CombatEvent::Damage(d) => (d.attacker, d.victim),
-            CombatEvent::Kill(k) => (k.killer, k.victim),
-        };
-        for i in if a == b { vec![a] } else { vec![a, b] } {
-            if let Some(bot) = self.get_mut(i) {
-                bot.combat_event(g, w, ev);
-            }
+    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
+        self.refresh_player_keys(g);
+        // Every bot hears it: those who dealt or took it keep it, one whose opponent died ends
+        // its fight.
+        for bot in self.iter_mut() {
+            bot.combat_event(g, w, ev, rng);
         }
+    }
+
+    /// Who each player is for the learners: RCBot's bots by profile, the rest by reputation id.
+    fn refresh_player_keys(&self, g: &mut BotGlobals<'_>) {
+        g.learned.player_keys.refresh(g.rep_ids, self.iter().map(|b| (b.index, b.profile.profile_id)));
     }
 
     /// `pfnEmitSound`'s loop: every bot without an enemy within [`BOT_HEAR_DISTANCE`] of the

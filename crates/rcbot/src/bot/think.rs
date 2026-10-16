@@ -162,6 +162,8 @@ impl Bot {
         self.switch_pending = None;
         self.next_inventory_sync = 0.0;
         self.next_reload_time = 0.0;
+        let now = self.now;
+        self.kf_settle(g, now, super::kungfu::FightEnd::Broken, rng);
         self.kungfu.reset_fight();
         self.last_enemy = None;
         self.last_failed_waypoint = -1;
@@ -250,7 +252,7 @@ impl Bot {
                 let team_score_since = g.team_scores[team] - self.prev_team_score;
                 self.prev_team_score = g.team_scores[team];
                 let fitness = BotLearnedData::death_fitness(survival, frags_since, team_score_since);
-                self.learn_on_death(g, now);
+                self.learn_on_death(g, now, rng);
                 let used_melee = self.used_melee;
                 self.learned.on_death(fitness, used_melee, &mut g.learned.ts_weapon_choices, &mut g.learned.enemy_costs[team], rng);
                 self.spawn_init(g, rng);

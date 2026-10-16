@@ -6,8 +6,13 @@
 //! survival and the personal genes at once. The ledger instead knows what passed between the bot
 //! and each opponent, when, with which weapon and at what range.
 
+use super::kungfu::FightEnd;
 use super::{Bot, BotGlobals, BotWorld};
+use crate::Random;
 use crate::learn::ledger::{CombatEvent, DamageEvent, KillEvent, Ledger, LedgerEntry, range_bin};
+
+/// Seconds after its last think in which a kung fu fight still counts as under way when it ends.
+const FIGHT_RECENT: f32 = 1.0;
 
 /// What a bot's learners keep beside upstream's `.rld` objects.
 #[derive(Clone, Debug, Default)]
@@ -34,22 +39,25 @@ impl Bot {
         w.entity(attacker).and_then(|e| e.player).map_or(-1, |p| p.weapon)
     }
 
-    /// A damage or kill event the bot was part of (the host reports every one; the bot keeps
-    /// those it dealt or took).
-    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent) {
+    /// A damage or kill event (the host reports every one): the bot keeps those it dealt or
+    /// took, and a kill that ends its kung fu fight settles it.
+    pub fn combat_event(&mut self, g: &mut BotGlobals<'_>, w: &dyn BotWorld, ev: &CombatEvent, rng: &mut dyn Random) {
         let now = w.time();
         let me = self.index;
-        let dist_to = |other: u32| w.entity(other).map_or(0.0, |e| (e.origin - self.me.origin).length());
-        let entry = |other: u32, weapon: i32| LedgerEntry {
-            time: now,
-            other,
-            weapon,
-            dealt: 0.0,
-            taken: 0.0,
-            kill: false,
-            death: false,
-            range_bin: range_bin(if other == 0 { 0.0 } else { dist_to(other) }) as u8,
-            waypoint: self.current_waypoint,
+        let (my_origin, my_waypoint) = (self.me.origin, self.current_waypoint);
+        let entry = |other: u32, weapon: i32| {
+            let dist = if other == 0 { 0.0 } else { w.entity(other).map_or(0.0, |e| (e.origin - my_origin).length()) };
+            LedgerEntry {
+                time: now,
+                other,
+                weapon,
+                dealt: 0.0,
+                taken: 0.0,
+                kill: false,
+                death: false,
+                range_bin: range_bin(dist) as u8,
+                waypoint: my_waypoint,
+            }
         };
         match *ev {
             CombatEvent::Damage(DamageEvent { victim, attacker, inflictor, amount, .. }) => {
@@ -69,9 +77,21 @@ impl Bot {
                     self.learning.ledger.record(LedgerEntry { death: true, ..entry(other, weapon) });
                     self.learning.ledger.close_all();
                 }
+                // The fight ends with the opponent's death (by anyone) or the bot's.
+                if self.kungfu.opponent() == Some(victim) || victim == me {
+                    let end = if !self.kungfu.fighting(now, FIGHT_RECENT) {
+                        FightEnd::Broken
+                    } else if victim == me {
+                        FightEnd::Death
+                    } else if killer == me {
+                        FightEnd::Kill
+                    } else {
+                        FightEnd::Broken
+                    };
+                    self.kf_settle(g, now, end, rng);
+                }
             }
         }
-        let _ = g;
     }
 
     /// Every think while alive, after the tasks ran: the episode with the enemy stays open,
@@ -88,10 +108,13 @@ impl Bot {
         let _ = g;
     }
 
-    /// The bot died (its first think dead): the life's learners are settled.
-    pub(crate) fn learn_on_death(&mut self, g: &mut BotGlobals<'_>, now: f32) {
+    /// The bot died (its first think dead, which may come before the kill is scored): the
+    /// life's learners are settled; a kung fu fight under way was lost.
+    pub(crate) fn learn_on_death(&mut self, g: &mut BotGlobals<'_>, now: f32, rng: &mut dyn Random) {
+        if self.kungfu.fighting(now, FIGHT_RECENT) {
+            self.kf_settle(g, now, FightEnd::Death, rng);
+        }
         self.learning.ledger.close_all();
         self.learning.life_start = 0.0;
-        let _ = (g, now);
     }
 }

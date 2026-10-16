@@ -326,8 +326,9 @@ pub(crate) fn killed(s: &mut State, a: Api, e: Engine, victim: i32, killer: i32)
 pub(crate) fn combat(s: &mut State, a: Api, e: Engine, ev: &rcbot::learn::CombatEvent) {
     let reps = s.rep_ids();
     let w = HostWorld::new(a, e);
+    let mut rng = EngineRandom(e);
     let mut g = globals!(s, &reps);
-    s.bots.combat_event(&mut g, &w, ev);
+    s.bots.combat_event(&mut g, &w, ev, &mut rng);
 }
 
 /// `kill_scored`: the rules' view of a death (its killer, weapon and tags).
