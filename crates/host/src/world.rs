@@ -109,6 +109,10 @@ impl BotWorld for HostWorld {
         ent.groundentity = (!ground.is_null()).then(|| self.eng.index_of(ground)).and_then(|i| u32::try_from(i).ok());
         ent.owner = (!owner.is_null()).then(|| self.eng.index_of(owner)).and_then(|i| u32::try_from(i).ok());
         if index >= 1 && index <= self.max_clients() {
+            // A player's handle is its user id, not the edict's serial number: the engine keeps
+            // a client slot's edict (and its serial) for the next player in it, who must not
+            // inherit the last one's enemies, tasks or squad (`EntRef`).
+            ent.serial = self.eng.user_id_of(e);
             ent.player = self.api.player_info(index as i32).map(|p| PlayerState {
                 joined: p.joined != 0,
                 alive: p.alive != 0,

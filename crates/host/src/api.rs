@@ -652,7 +652,12 @@ impl Engine {
 
     /// `GETPLAYERUSERID`.
     pub fn user_id(&self, player: i32) -> i32 {
-        let (Some(f), Some(e)) = (self.f.pfnGetPlayerUserId, self.edict(player)) else { return -1 };
+        self.edict(player).map_or(-1, |e| self.user_id_of(e))
+    }
+
+    /// `GETPLAYERUSERID` of an edict: -1 for one that isn't a client's.
+    pub fn user_id_of(&self, e: Edict) -> i32 {
+        let Some(f) = self.f.pfnGetPlayerUserId else { return -1 };
         // SAFETY: a live edict.
         unsafe { f(e.0) }
     }

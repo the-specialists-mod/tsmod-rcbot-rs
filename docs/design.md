@@ -367,6 +367,10 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   rounds or takes cover instead of running at it.
 * **Crouch jumps**: the low-obstacle hop in `ScanFOV` is `JumpAndDuck` (upstream: `Jump`), as
   the stuck and jump-waypoint jumps already are.
+* **Handles on players** (`MyEHandle`, `EntRef`) use the player's user id
+  (`GETPLAYERUSERID`) instead of the edict's serial number, which a client slot keeps for the next
+  player in it: a player joining in a slot someone left doesn't inherit bots' enemy, task,
+  squad and remembered-position handles on the one before.
 * **Teleports**: when the game sets a bot's view (`fixangle` 1: a spawn or a teleport) or the bot
   moves more than 256 units in a frame, it drops its current and previous waypoints, its path
   and its stuck timers (`Bot::teleported`), and starts again from its nearest waypoint;
