@@ -57,6 +57,7 @@ enum Event {
     Sound(i32, Option<Vector>, f32, String),
     Touch(i32, i32),
     Fired(i32, Vector, bool),
+    Pickup(i32, i32),
     Say(i32, Vec<String>),
 }
 
@@ -171,6 +172,7 @@ fn drain(s: &mut State, a: Api, e: Engine) {
             Event::Sound(entity, origin, volume, sample) => bots::sound(s, a, e, entity, origin, volume, &sample),
             Event::Touch(bot, other) => bots::touch(s, a, e, bot, other),
             Event::Fired(player, origin, silenced) => bots::weapon_fired(s, a, e, player, origin, silenced),
+            Event::Pickup(player, entity) => bots::item_pickup(s, a, e, player, entity),
             Event::Say(player, args) => bots::say_command(s, a, e, player, &args),
         }
     }
@@ -231,6 +233,7 @@ const DESCRIPTOR: Plugin = Plugin {
     player_stunt: Some(player_stunt),
     entity_touch: Some(entity_touch),
     weapon_fired: Some(weapon_fired),
+    item_pickup: Some(item_pickup),
     ..Plugin::EMPTY
 };
 
@@ -737,6 +740,15 @@ unsafe extern "C" fn weapon_fired(player: c_int, _weapon: c_int, origin: *const 
     let origin = Vector::from(unsafe { *origin.cast::<[f32; 3]>() });
     let silenced = silenced != 0;
     with_state(Some(Event::Fired(player, origin, silenced)), |s, a, e| bots::weapon_fired(s, a, e, player, origin, silenced));
+}
+
+/// `item_pickup`: `player` took `entity` (a ground weapon, power-up or dropped gun; `entity` may
+/// be free by now).
+extern "C" fn item_pickup(player: c_int, entity: c_int, _kind: c_int, _id: c_int) {
+    if player <= 0 || entity <= 0 {
+        return;
+    }
+    with_state(Some(Event::Pickup(player, entity)), |s, a, e| bots::item_pickup(s, a, e, player, entity));
 }
 
 /// `player_stunt`: a player started a stunt (for the bots' opponent model).

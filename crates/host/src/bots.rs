@@ -423,6 +423,13 @@ pub(crate) fn touch(s: &mut State, a: Api, e: Engine, bot: i32, other: i32) {
     s.bots.touch(&g, &w, bot, &touched, &mut rng);
 }
 
+/// `item_pickup`: a player took an item (the bots that saw it, or took it, count it gone).
+pub(crate) fn item_pickup(s: &mut State, a: Api, e: Engine, player: i32, entity: i32) {
+    let (Ok(player), Ok(entity)) = (u32::try_from(player), u32::try_from(entity)) else { return };
+    let w = HostWorld::new(a, e);
+    s.bots.item_pickup(&w, player, entity);
+}
+
 /// `weapon_fired`: a shot the bots may hear.
 pub(crate) fn weapon_fired(s: &mut State, a: Api, e: Engine, player: i32, origin: Vector, silenced: bool) {
     let Ok(player) = u32::try_from(player) else { return };

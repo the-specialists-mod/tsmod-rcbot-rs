@@ -4,6 +4,12 @@
 //! the vision pass), whether it could take it or not, and pressed use on it for 10 s, every time.
 //! An experienced player knows where the items spawn, which of them it can carry, and when one it
 //! saw taken comes back. [`ItemMemory`] keeps that per bot.
+//!
+//! What a bot may know (design §4): every item's place and kind from the map's start, as a player
+//! who knows the map does (the game's item list, [`BotWorld::map_items`](super::BotWorld::map_items)); whether one is there
+//! only from seeing it, or from seeing it taken (its own pickup, or another player's in its view:
+//! then the game's respawn time is what such a player would count), and otherwise from the
+//! respawn times it learned.
 
 use super::{BotWorld, EF_NODRAW, EntRef, Entity, ItemKind};
 use crate::Vector;
@@ -19,7 +25,7 @@ pub(crate) const UNTAKEABLE_FOR: f32 = 30.0;
 /// An item still there this long after the bot touched it is one the game won't give it.
 const TAKE_TIME: f32 = 2.0;
 /// The bot sees whether an item is there this far away (with a clear line).
-const SEE_ITEM_RANGE: f32 = 1200.0;
+pub(crate) const SEE_ITEM_RANGE: f32 = 1200.0;
 
 /// An item the bot knows of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,12 +90,20 @@ impl ItemMemory {
         self.get(h).is_some_and(|i| i.ignore_until > now)
     }
 
-    /// Learns the map's items (every few seconds; items removed from the map are forgotten).
+    /// Learns the map's items (every few seconds; items removed from the map are forgotten): from
+    /// the game's list when the world has one (places and kinds only), else by class name.
     pub fn scan(&mut self, w: &dyn BotWorld, now: f32) {
         if self.next_scan > now {
             return;
         }
         self.next_scan = now + SCAN_INTERVAL;
+        if let Some(list) = w.map_items() {
+            self.items.retain(|k| list.iter().any(|m| m.handle == k.handle));
+            for m in list.iter().filter(|m| matches!(m.kind, ItemKind::GroundWeapon | ItemKind::Powerup)) {
+                self.learn_item(m.handle, m.origin, m.kind, m.weapon, m.powerup);
+            }
+            return;
+        }
         let live: Vec<Entity> = w.items().into_iter().filter_map(|i| w.entity(i)).collect();
         self.items.retain(|k| {
             live.iter().any(|e| e.handle() == k.handle) || w.entity(k.handle.index).is_some_and(|e| e.serial == k.handle.serial)
@@ -101,17 +115,22 @@ impl ItemMemory {
 
     /// Learns an item the bot sees or was told of (not one it knows already).
     pub fn learn(&mut self, e: &Entity) {
-        if self.get(e.handle()).is_some() {
+        let Some(info) = e.item.filter(|i| matches!(i.kind, ItemKind::GroundWeapon | ItemKind::Powerup)) else { return };
+        self.learn_item(e.handle(), e.entity_origin(), info.kind, info.weapon, info.powerup);
+    }
+
+    /// Learns an item's place and kind (not one it knows already).
+    fn learn_item(&mut self, handle: EntRef, origin: Vector, kind: ItemKind, weapon: i32, powerup: i32) {
+        if self.get(handle).is_some() {
             return;
         }
-        let Some(info) = e.item.filter(|i| matches!(i.kind, ItemKind::GroundWeapon | ItemKind::Powerup)) else { return };
-        let respawn = if info.kind == ItemKind::Powerup { DEFAULT_POWERUP_RESPAWN } else { DEFAULT_WEAPON_RESPAWN };
+        let respawn = if kind == ItemKind::Powerup { DEFAULT_POWERUP_RESPAWN } else { DEFAULT_WEAPON_RESPAWN };
         self.items.push(KnownItem {
-            handle: e.handle(),
-            origin: e.entity_origin(),
-            kind: info.kind,
-            weapon: info.weapon,
-            powerup: info.powerup,
+            handle,
+            origin,
+            kind,
+            weapon,
+            powerup,
             // Not seen yet: assume it is there (the map starts with every item).
             available_at: 0.0,
             gone_seen: 0.0,
@@ -169,6 +188,22 @@ impl ItemMemory {
         } else if k.available_at <= now {
             // Still not back: give it a while longer.
             k.available_at = now + k.respawn * 0.5;
+        }
+    }
+
+    /// The bot saw `index` taken at `now` (its own pickup, or another player's in its view): gone
+    /// until the game's respawn time when it gives one (what a player who knows the map's respawn
+    /// times counts from the pickup it saw, and the respawn time it learns), else its own guess.
+    pub fn taken(&mut self, index: u32, respawn_at: Option<f32>, now: f32) {
+        let Some(k) = self.items.iter_mut().find(|i| i.handle.index == index) else { return };
+        k.touched_at = 0.0;
+        k.gone_seen = now;
+        match respawn_at.filter(|&t| t > now) {
+            Some(t) => {
+                k.respawn = t - now;
+                k.available_at = t;
+            }
+            None => k.available_at = now + k.respawn,
         }
     }
 
@@ -237,5 +272,20 @@ mod tests {
         m.untakeable(h, 5.0);
         assert!(m.ignored(h, 34.0) && !m.ignored(h, 36.0));
         assert!(!m.get(h).unwrap().there_at(10.0, 10.0));
+    }
+
+    #[test]
+    fn a_pickup_seen_counts_the_games_respawn_time() {
+        let mut m = ItemMemory::default();
+        m.items.push(item());
+        m.taken(9, Some(45.0), 15.0);
+        let k = m.get(m.items[0].handle).unwrap();
+        assert_eq!((k.available_at, k.respawn, k.gone_seen), (45.0, 30.0, 15.0));
+        // Without the game's time (a round's item): its own guess.
+        m.taken(9, None, 50.0);
+        assert_eq!(m.items[0].available_at, 80.0);
+        // Not an item it knows: nothing.
+        m.taken(3, Some(60.0), 50.0);
+        assert_eq!(m.items.len(), 1);
     }
 }

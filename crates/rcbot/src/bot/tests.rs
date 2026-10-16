@@ -29,6 +29,8 @@ struct Plane {
     highest: std::cell::Cell<u32>,
     /// How often [`BotWorld::inventory`] was asked.
     inventory_reads: std::cell::Cell<u32>,
+    /// What [`BotWorld::map_items`] answers.
+    map_items: RefCell<Option<Vec<MapItem>>>,
 }
 
 fn player(index: u32, origin: Vector, team: i32) -> Entity {
@@ -100,6 +102,9 @@ impl BotWorld for Plane {
     fn inventory(&self, _: u32) -> Option<Vec<InventoryWeapon>> {
         self.inventory_reads.set(self.inventory_reads.get() + 1);
         self.inventory.borrow().clone()
+    }
+    fn map_items(&self) -> Option<Vec<MapItem>> {
+        self.map_items.borrow().clone()
     }
     fn highest_entity(&self) -> u32 {
         match self.highest.get() {
@@ -200,6 +205,7 @@ fn setup(enemy: bool) -> (Plane, Bot, Waypoints, Weapons, WeaponPresets, GlobalL
         last_cmd: Default::default(),
         highest: Default::default(),
         inventory_reads: Default::default(),
+        map_items: Default::default(),
     };
     let config = Config::default();
     let mut rng = XorShiftRandom::new(7);
@@ -442,6 +448,7 @@ fn plane(ents: Vec<Entity>) -> Plane {
         last_cmd: Default::default(),
         highest: Default::default(),
         inventory_reads: Default::default(),
+        map_items: Default::default(),
     }
 }
 
@@ -2540,4 +2547,43 @@ fn shots_are_heard_from_the_servers_report() {
     // Too far, or a teammate.
     assert_eq!(heard(0, 1600.0, false), None);
     assert_eq!(heard(1, 500.0, false), None);
+}
+
+#[test]
+fn the_map_items_are_known_from_the_start_but_taken_ones_only_when_seen() {
+    let mut rig = Rig::new(Config::default());
+    // A power-up behind the bot (it looks along +x), out of sight, and a weapon in front of it.
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    let listed = |index: u32, x: f32, kind: ItemKind| MapItem {
+        handle: EntRef { index, serial: 3 },
+        kind,
+        weapon: if kind == ItemKind::GroundWeapon { 5 } else { 0 },
+        powerup: if kind == ItemKind::Powerup { 4 } else { 0 },
+        origin: Vector::new(x, 0.0, 0.0),
+        available: true,
+        respawn_at: 0.0,
+    };
+    let mut list = vec![listed(6, -500.0, ItemKind::Powerup), listed(7, 400.0, ItemKind::GroundWeapon), listed(8, 300.0, ItemKind::Gun)];
+    *w.map_items.borrow_mut() = Some(list.clone());
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.state = rig.bot.me.player.unwrap();
+    rig.bot.items.scan(&w, 1.0);
+    // Places and kinds of the map's items (a dropped gun isn't one).
+    let known: Vec<u32> = rig.bot.items.iter().map(|k| k.handle.index).collect();
+    assert_eq!(known, vec![6, 7]);
+    // Both are taken; the game says when they come back. The one taken out of sight is still
+    // expected; the one taken in front of the bot is gone until the game's respawn time.
+    for m in list.iter_mut().take(2) {
+        (m.available, m.respawn_at) = (false, 31.0);
+    }
+    *w.map_items.borrow_mut() = Some(list);
+    rig.bot.item_taken(&w, 3, 6);
+    rig.bot.item_taken(&w, 3, 7);
+    let at = |rig: &Rig, i: u32| rig.bot.items.iter().find(|k| k.handle.index == i).unwrap().available_at;
+    assert_eq!((at(&rig, 6), at(&rig, 7)), (0.0, 31.0));
+    // Its own pickup it knows of anyway, and the pickup it went for is done.
+    rig.bot.pickup_entity = Some(EntRef { index: 6, serial: 3 });
+    rig.bot.item_taken(&w, 1, 6);
+    assert_eq!(at(&rig, 6), 31.0);
+    assert!(rig.bot.pickup_entity.is_none());
 }

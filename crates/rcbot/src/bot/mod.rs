@@ -296,6 +296,26 @@ pub struct ItemInfo {
     pub available: bool,
 }
 
+/// An item lying in the map, as [`BotWorld::map_items`] lists it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapItem {
+    /// The entity.
+    pub handle: EntRef,
+    /// A ground weapon, a power-up or a dropped gun.
+    pub kind: ItemKind,
+    /// Its TS weapon id, or 0.
+    pub weapon: i32,
+    /// Its power-up bits, or 0.
+    pub powerup: i32,
+    /// Where it lies.
+    pub origin: Vector,
+    /// It can be taken now.
+    pub available: bool,
+    /// Taken and coming back: the game time it shows again (0 when there, or not before the
+    /// next round).
+    pub respawn_at: f32,
+}
+
 /// The game's mode as the port reports it (`GameState`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GameMode {
@@ -484,6 +504,12 @@ pub trait BotWorld: World {
         let mut out = self.find_entities(EntityKey::Classname, "ts_groundweapon");
         out.extend(self.find_entities(EntityKey::Classname, "ts_powerup"));
         out
+    }
+    /// The items lying in the map as the game lists them (the plugin API's `items`: ground
+    /// weapons, power-ups and dropped guns, taken ones too), `None` when the world can't tell
+    /// (then [`items`](Self::items) and what the bot sees).
+    fn map_items(&self) -> Option<Vec<MapItem>> {
+        None
     }
     /// The game's mode, CTB and rounds; deathmatch by default.
     fn game_mode(&self) -> GameMode {

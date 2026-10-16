@@ -668,10 +668,15 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   nearest weapon or power-up in its 60° view, wanted or not (`CanPickup` checked only the class),
   so it never went for one behind it and pressed use for 10 s on ones it couldn't take (no
   inventory space, a power-up already held: `+use` on another swaps it), waited 5-10 s and went
-  back. The port knows the map's items (`BotWorld::items`: `ts_groundweapon`, `ts_powerup`, plus
-  what it sees; the host fills `Entity::item` from the plugin API's `entity_info`), sees whether
-  the ones in view are there, learns how long a taken one takes to come back (from 20 s for
-  weapons, 60 s for power-ups), and scores each as `value * 1000 / (distance * 1.3 + 200 + 300
+  back. The port knows the map's items as a player who knows the map does: every ground weapon's and
+  power-up's place and kind from the start (`BotWorld::map_items`, the plugin API v6's `items`;
+  without it the `ts_groundweapon`/`ts_powerup` entities), plus what it sees (the host fills
+  `Entity::item` from `entity_info`). Whether one is there it knows only from seeing it, or from
+  seeing it taken (`item_pickup`: its own pickup, or another player's in front of it with a clear
+  line), when the game's `respawn_at` is what such a player counts from the pickup (and the respawn
+  time it learns); an item it saw gone without seeing it taken is expected back after the respawn
+  time it learned (from 20 s for weapons, 60 s for power-ups). The game's `available` for items
+  it can't see isn't used. Its own pickup also ends its pickup task. It scores each as `value * 1000 / (distance * 1.3 + 200 + 300
   danger)` against roaming (10): a gun it has room for (`TSSpace` against TS's weapon slots) by
   `bot_weapons.ini` priority over its best loaded gun (60 + 5 priority when unarmed), its own gun
   when low on reserve, health by what it lacks, armour, other power-ups only with none held or

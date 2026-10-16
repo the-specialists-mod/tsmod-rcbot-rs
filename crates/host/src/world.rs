@@ -3,7 +3,7 @@
 //! sequence, as upstream's `RANDOM_LONG` does).
 
 use crate::api::{Api, Engine};
-use rcbot::bot::{BotWorld, CombatState, Entity, EntityKey, GameMode, ItemInfo, ItemKind, PlayerState};
+use rcbot::bot::{BotWorld, CombatState, EntRef, Entity, EntityKey, GameMode, ItemInfo, ItemKind, MapItem, PlayerState};
 use rcbot::nav::{Glass, Monsters, Trace, World};
 use rcbot::{Random, Vector};
 use std::cell::RefCell;
@@ -127,6 +127,8 @@ pub struct HostWorld {
     entities: Option<RefCell<Vec<Slot>>>,
     /// The frame's player snapshots ([`refresh_frame`]), slot 1 first.
     players: Option<Arc<[PlayerSnapshot]>>,
+    /// The map's items, read once per world when a bot asks.
+    items: RefCell<Option<Vec<MapItem>>>,
 }
 
 impl HostWorld {
@@ -140,6 +142,7 @@ impl HostWorld {
             cvars: RefCell::new(Vec::new()),
             entities: None,
             players,
+            items: RefCell::new(None),
         }
     }
 
@@ -316,6 +319,37 @@ impl BotWorld for HostWorld {
 
     fn model_teams(&self) -> bool {
         HostWorld::model_teams(self)
+    }
+
+    fn map_items(&self) -> Option<Vec<MapItem>> {
+        use ts_plugin_api::entity;
+        if let Some(known) = self.items.borrow().as_ref() {
+            return Some(known.clone());
+        }
+        let list: Vec<MapItem> = self
+            .api
+            .items()
+            .into_iter()
+            .filter_map(|i| {
+                let kind = match i.kind {
+                    entity::GROUND_WEAPON => ItemKind::GroundWeapon,
+                    entity::POWERUP => ItemKind::Powerup,
+                    entity::GUN => ItemKind::Gun,
+                    _ => return None,
+                };
+                Some(MapItem {
+                    handle: EntRef { index: u32::try_from(i.index).ok()?, serial: i.serial },
+                    kind,
+                    weapon: i.weapon,
+                    powerup: i.powerup,
+                    origin: Vector::from(i.origin),
+                    available: i.available != 0,
+                    respawn_at: i.respawn_at,
+                })
+            })
+            .collect();
+        *self.items.borrow_mut() = Some(list.clone());
+        Some(list)
     }
 
     fn game_mode(&self) -> GameMode {

@@ -509,6 +509,35 @@ impl Bot {
         self.items.look(w, eye, self.index, in_view, now);
     }
 
+    /// The port's `item_pickup`: `player` took item `entity`. The bot counts it gone only if it
+    /// took it itself or saw it taken (in front of it, with a clear line), as a player would; a
+    /// pickup it went for is done.
+    pub fn item_taken(&mut self, w: &dyn BotWorld, player: u32, entity: u32) {
+        let Some(k) = self.items.iter().find(|i| i.handle.index == entity).copied() else { return };
+        let mine = player == self.index;
+        if !mine {
+            let eye = self.gun_position();
+            let to = k.origin - eye;
+            let (forward, _) = make_vectors(self.v_angle);
+            let in_view = super::look::dot(to.normalize(), forward) > 0.5 || to.length() < 200.0;
+            if !self.is_alive() || to.length() > super::items::SEE_ITEM_RANGE || !in_view {
+                return;
+            }
+            let tr = w.trace_line(eye, k.origin, Monsters::Ignore, Glass::Ignore, Some(self.index));
+            if tr.fraction < 1.0 && tr.hit != Some(entity) {
+                return;
+            }
+        }
+        let respawn_at = w.map_items().and_then(|l| l.into_iter().find(|m| m.handle.index == entity)).map(|m| m.respawn_at);
+        self.items.taken(entity, respawn_at.filter(|&t| t > 0.0), w.time());
+        if mine && self.pickup_entity.is_some_and(|p| p.index == entity) {
+            if self.tasks.current().is_some_and(|t| t.kind == TaskKind::PickupItem && t.edict == self.pickup_entity) {
+                self.tasks.finished_current(false);
+            }
+            self.pickup_entity = None;
+        }
+    }
+
     /// `CBot::SwitchWeapon`, TS: the port's weapon switch (kung fu is the game's 0). The
     /// current weapon changes when the game reports it (upstream set it at once, so a refused
     /// switch left the bot thinking it held a weapon it didn't); the switch isn't asked again

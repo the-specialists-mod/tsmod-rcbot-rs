@@ -6,8 +6,8 @@ use goldsrc_sys::{TraceResult, edict_t, enginefuncs_t, globalvars_t};
 use rcbot::Vector;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use ts_plugin_api::{
-    BotBackend, BotCmd, BotCmdResult, EntityInfo, FrameInfo, GameState, HamArg, HamCall, OK, ObjectiveInfo, PlayerInfo, PlayerSnapshot,
-    PluginApi, PluginId, WeaponEntry, ham,
+    BotBackend, BotCmd, BotCmdResult, EntityInfo, FrameInfo, GameState, HamArg, HamCall, ItemInfo, OK, ObjectiveInfo, PlayerInfo,
+    PlayerSnapshot, PluginApi, PluginId, WeaponEntry, ham,
 };
 
 /// The plugin API table and our plugin id.
@@ -133,6 +133,23 @@ impl Api {
         // SAFETY: `out` is writable for its length.
         let n = unsafe { (self.table.players)(out.as_mut_ptr(), out.len() as c_int) };
         out.truncate(usize::try_from(n).unwrap_or(0).min(64));
+        out
+    }
+
+    /// `items`: the items lying in the map (taken ones too), in index order.
+    pub fn items(&self) -> Vec<ItemInfo> {
+        let mut out = vec![ItemInfo::default(); 256];
+        // SAFETY: `out` is writable for its length.
+        let n = unsafe { (self.table.items)(out.as_mut_ptr(), out.len() as c_int) };
+        let n = usize::try_from(n).unwrap_or(0);
+        if n > out.len() {
+            out = vec![ItemInfo::default(); n];
+            // SAFETY: as above, with room for every item.
+            let m = unsafe { (self.table.items)(out.as_mut_ptr(), out.len() as c_int) };
+            out.truncate(usize::try_from(m).unwrap_or(0).min(n));
+        } else {
+            out.truncate(n);
+        }
         out
     }
 

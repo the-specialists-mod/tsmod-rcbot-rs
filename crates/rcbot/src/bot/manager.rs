@@ -335,6 +335,13 @@ impl BotManager {
         }
     }
 
+    /// The port's `item_pickup`: `player` took item `entity` ([`Bot::item_taken`]).
+    pub fn item_pickup(&mut self, w: &dyn BotWorld, player: u32, entity: u32) {
+        for b in self.iter_mut() {
+            b.item_taken(w, player, entity);
+        }
+    }
+
     /// The port's `weapon_fired`: `shooter` fired a shot from `origin`; every bot that can hear it
     /// remembers it ([`Bot::hear_gunfire`]).
     pub fn weapon_fired(&mut self, w: &dyn BotWorld, shooter: u32, origin: Vector, silenced: bool) {
