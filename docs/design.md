@@ -1032,7 +1032,8 @@ those by going through the port's own code when that code is ported.
   legal and light, rewards per minute, credit only for what the inventory shows, untried first
   then the best with old lives fading, the prior guiding a new bot, file round trip) and a bot
   crediting the loadout it bought only when the inventory shows it; the opponent model (keys,
-  threat of a strong and a weak player, stunt rate, kung fu habits, file round trip, map fade) and
+  threat of a strong and a weak player, headshot share, stunt rate, kung fu habits, file round
+  trip, version 1 files, map fade) and
   a replayed fight teaching it (hits, kills and deaths about bots only, range, weapon, kung fu
   share, exposure and dodging from what the bot saw); a kung fu fight and replayed events learning
   the same tables, to the saved bytes, from the same seed.
@@ -1122,9 +1123,15 @@ those by going through the port's own code when that code is ported.
   a picked-up item, squads (wedge places, teams, handing the lead on), enemy choice by reputation, reputation after a death, breakables as enemies by the first client near them, the visible list's order and membership, sound kinds, hearing range, the sound's origin and silent or ignored sounds, chat lines
   (greetings once, `%n`/`%m`, typing), the bot camera, the grenade toss (and a wall stopping it), `tm_` maps' model
   teams, `util bot_goto`, squad members following the leader when they roam, and the loadout
-  bought before each spawn; unit tests cover the
-  usercmd `msec` (every 100 Hz frame sends, nothing lost at 30 Hz or 1000 Hz, the first
-  command one frame long), the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
+  bought before each spawn; on plugin API v6's data: the game's view after `fixangle` taken as
+  the bot's and a reported teleport dropping the path, the inventory read only when its serial
+  changes, the vision pass ending at the highest entity, kung fu waiting out the opponent's block
+  window and its own `next_attack_at`, answering a hit window without a fresh press, the power
+  from `melee_power`, dives waiting for the stunt cooldown and getting up at `prone_lock`, a shot
+  from out of sight turning the bot along its direction (and the headshot in the opponent model),
+  shots heard from `weapon_fired` (range, silencer, teammates), the map's item list known from the
+  start with taken items counted only when seen (the game's respawn time then), and a door's
+  master finding its button; unit tests cover the task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
   an emptied gun needing a reload), a teleport dropping the path, the owned weapons read from the inventory (a gun never held
   known, a lost one forgotten, a new life without the last one's guns), the weapon in hand as
