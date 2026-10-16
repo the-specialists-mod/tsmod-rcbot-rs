@@ -936,7 +936,7 @@ fn an_empty_clip_is_reloaded_with_one_press() {
 }
 
 #[test]
-fn a_gun_out_of_rounds_is_dropped_for_kung_fu() {
+fn an_empty_gun_is_dropped_and_the_game_picks_the_next() {
     let mut rig = Rig::new(Config::default());
     let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
     let mut rng = XorShiftRandom::new(2);
@@ -944,23 +944,58 @@ fn a_gun_out_of_rounds_is_dropped_for_kung_fu() {
     arm(&w, 1, 1, 0, 0);
     let mut actions = Vec::new();
     run(&mut rig, &mut w, &mut rng, 20, |_, f| actions.extend(f.actions.iter().cloned()));
-    assert!(actions.contains(&Action::Command("drop".into())), "{actions:?}");
-    assert!(actions.contains(&Action::SelectWeapon(0)), "{actions:?}");
-    assert_eq!(actions.iter().filter(|a| **a == Action::Command("drop".into())).count(), 1);
+    // Dropped once; no forced kung fu: TS takes out the next weapon the bot owns.
+    assert_eq!(actions.iter().filter(|a| **a == Action::Command("drop".into())).count(), 1, "{actions:?}");
+    assert!(!actions.iter().any(|a| matches!(a, Action::SelectWeapon(_))), "{actions:?}");
+    // A gun it knows has rounds is taken out at once.
+    let mut rig = Rig::new(Config::default());
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(300.0, 0.0, 0.0), 0)]);
+    arm(&w, 1, 5, 30, 60);
+    run(&mut rig, &mut w, &mut rng, 5, |_, _| {});
+    arm(&w, 1, 1, 0, 0);
+    let mut actions = Vec::new();
+    run(&mut rig, &mut w, &mut rng, 20, |_, f| actions.extend(f.actions.iter().cloned()));
+    assert!(actions.contains(&Action::SelectWeapon(5)), "{actions:?}");
 }
 
 #[test]
-fn unarmed_it_takes_cover_from_a_gunman_out_of_reach() {
+fn unarmed_it_takes_cover_from_a_gunman_aiming_at_it() {
     let mut rig = Rig::new(Config::default());
     let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(500.0, 0.0, 0.0), 0)]);
     arm(&w, 1, 0, 0, 0);
+    w.ents.borrow_mut()[1].v_angle = Vector::new(0.0, 180.0, 0.0);
     let mut rng = XorShiftRandom::new(6);
     let mut attacked = false;
-    let mut covered = false;
     run(&mut rig, &mut w, &mut rng, 100, |_, f| attacked |= f.cmd.is_some_and(|c| c.buttons & (buttons::ATTACK | buttons::ATTACK2) != 0));
-    covered |= rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover) || rig.bot.tasks().has_task(TaskKind::Crouch);
+    let covered = rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover) || rig.bot.tasks().has_task(TaskKind::Crouch);
     assert!(!attacked);
     assert!(covered, "{:?}", rig.bot.tasks().iter().map(|t| t.kind).collect::<Vec<_>>());
+}
+
+#[test]
+fn unarmed_it_rushes_a_gunman_looking_away() {
+    let mut rig = Rig::new(Config::default());
+    // The gunman at 500 looks along +x, away from the bot.
+    let mut w = plane(vec![player(1, Vector::ZERO, 0), player(2, Vector::new(500.0, 0.0, 0.0), 0)]);
+    arm(&w, 1, 0, 0, 0);
+    let mut rng = XorShiftRandom::new(6);
+    run(&mut rig, &mut w, &mut rng, 100, |w, _| w.ents.borrow_mut()[1].origin = Vector::new(500.0, 0.0, 0.0));
+    assert!(!rig.bot.tasks().has_schedule(ScheduleDesc::RunForCover));
+    assert!(w.entity(1).unwrap().origin.x > 150.0, "at {:?}", w.entity(1).unwrap().origin);
+}
+
+#[test]
+fn a_broken_off_wall_kick_leaves_the_view_alone() {
+    // A wall kick under way: the bot turns to the wall.
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::WallKick], 120.0);
+    w.wall.set(Some(-60.0));
+    let mut rng = XorShiftRandom::new(5);
+    run(&mut rig, &mut w, &mut rng, 20, |_, _| {});
+    assert!(rig.bot.kungfu_face(w.time).is_some());
+    // The opponent vanishes mid-move: the fight is over, no wall to face.
+    w.ents.borrow_mut().remove(1);
+    run(&mut rig, &mut w, &mut rng, 50, |_, _| {});
+    assert!(rig.bot.kungfu_face(w.time).is_none());
 }
 
 #[test]

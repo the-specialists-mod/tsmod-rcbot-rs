@@ -33,6 +33,8 @@ use crate::nav::{Glass, Monsters};
 use crate::weapons::TsWeapon;
 use crate::{Random, Vector};
 
+/// Seconds without a fight think after which the fight is over.
+const FIGHT_GAP: f32 = 0.5;
 /// Distance within which the opponent's kung fu can reach the bot (the moves' reach, 35-55
 /// units from the eyes, plus the two hulls' half widths).
 const THREAT_RANGE: f32 = 96.0;
@@ -240,6 +242,8 @@ fn seed_combos() -> Vec<Combo> {
 struct Fight {
     /// The opponent's entity index.
     opponent: Option<u32>,
+    /// When the fight last ran: a fight not run for a moment is over.
+    updated: f32,
     stance: Option<Stance>,
     stance_until: f32,
     /// Health (mine, the opponent's) when the stance started.
@@ -470,14 +474,21 @@ impl Bot {
         let now = w.time();
         let origin = enemy.entity_origin();
         self.used_melee = true;
-        if self.kungfu.fight.opponent != Some(enemy.index) {
+        // A new opponent, or the fight broke off (the enemy hidden or gone, the bot on another
+        // task): start afresh, so nothing of a half-done move (a wall to face) lingers.
+        if self.kungfu.fight.opponent != Some(enemy.index) || now - self.kungfu.fight.updated > FIGHT_GAP {
             let opp_buttons = enemy.button;
             self.kungfu.fight = Fight { opponent: Some(enemy.index), opp_buttons, opp_interval: 1.0, ..Fight::default() };
         }
+        self.kungfu.fight.updated = now;
 
-        // Against a gun out of reach: a gun of its own with rounds, else cover.
+        // Against a gun out of reach: a gun of its own with rounds, else cover; but a gunman who
+        // looks away or has an empty clip is rushed.
         let opp_weapon = enemy.player.map_or(0, |p| p.weapon);
-        if is_ranged(opp_weapon) && dist > RUSH_GUNMAN {
+        let (fwd, _) = make_vectors(Vector::new(0.0, enemy.v_angle.y, 0.0));
+        let to_me = (self.me.origin - enemy.origin).normalize();
+        let gunman_aims = fwd.x * to_me.x + fwd.y * to_me.y > 0.7 && enemy.player.is_some_and(|p| p.clip > 0);
+        if is_ranged(opp_weapon) && dist > RUSH_GUNMAN && gunman_aims {
             self.kungfu.fight.combo = None;
             let best = self.best_weapon(w, Some(enemy)).0;
             if best > 0 && self.weapons.get(best).is_some_and(|wp| !wp.is_melee()) {
@@ -921,9 +932,12 @@ impl Bot {
         self.kungfu.fight.phase_time = now;
     }
 
-    /// Where the look code faces instead of the enemy, while a wall jump needs the wall.
-    pub(crate) fn kungfu_face(&self) -> Option<Vector> {
-        self.kungfu.fight.face.filter(|_| self.kungfu.fight.combo.is_some())
+    /// Where the look code faces instead of the enemy, while a wall jump needs the wall: only
+    /// with kung fu in hand, in a fight that ran just now.
+    pub(crate) fn kungfu_face(&self, now: f32) -> Option<Vector> {
+        let f = &self.kungfu.fight;
+        let fighting = f.combo.is_some() && now - f.updated <= FIGHT_GAP && self.current_weapon == Some(TsWeapon::KungFu.id());
+        f.face.filter(|_| fighting)
     }
 }
 

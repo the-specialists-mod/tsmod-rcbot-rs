@@ -135,7 +135,7 @@ pub fn checks(text: &str, file: &str, up: bool) -> Vec<(String, bool)> {
             !(text.contains("panicked") || text.contains("PANIC") || text.contains("FATAL ERROR") || text.contains("Segmentation")),
         ),
     ];
-    for what in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch"] {
+    for what in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch", "turned"] {
         c.push((format!("check {what}"), text.contains(&format!("[tsmod_rcbot] check {what} ok"))));
     }
     c.push(("a kill by an RCBot bot".into(), kill_by_bot(text)));
@@ -284,7 +284,7 @@ mod tests {
         let mut log = String::from("[ts] plugins: loaded tsmod_rcbot_amd64.so (RCBot 0.1)\n[ts] bots: backend rcbot\n");
         log += "[tsmod_rcbot] loaded 154 waypoints for ts_dojo (visibility rows from 23)\n";
         log += "[tsmod_rcbot] added \"Bot Neo\" (#1, profile 0)\n[tsmod_rcbot] added \"RCBot\" (#4, profile 0)\n";
-        for c in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch"] {
+        for c in ["data_dir", "backend", "create_bot", "run_cmd", "moved", "waypoints", "weapon_switch", "turned"] {
             log += &format!("[tsmod_rcbot] check {c} ok\n");
         }
         let without_kill = log.clone();

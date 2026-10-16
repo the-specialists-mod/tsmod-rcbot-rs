@@ -719,11 +719,16 @@ impl Bot {
             }
             TaskKind::DropWeapon => {
                 // The port's `drop` drops the gun in hand; forget it so nothing picks it again.
+                // TS then takes out the next weapon the player owns (`GetBetterWeapon`), which
+                // the bot may never have held and so can't know: only a gun it knows has rounds
+                // is chosen here; otherwise the game's choice stands (its `WeaponInfo` follows).
                 if let Some(id) = self.current_weapon.filter(|&id| id != TsWeapon::KungFu.id()) {
                     self.actions.push(Action::Command("drop".into()));
                     self.weapons.remove(id);
-                    let next = self.best_weapon(w, self.resolve(w, self.enemy).as_ref()).0;
-                    self.switch_weapon(if next > 0 { next } else { TsWeapon::KungFu.id() });
+                    self.current_weapon = None;
+                    if let Some(next) = self.weapons.best_loaded_gun() {
+                        self.switch_weapon(next);
+                    }
                 }
                 done = true;
             }
@@ -969,7 +974,7 @@ impl Bot {
         // enemy itself every time (design §4). `FVisible` clears the condition when blocked.
         if self.has(cond::SEE_ENEMY) {
             self.fvisible(w, &enemy);
-        } else if self.kungfu_face().is_some() && self.fvisible(w, &enemy) {
+        } else if self.kungfu_face(now).is_some() && self.fvisible(w, &enemy) {
             // A kung fu wall jump turns the bot's back to the opponent for a moment: it still
             // knows where the opponent is (outside the view cone the vision pass needs).
             self.set(cond::SEE_ENEMY);
@@ -988,7 +993,7 @@ impl Bot {
             // TS's melee weapons: combat knife (25), katana (34), seal knife (35) and kung fu.
             // Upstream lists 36, the Contender in TS 3.0, for kung fu (design §5).
             let melee = cur.is_none() || matches!(weap_id, 25 | 34 | 35) || weap_id == TsWeapon::KungFu.id();
-            if weap_id == TsWeapon::KungFu.id() || cur.is_none() {
+            if weap_id == TsWeapon::KungFu.id() {
                 // The port's kung fu fighter (design §4) in place of upstream's random punches
                 // and kicks.
                 self.kungfu_fight(g, w, rng, &enemy, dist);

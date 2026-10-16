@@ -63,6 +63,9 @@ struct Stats {
     moved: f32,
     /// The weapon in hand while alive, to log changes.
     weapon: Option<i32>,
+    /// The view's yaw when the life started, and the most it turned from it.
+    start_yaw: Option<f32>,
+    turned: f32,
 }
 
 /// RCBot's globals.
@@ -443,6 +446,7 @@ extern "C" fn start_frame() {
         let w = HostWorld::new(a, e);
         let mut rng = EngineRandom(e);
         bots::touches(s, a, e);
+        bots::take_fixed_angles(s, e);
         let reps = s.rep_ids();
         let mut g = globals!(s, &reps);
         let frames = s.bots.frame(&mut g, &w, &mut rng);
@@ -502,15 +506,24 @@ fn report(s: &mut State, a: Api, e: Engine) {
     let mut used_waypoints = false;
     let mut attacked = false;
     let mut switched = false;
+    let mut turned = false;
     for b in s.bots.iter() {
-        let Some(origin) = e.edict(b.index as i32).map(|ed| e.vars(ed, |v, _| Vector::from(v.origin))) else { continue };
+        let Some((origin, yaw)) = e.edict(b.index as i32).map(|ed| e.vars(ed, |v, _| (Vector::from(v.origin), v.v_angle[1]))) else {
+            continue;
+        };
         let alive = b.is_alive();
         let st = s.stats.entry(b.index).or_default();
         if !alive {
             st.start = None;
             st.weapon = None;
+            st.start_yaw = None;
             continue;
         }
+        // The view as the engine has it (`pev->v_angle`), not as the bot wants it.
+        let start_yaw = *st.start_yaw.get_or_insert(yaw);
+        let d = (yaw - start_yaw).rem_euclid(360.0);
+        st.turned = st.turned.max(d.min(360.0 - d));
+        turned |= st.turned > 30.0;
         // A weapon change while alive: RCBot's `select_weapon` (an empty gun in a fight), or TS
         // switching after a pickup or a drop.
         if let Some(cur) = b.current_weapon() {
@@ -537,6 +550,9 @@ fn report(s: &mut State, a: Api, e: Engine) {
     }
     if switched {
         s.check("weapon_switch");
+    }
+    if turned {
+        s.check("turned");
     }
     if now < s.next_report {
         return;

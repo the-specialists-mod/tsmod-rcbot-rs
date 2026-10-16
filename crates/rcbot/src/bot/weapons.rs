@@ -138,6 +138,18 @@ impl BotWeapons {
         }
     }
 
+    /// The highest-priority gun the bot has seen it owns with rounds left, whatever the range
+    /// (port addition, design §4: what to take out after dropping an empty gun).
+    pub fn best_loaded_gun(&self) -> Option<i32> {
+        let mut best: Option<&BotWeapon> = None;
+        for w in self.weapons.iter().skip(1) {
+            if w.has_weapon && !w.is_melee() && !w.out_of_ammo() && best.is_none_or(|b| b.priority() < w.priority()) {
+                best = Some(w);
+            }
+        }
+        best.map(|w| w.id)
+    }
+
     /// `BotClient_TS_WeaponInfo`: the game says the bot holds `game_id` (0 for kung fu) with
     /// `clip` rounds and `ammo` in reserve.
     ///

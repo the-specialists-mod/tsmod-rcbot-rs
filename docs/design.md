@@ -261,7 +261,14 @@ kept: A*'s heuristic, open-list tie-breaking, the "going backwards" skip, the te
   TS user messages told the bot comes from `PlayerInfo`: `WeaponInfo` when the weapon, clip or
   reserve changes, `TSState` as the stunt state. Damage comes from `player_damaged` (the bot
   faces the attacker); upstream guessed from a health drop and looked 128 units behind itself.
-* **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47).
+* **View angles**: the usercmd carries `v_angle`; upstream passes `pev->angles` (§5.47). The
+  engine copies a usercmd's angles into `pev->v_angle` only while `pev->fixangle` is 0
+  (`SV_RunCmd`), and clears `fixangle` only when it sends a client `svc_setangle`/`svc_addangle`,
+  which it never does for fake clients; TS sets `fixangle` at every spawn, so the bots' views
+  stayed frozen where they spawned (they never turned or aimed). Upstream wrote `pev->v_angle`
+  itself (`ChangeAngles`). The host now does for each bot, before it thinks, what the engine does
+  for a client (`take_fixed_angles`): the game's `angles` (or the `avelocity` yaw for an add)
+  become the view and `fixangle` is cleared. `cargo xtask e2e` checks a bot turns (`turned`).
 * **A TS gun's max clip is the largest clip seen** (`checkMaxClip`'s intent; upstream resets it
   on every `WeaponInfo`, §5.49), so an empty gun needs a reload and a fighting bot reloads or
   switches as upstream's TS code says. `CanReload`/`LowOnAmmo` stay false (`m_iAmmo1`).
