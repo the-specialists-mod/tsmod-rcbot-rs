@@ -2386,7 +2386,7 @@ fn the_vision_pass_ends_at_the_highest_entity() {
     let mut rig = Rig::new(Config::default());
     let mut item = brush(7, "ts_powerup", Vector::new(200.0, 0.0, 0.0), Vector::new(16.0, 16.0, 16.0));
     item.solid = 1;
-    let mut w = plane(vec![player(1, Vector::ZERO, 0), item]);
+    let w = plane(vec![player(1, Vector::ZERO, 0), item]);
     let mut rng = XorShiftRandom::new(4);
     rig.bot.profile.vision_revs = 2;
     rig.bot.me = w.entity(1).unwrap();
@@ -2404,4 +2404,85 @@ fn the_vision_pass_ends_at_the_highest_entity() {
     let short = pass(&mut rig, &w, &mut rng);
     assert!(short < full, "{short} {full}");
     assert!(!rig.bot.is_visible(7));
+}
+
+/// Sets player `index`'s close-combat and stunt timers as the port reports them.
+fn timers(w: &Plane, index: u32, c: CombatState) {
+    w.ents.borrow_mut().iter_mut().find(|e| e.index == index).unwrap().player.as_mut().unwrap().combat = Some(c);
+}
+
+#[test]
+fn kung_fu_waits_out_the_opponents_block_and_its_own_recovery() {
+    let presses = |rig: &mut Rig, w: &mut Plane, rng: &mut XorShiftRandom, frames: usize| {
+        let mut n = 0;
+        run(rig, w, rng, frames, |w, f| {
+            n += usize::from(f.cmd.is_some_and(|c| c.buttons & (buttons::ATTACK | buttons::ATTACK2) != 0));
+            w.ents.borrow_mut()[1].origin = Vector::new(60.0, 0.0, 0.0);
+        });
+        n
+    };
+    // The opponent's block is up (the game's window, not a `+reload` it was seen to press): the
+    // bot doesn't punch into it.
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 60.0);
+    let mut rng = XorShiftRandom::new(2);
+    timers(&w, 1, CombatState { melee_power: 100.0, ..CombatState::default() });
+    timers(&w, 2, CombatState { melee_power: 100.0, block_kungfu: 1000.0, ..CombatState::default() });
+    assert_eq!(presses(&mut rig, &mut w, &mut rng, 100), 0);
+    // The block ends: it attacks.
+    timers(&w, 2, CombatState { melee_power: 100.0, ..CombatState::default() });
+    assert!(presses(&mut rig, &mut w, &mut rng, 100) > 0);
+    // Its own next attack is far off (the game's `next_attack_at`): no presses the game would drop.
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 60.0);
+    timers(&w, 1, CombatState { melee_power: 100.0, next_attack_at: 1000.0, ..CombatState::default() });
+    assert_eq!(presses(&mut rig, &mut w, &mut rng, 100), 0);
+    // The power is the game's bar, whatever is in hand.
+    rig.bot.state = PlayerState {
+        alive: true,
+        weapon: 5,
+        clip: 30,
+        combat: Some(CombatState { melee_power: 40.0, ..Default::default() }),
+        ..Default::default()
+    };
+    assert_eq!(rig.bot.kungfu_power_for_tests(3.0), 40.0);
+}
+
+#[test]
+fn an_opponents_hit_window_is_answered_without_a_fresh_press() {
+    // The opponent holds its attack (no new press for the button watcher), but the game shows a new
+    // hit window each time: the bot reacts to it.
+    let (mut rig, mut w) = kung_fu_duel(&[kungfu::Move::Punch], 60.0);
+    let mut rng = XorShiftRandom::new(6);
+    timers(&w, 1, CombatState { melee_power: 100.0, ..CombatState::default() });
+    w.ents.borrow_mut()[1].button = buttons::ATTACK;
+    w.ents.borrow_mut()[1].v_angle = Vector::new(0.0, 180.0, 0.0);
+    let mut reacted = false;
+    for i in 0..100 {
+        let t = w.time;
+        timers(&w, 2, CombatState { melee_power: 100.0, melee_window: t + 0.2 + (i / 20) as f32, ..CombatState::default() });
+        run(&mut rig, &mut w, &mut rng, 1, |w, _| w.ents.borrow_mut()[1].origin = Vector::new(60.0, 0.0, 0.0));
+        reacted |= rig.bot.kungfu.reacting_for_tests();
+    }
+    assert!(reacted);
+}
+
+#[test]
+fn dives_wait_for_the_stunt_cooldown_and_get_up_when_the_game_allows() {
+    let mut rig = Rig::new(Config::default());
+    let w = plane(vec![player(1, Vector::ZERO, 0)]);
+    rig.bot.me = w.entity(1).unwrap();
+    rig.bot.state = w.entity(1).unwrap().player.unwrap();
+    // Cooling down: no press (it would be lost), no duck held for a dive that didn't happen.
+    rig.bot.state.combat = Some(CombatState { next_stunt_at: 5.0, ..CombatState::default() });
+    assert!(!rig.bot.dive(1.0));
+    assert_eq!(rig.bot.button & buttons::ALT1, 0);
+    assert!(rig.bot.dive(5.0));
+    assert_ne!(rig.bot.button & buttons::ALT1, 0);
+    // Landed prone: up as soon as the game's prone lock ends, not after a guessed delay.
+    rig.bot.state.flags |= pflag::PRONE;
+    rig.bot.state.combat = Some(CombatState { prone_lock: 5.4, ..CombatState::default() });
+    rig.bot.dive_landing(5.3);
+    assert_ne!(rig.bot.dive_time, 0.0, "still locked");
+    rig.bot.dive_landing(5.45);
+    assert_eq!(rig.bot.dive_time, 0.0);
+    assert_ne!(rig.bot.run_player_move(5.46).buttons & buttons::JUMP, 0);
 }

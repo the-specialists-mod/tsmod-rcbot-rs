@@ -290,13 +290,14 @@ impl Bot {
     /// A dodge dive (design §4; upstream pressed `+alt1` on every think its stunt perceptron
     /// fired): while moving sideways faster than 80 units/s, just hurt or with the enemy's view
     /// on the bot, light enough to dive (TS 3.0's low dive needs fewer than 62 of 81 slots used),
-    /// on the ground, not in a stunt, at most once every 3-6 s; when the perceptron fires, or by a
+    /// on the ground, not in a stunt nor while one cools down (the game's timer), at most once
+    /// every 3-6 s; when the perceptron fires, or by a
     /// skill-scaled chance a think.
     pub(crate) fn dodge(&mut self, enemy: &Entity, perceptron: bool, now: f32, rng: &mut dyn Random) {
         let f = &self.fight;
         if f.next_dive > now
             || f.dive_at.is_some()
-            || self.state.stunt_state == super::TS_STATE_STUNT
+            || !self.stunt_ready(now)
             || self.me.flags & super::entflags::ONGROUND == 0
             || 81 - self.state.free_slots >= 62
         {

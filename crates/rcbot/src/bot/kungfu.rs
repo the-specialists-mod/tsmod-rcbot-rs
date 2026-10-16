@@ -11,7 +11,9 @@
 //!
 //! The fighter:
 //! * **watches** the opponent: the weapon in hand (a gun, kung fu or a blade), each new attack
-//!   or block it presses, how often it attacks, and whether it faces the bot within reach;
+//!   or block it presses, the game's close-combat timers when the port reports them (hit and
+//!   block windows, when it may strike again), how often it attacks, and whether it faces the bot
+//!   within reach;
 //! * **chooses a stance** for a few seconds at a time, defensive (keep guard distance, wait for
 //!   the attack, answer it, then counter) or offensive (close in and attack), from what each
 //!   stance has earned against this kind of opponent (human or bot, aggressive or passive), its
@@ -351,6 +353,8 @@ struct Fight {
     /// Moving average of the time between the opponent's attacks.
     opp_interval: f32,
     opp_block_until: f32,
+    /// The opponent's last hit window (`CombatState::melee_window`) seen.
+    opp_window: f32,
     /// A reaction waiting for the bot's reaction time: when it goes, whether the attack was
     /// seen (else predicted), and its kind.
     pending: Option<(f32, bool, AttackKind)>,
@@ -714,14 +718,17 @@ impl KungFu {
 }
 
 impl Bot {
-    /// The power now: with kung fu out the game reports its bar as the clip (`KFuPower`, the
-    /// port's `PlayerInfo::clip`); otherwise an estimate (TS's bar regenerates at 15 a second up
-    /// to 100, a block costs 33).
+    /// The power now: the game's bar (`CombatState::melee_power`, plugin API v6; with kung fu
+    /// out also the clip, `KFuPower`); without either an estimate (TS's bar regenerates at 15 a
+    /// second up to 100, a block costs 33).
     fn kf_power(&mut self, now: f32) -> f32 {
-        let reported = (self.state.alive && self.state.weapon == 0).then_some(self.state.clip);
+        let reported = match self.state.combat {
+            Some(c) => Some(c.melee_power),
+            None => (self.state.alive && self.state.weapon == 0).then_some(self.state.clip as f32),
+        };
         let f = &mut self.kungfu.fight;
         if let Some(bar) = reported {
-            f.power = (bar as f32).clamp(0.0, 100.0);
+            f.power = bar.clamp(0.0, 100.0);
         } else if f.power_time == 0.0 {
             f.power = 100.0;
         } else {
@@ -729,6 +736,12 @@ impl Bot {
         }
         f.power_time = now;
         f.power
+    }
+
+    /// The bot may strike now: its last move's recovery is over, and the game's
+    /// (`CombatState::next_attack_at`) when it reports it.
+    fn kf_ready(&self, now: f32) -> bool {
+        self.kungfu.fight.recover_until <= now && self.state.combat.is_none_or(|c| c.next_attack_at <= now)
     }
 
     /// The reaction time for kung fu: the profile's, shorter for skilled bots (0.08-0.3 s).
@@ -857,11 +870,17 @@ impl Bot {
         let new = enemy.button & !f.opp_buttons;
         f.opp_buttons = enemy.button;
         let melee = enemy.player.is_some_and(|p| !is_ranged(p.weapon));
+        let timers = enemy.player.and_then(|p| p.combat);
         if melee && new & buttons::RELOAD != 0 {
             f.opp_block_until = now + BLOCK_TIME;
             f.opp_blocks += 1;
         }
-        let attacking = new & (buttons::ATTACK | buttons::ATTACK2) != 0;
+        // A new hit window (`CombatState::melee_window`) is an attack under way even without a
+        // fresh press (held jabs); the game's timer, not a guess from the buttons.
+        let window = timers.map_or(0.0, |c| c.melee_window);
+        let new_window = melee && window > now && window != f.opp_window;
+        f.opp_window = window;
+        let attacking = new & (buttons::ATTACK | buttons::ATTACK2) != 0 || new_window;
         let kind = AttackKind::of(enemy.button, enemy.flags & entflags::ONGROUND != 0);
         if attacking {
             if f.opp_last_attack > 0.0 {
@@ -1048,9 +1067,14 @@ impl Bot {
     fn kf_offence(&mut self, w: &dyn BotWorld, enemy: &Entity, origin: Vector, dist: f32, now: f32, rng: &mut dyn Random, press: &mut i32) {
         let f = &self.kungfu.fight;
         let stance = f.stance.unwrap_or(Stance::Offensive);
-        let countering = f.counter_until > now;
-        // The opponent's block is up: attacking into it costs half a second and 33 power.
-        let opp_blocking = f.opp_block_until > now;
+        let timers = enemy.player.and_then(|p| p.combat);
+        // The opponent can't strike before its `next_attack_at` and has no hit coming: it is
+        // recovering from a move, the moment to hit back (the game's timers when reported).
+        let opp_recovering = timers.is_some_and(|c| c.next_attack_at > now + 0.1 && c.melee_window <= now);
+        let countering = f.counter_until > now || opp_recovering;
+        // The opponent's block is up: attacking into it costs half a second and 33 power. The
+        // game's block window when reported (`block_kungfu`), else a guess from its `+reload`.
+        let opp_blocking = timers.map_or(f.opp_block_until > now, |c| c.block_kungfu > now);
         // A passive opponent (no attack for a while) is attacked even from the defensive stance.
         let passive = f.opp_last_attack == 0.0 || now - f.opp_last_attack > 2.0;
         let attack = (stance == Stance::Offensive || countering || passive) && !opp_blocking;
@@ -1073,7 +1097,7 @@ impl Bot {
                 }
                 self.stop_moving();
             }
-            if attack && dist < Move::FlyKick.range().1 && self.kungfu.fight.recover_until <= now {
+            if attack && dist < Move::FlyKick.range().1 && self.kf_ready(now) {
                 self.kungfu.fight.wall = self.kf_find_wall(w, origin);
                 if let Some(index) = self.kf_pick_combo(dist) {
                     self.kungfu.fight.combo = Some((index, 0, now));
@@ -1105,7 +1129,8 @@ impl Bot {
     /// The combo to run, by UCB1 among those whose first move fits the distance (and the wall,
     /// for a wall jump); `None` when none fits.
     fn kf_pick_combo(&self, dist: f32) -> Option<usize> {
-        let wall = self.kungfu.fight.wall.is_some();
+        // A wall jump is a stunt: none while one cools down.
+        let wall = self.kungfu.fight.wall.is_some() && self.stunt_ready(self.now);
         let total = self.kungfu.combo_runs();
         let scores: Vec<f32> = self
             .kungfu
@@ -1169,6 +1194,10 @@ impl Bot {
         self.kf_close_in(m, origin, dist);
         if dist > STRIKE_DISTANCE + 24.0 && m != Move::BackKick {
             // Out of reach: wait for the distance to close.
+            return;
+        }
+        if !self.kf_ready(now) {
+            // The game won't take the attack yet (`next_attack_at`): a press now is lost.
             return;
         }
         if m.fresh() && self.kungfu.fight.last_buttons & button != 0 {
@@ -1239,7 +1268,7 @@ impl Bot {
                             Glass::DontIgnore,
                             Some(self.index),
                         );
-                        if tr.fraction < 1.0 && self.kungfu.fight.last_buttons & buttons::ALT1 == 0 {
+                        if tr.fraction < 1.0 && self.kungfu.fight.last_buttons & buttons::ALT1 == 0 && self.stunt_ready(now) {
                             *press |= buttons::ALT1;
                             self.kf_phase(1, now);
                         }
@@ -1321,6 +1350,22 @@ impl Bot {
         let f = &self.kungfu.fight;
         let fighting = f.combo.is_some() && now - f.updated <= FIGHT_GAP && self.current_weapon == Some(TsWeapon::KungFu.id());
         f.face.filter(|_| fighting)
+    }
+}
+
+#[cfg(test)]
+impl Bot {
+    /// [`Bot::kf_power`], for the bot's tests.
+    pub(crate) fn kungfu_power_for_tests(&mut self, now: f32) -> f32 {
+        self.kf_power(now)
+    }
+}
+
+#[cfg(test)]
+impl KungFu {
+    /// An answer to an attack is running or waiting for the reaction time.
+    pub(crate) fn reacting_for_tests(&self) -> bool {
+        self.fight.reacting.is_some_and(|a| a.answer != NO_REACTION) || self.fight.pending.is_some()
     }
 }
 

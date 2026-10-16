@@ -377,10 +377,16 @@ bucket search order.
   own empty `WeaponInfo` no longer sends `drop`.
 * **Kung fu** (`bot/kungfu.rs`, no upstream counterpart): `NORMAL_ATTACK`'s random punches and
   kicks within 72 units are replaced by a fighter built on TS 3.0's `CCombatAttack` and
-  `CCombatBlock`. It reads the opponent's weapon and new presses (`pev->button`: attacks, blocks),
-  picks a defensive or offensive stance every 2-4 s from what each earned (damage dealt less
-  taken), its health, the opponent's and its power (the game's bar, which the port reports as the clip
-  while kung fu is out; else estimated: 100, -33 a block, +15/s); answers
+  `CCombatBlock`. It reads the opponent's weapon, its new presses (`pev->button`: attacks,
+  blocks) and, with plugin API v6, its close-combat timers (`CombatState`): a new hit window
+  (`melee_window`) is an attack under way even without a fresh press (held jabs); its block
+  window (`block_kungfu`, else a guess from its `+reload`) is waited out instead of attacked into;
+  an opponent that can't strike yet (`next_attack_at`) and has no hit coming is recovering, and
+  is hit back as after a dodged attack. The bot's own strikes wait for its `next_attack_at`, and
+  its wall jumps for the stunt cooldown (`next_stunt_at`), so no press is lost. It picks a
+  defensive or offensive stance every 2-4 s from what each earned (damage dealt less taken), its
+  health, the opponent's and its power (the game's bar, `melee_power`; under v5 the clip while
+  kung fu was out, else estimated: 100, -33 a block, +15/s); answers
   an attack it sees, after a skill-scaled reaction time, by blocking (`+reload`), ducking,
   stepping back or aside, scored by whether it was hit, then counters; and attacks in combos
   (move sequences pressed as TS reads them: fresh or held `+attack`/`+attack2`, with `+duck`,
@@ -484,8 +490,9 @@ bucket search order.
   `EnemyFound` pressed it on first sight for a skilled bot (each press a dive in TS 3.0). The
   perceptron still runs and learns, but a dive needs a dodge: the bot moving sideways faster than
   80 units/s, hurt in the last 0.5 s or with the enemy's view on it (dot over 0.95), light enough
-  (TS 3.0's low dive needs fewer than 62 of 81 slots used, `free_slots`), on the ground and not
-  in a stunt, at most every 3-6 s, when the perceptron fires or by a skill-scaled chance. The
+  (TS 3.0's low dive needs fewer than 62 of 81 slots used, `free_slots`), on the ground, not
+  in a stunt and not while one cools down (the game's `next_stunt_at`, plugin API v6), at most
+  every 3-6 s, when the perceptron fires or by a skill-scaled chance. The
   dive is `+alt1` in one usercmd (released before), then `+duck` held for 1.2 s, which rolls out
   of the landing instead of lying prone.
 * **Choosing the enemy** (`FindEnemy`): upstream dropped its enemy every 0.75-1.25 s for the
@@ -643,7 +650,9 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   held; upstream pressed the key alone at stunt waypoints, and `DEFEND` pressed it on every think
   until prone, which standing still does nothing outside slow motion. A bot's own dive holds duck
   from 0.15 to 1.5 s, so it rolls out of the landing, and a bot that lands prone anyway jumps to
-  get up; `DEFEND` no longer presses it.
+  get up as soon as the game's `prone_lock` ends (without the timers, 0.6 s after the dive); no
+  dive, wall jump or squad prone is pressed while the stunt cools down (`next_stunt_at`: the press
+  would be lost; a stuck bot crouch jumps instead); `DEFEND` no longer presses it.
 * **Task timeouts**: `SetTimeToCompleteSchedule` times out `secs` from now (upstream's `2 * now +
   secs` never came, §5.50); a `FIND_PATH` that found its path has 30 s to reach the first waypoint
   (upstream: no limit until a waypoint was touched, then 20-30 s per touch, as now). A goal A*

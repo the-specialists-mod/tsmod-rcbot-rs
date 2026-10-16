@@ -370,7 +370,7 @@ impl Bot {
                 if !kung_fu || self.enemy.is_none() {
                     // Upstream pressed the key alone, so the bot landed prone and lay there
                     // (design §4).
-                    self.dive(now);
+                    let _ = self.dive(now);
                 }
             }
             self.touched_pushable_waypoint(w, wpt_origin);

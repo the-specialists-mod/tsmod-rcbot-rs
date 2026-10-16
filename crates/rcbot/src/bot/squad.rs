@@ -545,7 +545,7 @@ impl Bot {
     pub(crate) fn squad_modes(&mut self, g: &BotGlobals<'_>) {
         let Some(s) = self.squad.and_then(|id| g.squads.get(id)) else { return };
         let (prone, crouch, can_shoot) = (s.is_prone(), s.is_crouch(), s.can_shoot());
-        if prone && self.state.stunt_state != super::TS_STATE_STUNT {
+        if prone && self.stunt_ready(self.now) {
             self.alt_button();
         }
         if crouch {

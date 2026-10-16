@@ -203,7 +203,10 @@ impl Bot {
                 let (forward, _) = make_vectors(Vector::new(0.0, self.v_angle.y, 0.0));
                 let from = self.me.origin;
                 let wall = w.trace_line(from, from + forward * WALL_JUMP_RANGE, Monsters::Ignore, Glass::DontIgnore, Some(self.index));
-                if wall.fraction < 1.0 && self.me.flags & entflags::ONGROUND != 0 {
+                if !self.stunt_ready(now) {
+                    // A stunt cooling down would eat the press: a crouch jump meanwhile.
+                    self.jump_and_duck(now);
+                } else if wall.fraction < 1.0 && self.me.flags & entflags::ONGROUND != 0 {
                     // TS's wall jump: `+alt1` facing a wall throws the player up and back off it.
                     self.alt_button();
                 } else {
@@ -221,25 +224,43 @@ impl Bot {
         }
     }
 
+    /// TS takes a stunt now: none running and its cooldown over (the game's `next_stunt_at`;
+    /// without the timers, not in a stunt). A press before then is lost (design §4).
+    pub(crate) fn stunt_ready(&self, now: f32) -> bool {
+        self.state.stunt_state != super::TS_STATE_STUNT
+            && !self.state.stunting()
+            && self.state.combat.is_none_or(|c| c.next_stunt_at <= now)
+    }
+
     /// A dive (`+alt1` while moving, TS's stunt key), with duck held through the landing so the
-    /// bot rolls out of it instead of lying prone ([`Bot::dive_landing`]).
-    pub(crate) fn dive(&mut self, now: f32) {
+    /// bot rolls out of it instead of lying prone ([`Bot::dive_landing`]). Nothing while a stunt
+    /// is cooling down; false then.
+    pub(crate) fn dive(&mut self, now: f32) -> bool {
+        if !self.stunt_ready(now) {
+            return false;
+        }
         self.alt_button();
         self.dive_time = now;
         self.start_duck_time = now + DIVE_DUCK_FROM;
         self.end_duck_time = now + DIVE_DUCK_UNTIL;
+        true
     }
 
-    /// After a dive: a bot that landed prone anyway (TS's stance 2 on the ground) jumps to get up
-    /// (TS dives land prone unless duck, jump or the stunt key is held; design §4).
+    /// After a dive: a bot that landed prone anyway jumps to get up (TS dives land prone unless
+    /// duck, jump or the stunt key is held; design §4): as soon as the game lets it (its
+    /// `prone_lock` over), or, without the timers, 0.6 s after the dive.
     pub(crate) fn dive_landing(&mut self, now: f32) {
         if self.dive_time <= 0.0 {
             return;
         }
         let since = now - self.dive_time;
+        let prone = match self.state.combat {
+            Some(c) => self.state.prone() && c.prone_lock <= now,
+            None => since > DIVE_GET_UP_AFTER && self.state.stunt_state == super::TS_STATE_STUNT,
+        };
         if since > 3.0 {
             self.dive_time = 0.0;
-        } else if since > DIVE_GET_UP_AFTER && self.state.stunt_state == super::TS_STATE_STUNT && self.me.flags & entflags::ONGROUND != 0 {
+        } else if prone && self.me.flags & entflags::ONGROUND != 0 {
             self.start_jump_time = now;
             self.end_jump_time = now + 0.1;
             self.dive_time = 0.0;
