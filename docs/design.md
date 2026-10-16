@@ -671,6 +671,10 @@ those by going through the port's own code when that code is ported.
   task queue (schedules, front insertion, path hand-over, timeouts), angles and turning,
   remembered positions, the TS `WeaponInfo` handler and the best-weapon choice (kung fu up close,
   an emptied gun needing a reload), and the waypoint editor (flags, paths, delete, beam colours).
+* **Host unit tests** (`crates/host`): the plugin descriptor, and engine entity searches
+  (`collect_search`) ending at the world FWGS and ReHLDS return for "no more" (and at a repeat)
+  instead of starting over: upstream's loops stop at `FNullEnt`, the port's first ones only at
+  NULL, so each search gave up to 4097 repeats.
 * **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 5 min): installs
   the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
   `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects

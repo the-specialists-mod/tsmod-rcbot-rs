@@ -372,25 +372,25 @@ impl Engine {
         (tr.flFraction, Vector::from(tr.vecEndPos), tr.pHit)
     }
 
-    /// `UTIL_FindEntityByString` from the start of the list to the end: every match.
+    /// `UTIL_FindEntityByString` from the start of the list to the end: every match, once.
     pub fn find_entities(&self, field: &str, value: &str) -> Vec<i32> {
         let Some(f) = self.f.pfnFindEntityByString else { return Vec::new() };
         let (k, v) = (cstring(field), cstring(value));
-        let mut out = Vec::new();
         let mut e: *mut edict_t = std::ptr::null_mut();
-        loop {
+        collect_search(|| {
             // SAFETY: `e` is NULL or the engine's last result; both strings live for the call.
             e = unsafe { f(e, k.as_ptr(), v.as_ptr()) };
-            // SAFETY: a non-NULL result is one of the engine's edicts.
-            if e.is_null() || unsafe { (*e).free } != 0 {
-                break;
-            }
-            out.push(self.index_of(e));
-            if out.len() > 4096 {
-                break;
-            }
+            self.search_result(e)
+        })
+    }
+
+    /// An engine search's result as an index: `None` for NULL or a free edict.
+    fn search_result(&self, e: *mut edict_t) -> Option<i32> {
+        // SAFETY: a non-NULL result is one of the engine's edicts.
+        if e.is_null() || unsafe { (*e).free } != 0 {
+            return None;
         }
-        out
+        Some(self.index_of(e))
     }
 
     /// `CVAR_GET_FLOAT`.
@@ -541,25 +541,16 @@ impl Engine {
         }
     }
 
-    /// `UTIL_FindEntityInSphere`, all of them.
+    /// `UTIL_FindEntityInSphere`, all of them, once each.
     pub fn entities_in_sphere(&self, origin: Vector, radius: f32) -> Vec<i32> {
         let Some(f) = self.f.pfnFindEntityInSphere else { return Vec::new() };
         let o = origin.to_array();
-        let mut out = Vec::new();
         let mut e: *mut edict_t = std::ptr::null_mut();
-        loop {
+        collect_search(|| {
             // SAFETY: `e` is NULL or the engine's last result; the origin is valid.
             e = unsafe { f(e, o.as_ptr(), radius) };
-            // SAFETY: a non-NULL result is one of the engine's edicts.
-            if e.is_null() || unsafe { (*e).free } != 0 {
-                break;
-            }
-            out.push(self.index_of(e));
-            if out.len() > 4096 {
-                break;
-            }
-        }
-        out
+            self.search_result(e)
+        })
     }
 
     /// `RANDOM_LONG`.
@@ -703,5 +694,72 @@ impl Engine {
             byte(speed);
             endm();
         }
+    }
+}
+
+/// The most results one search collects (`MAX_EDICTS` in FWGS).
+const MAX_SEARCH: usize = 4096;
+
+/// Runs an engine search (`pfnFindEntityByString`, `pfnFindEntityInSphere`) to its end: `next`
+/// makes the call after the previous result and gives its index (`None` for NULL or a free edict).
+///
+/// The engines don't answer "no more" with NULL: FWGS (`sv_game.c` `SV_FindEntityByString`,
+/// `pfnFindEntityInSphere`) and ReHLDS (`pr_cmds.cpp`) return the world, index 0, and a search
+/// started from the world begins again at 1. Stopping only on NULL repeated every match until
+/// 4097 results (every bot's touch check, every frame), and a search with no match gave 4097
+/// worlds. The search ends at the world, and at an index it already gave, in case an engine
+/// loops some other way.
+fn collect_search(mut next: impl FnMut() -> Option<i32>) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut seen = vec![0u64; MAX_SEARCH / 64 + 1];
+    while out.len() < MAX_SEARCH {
+        let Some(i) = next().filter(|&i| i > 0) else { break };
+        let (word, bit) = (i as usize / 64, 1u64 << (i as usize % 64));
+        if word >= seen.len() {
+            seen.resize(word + 1, 0);
+        }
+        if seen[word] & bit != 0 {
+            break;
+        }
+        seen[word] |= bit;
+        out.push(i);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_search;
+
+    /// An engine search over `matches` as FWGS runs it: after the last match the world (0), and
+    /// from the world the first match again.
+    fn engine(matches: &[i32]) -> impl FnMut() -> Option<i32> + '_ {
+        let mut prev = 0;
+        move || {
+            let next = matches.iter().copied().find(|&m| m > prev).unwrap_or(0);
+            prev = next;
+            Some(next)
+        }
+    }
+
+    #[test]
+    fn a_search_ends_at_the_world() {
+        assert_eq!(collect_search(engine(&[3, 7, 40])), vec![3, 7, 40]);
+        assert_eq!(collect_search(engine(&[])), Vec::<i32>::new());
+        // NULL or a free edict ends it too.
+        let mut calls = [Some(5), None, Some(6)].into_iter();
+        assert_eq!(collect_search(|| calls.next().flatten()), vec![5]);
+    }
+
+    #[test]
+    fn a_search_that_loops_ends_at_a_repeat() {
+        let mut calls = [2, 9, 2, 9].into_iter().cycle();
+        assert_eq!(collect_search(|| calls.next()), vec![2, 9]);
+        let mut n = 0;
+        let all = collect_search(|| {
+            n += 1;
+            Some(n)
+        });
+        assert_eq!(all.len(), 4096);
     }
 }
