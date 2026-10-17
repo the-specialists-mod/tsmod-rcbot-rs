@@ -114,6 +114,4 @@ never run their scripts.
   fails a tag that doesn't match. Don't upload locally built archives.
 - The port crates (`goldsrc-sys`, `ts-plugin-api`) are git dependencies pinned to one rev in the
   root `Cargo.toml`; `goldsrc-sys` needs `../xash3d-fwgs` (`.cargo/config.toml`, or `FWGS_DIR`).
-  Until a port release has plugin API v6, a `[patch]` in the root `Cargo.toml` takes them from
-  the local `plugin-api-v6` checkout (`/home/mmckenzie/dev/hl/wt/plugin-api-v6`); it must become
-  the release tag before this repository releases.
+  Pin them to a port release tag, never a local path, before this repository releases.

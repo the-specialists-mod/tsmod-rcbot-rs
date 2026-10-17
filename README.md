@@ -4,7 +4,8 @@
 **The Specialists 3.0**, as the `tsmod_rcbot` bot plugin of the
 [TS Rust port](https://github.com/the-specialists-mod/the-specialistsmod-rs). The port loads it
 through its plugin API, and `ts_bot_backend rcbot` selects it instead of the native TS bots
-(the-specialistsmod-rs#104). Progress: [#1](https://github.com/the-specialists-mod/tsmod-rcbot-rs/issues/1).
+(the-specialistsmod-rs#104). It needs the port's v3.0.7 or later (plugin API v6); v0.1.0 is the
+last release for v3.0.6 (plugin API v5). Progress: [#1](https://github.com/the-specialists-mod/tsmod-rcbot-rs/issues/1).
 
 ## Status
 

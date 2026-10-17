@@ -30,8 +30,7 @@ branches are kept and every other mod's are removed; where a branch chose betwee
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
 The host uses the port's plugin API v6 (the-specialistsmod-rs#104, #117, #197; `goldsrc-sys` and
-`ts-plugin-api` from the port's `plugin-api-v6` branch, `ed64e50`, through a `[patch]` on a local
-checkout until a port release has it; then the tags in the root `Cargo.toml` move to it). It registers the bot backend `rcbot`
+`ts-plugin-api` pinned to the port's v3.0.7 release). It registers the bot backend `rcbot`
 (`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
 `client_command`), and the `rcbot_ver` cvar. The plugin's data directory
 (`<gamedir>/tsmod/rcbot/`) is RCBot's bot folder: `bot_weapons.ini`, `bot_config.ini`,
