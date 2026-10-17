@@ -109,9 +109,10 @@ never run their scripts.
 
 - Work on `main`. Commit in logical steps; commit or push only when asked. Commit messages
   reference the issue they are part of ("Part of #1").
-- **Releases** come from GitHub Actions only (`.github/workflows/release.yml`): bump the version in
-  the root `Cargo.toml` in a release commit, then push a matching `v<version>` tag; the workflow
-  fails a tag that doesn't match. Don't upload locally built archives.
+- **Releases** come from GitHub Actions only (`.github/workflows/release.yml`): push a `v<version>`
+  tag. The build applies the tag's version (`TSMOD_RCBOT_VERSION`, `crates/host/build.rs`: what
+  the plugin reports to the port, e.g. `RCBot 0.2.1`); keep the root `Cargo.toml`'s version in step
+  with the latest tag. Don't upload locally built archives.
 - The port crates (`goldsrc-sys`, `ts-plugin-api`) are git dependencies pinned to one rev in the
   root `Cargo.toml`; `goldsrc-sys` needs `../xash3d-fwgs` (`.cargo/config.toml`, or `FWGS_DIR`).
   Pin them to a port release tag, never a local path, before this repository releases.

@@ -6,7 +6,9 @@
 # (.github/package.sh). Each archive holds a ts/ directory to copy over the server's ts/
 # (dlls/tsmod_rcbot*, tsmod/rcbot/), with the licence files beside it. A Linux build runs on
 # that glibc and newer. A manual run (workflow_dispatch) builds the archives as workflow
-# artifacts without publishing a release.
+# artifacts without publishing a release. A tag's version is the release's: the plugin reports it
+# (TSMOD_RCBOT_VERSION, crates/host/build.rs), so the root Cargo.toml needn't be bumped first; a
+# manual run reports Cargo.toml's.
 name: release
 
 on:
@@ -22,22 +24,7 @@ env:
   FWGS_REF: 51353ff8d65e58300eeb2bd014867673f1f367c6
 
 jobs:
-  version:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check the version matches the tag
-        if: github.ref_type == 'tag'
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
-            echo "Cargo.toml's version is $version but the tag is $GITHUB_REF_NAME: bump it in a Release commit" >&2
-            exit 1
-          fi
-
   linux:
-    needs: version
     strategy:
       matrix:
         include:
@@ -82,7 +69,7 @@ jobs:
       - name: Package
         run: |
           version="${GITHUB_REF_NAME}"
-          [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] && export TSMOD_RCBOT_VERSION="$version" || version="${GITHUB_SHA::7}"
           .github/package.sh "$version" "-glibc${{ matrix.glibc }}" linux
         shell: bash
 
@@ -105,7 +92,6 @@ jobs:
           path: out/*
 
   windows:
-    needs: version
     # 24.04 for its clang 18: bindgen with 22.04's clang 14 fails on the MinGW intrinsics headers.
     runs-on: ubuntu-24.04
     steps:
@@ -130,7 +116,7 @@ jobs:
       - name: Package
         run: |
           version="${GITHUB_REF_NAME}"
-          [[ "$GITHUB_REF_TYPE" == tag ]] || version="${GITHUB_SHA::7}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] && export TSMOD_RCBOT_VERSION="$version" || version="${GITHUB_SHA::7}"
           .github/package.sh "$version" "" windows
 
       - uses: actions/upload-artifact@v4

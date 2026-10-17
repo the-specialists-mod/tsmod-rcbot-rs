@@ -216,9 +216,15 @@ pub unsafe extern "C" fn TSRS_PluginLoad(
     OK
 }
 
+/// The release's version (build.rs: the tag's, or the crate's).
+const PLUGIN_VERSION: &CStr = match CStr::from_bytes_with_nul(concat!(env!("TSMOD_RCBOT_VERSION"), "\0").as_bytes()) {
+    Ok(v) => v,
+    Err(_) => panic!("TSMOD_RCBOT_VERSION isn't a C string"),
+};
+
 const DESCRIPTOR: Plugin = Plugin {
     name: c"RCBot".as_ptr(),
-    version: c"0.1".as_ptr(),
+    version: PLUGIN_VERSION.as_ptr(),
     game_init: Some(game_init),
     precache: Some(precache),
     server_activate: Some(server_activate),
