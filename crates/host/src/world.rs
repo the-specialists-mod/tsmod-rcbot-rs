@@ -62,8 +62,7 @@ fn player_state(p: &PlayerSnapshot) -> PlayerState {
         powerup_until: p.powerup_until,
         stored_powerup: p.stored_powerup,
         time_scale: p.time_scale,
-        // The snapshot lacks `PlayerInfo::kungfu` (permanent kung fu); nothing in the bot reads it.
-        kungfu: false,
+        kungfu: p.flags & pf::KUNG_FU != 0,
         has_flag: p.flags & pf::HAS_FLAG != 0,
         flags: p.flags,
         stunt_bits: p.stunt_bits,
@@ -418,5 +417,44 @@ impl Random for EngineRandom {
 
     fn random_float(&mut self, lo: f32, hi: f32) -> f32 {
         self.0.random_float(lo, hi)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcbot::bot::pflag;
+    use ts_plugin_api::player_flag as pf;
+
+    #[test]
+    fn the_bots_player_flags_are_the_ports() {
+        let pairs = [
+            (pflag::JOINED, pf::JOINED),
+            (pflag::ALIVE, pf::ALIVE),
+            (pflag::BOT, pf::BOT),
+            (pflag::ON_GROUND, pf::ON_GROUND),
+            (pflag::DUCKING, pf::DUCKING),
+            (pflag::ON_LADDER, pf::ON_LADDER),
+            (pflag::IN_WATER, pf::IN_WATER),
+            (pflag::HAS_FLAG, pf::HAS_FLAG),
+            (pflag::SPECTATOR, pf::SPECTATOR),
+            (pflag::PRONE, pf::PRONE),
+            (pflag::STUNTING, pf::STUNTING),
+            (pflag::KUNG_FU, pf::KUNG_FU),
+            (pflag::SUPERJUMP, pf::SUPERJUMP),
+        ];
+        for (bot, port) in pairs {
+            assert_eq!(bot, port);
+        }
+    }
+
+    #[test]
+    fn permanent_kung_fu_comes_from_the_snapshot() {
+        let mut p = PlayerSnapshot { flags: pf::JOINED | pf::ALIVE | pf::SUPERJUMP, ..PlayerSnapshot::default() };
+        let s = player_state(&p);
+        assert!(!s.kungfu);
+        assert_ne!(s.flags & pflag::SUPERJUMP, 0);
+        p.flags |= pf::KUNG_FU;
+        assert!(player_state(&p).kungfu);
     }
 }

@@ -14,7 +14,7 @@ Start with [README.md](README.md), then [docs/design.md](docs/design.md).
 | What RCBot does | Upstream source, [APGRoboCop/rcbotold](https://github.com/APGRoboCop/rcbotold) at `b9c86c2` (`dlls/`): `bot.cpp`/`bot.h` (the bot), `waypoint.cpp`, `bot_navigate.cpp`, `bot_weapons.*`, `ga.cpp`/`bot_ga.cpp`/`perceptron.cpp`/`bot_nn.cpp`/`som.cpp`, `bot_commands.cpp`, `bot_menu.cpp`, `globals.cpp`, `megahal.cpp` |
 | What it means for TS | `MOD_TS` branches upstream; the research comment on the-specialistsmod-rs#104 (TS-specific bugs, which messages it used) |
 | How TS 3.0 behaves | The port (`crates/server`, `crates/shared/src/protocol`), the TS decomp at `../ts30-decomp` |
-| The interface to the port | the port's `crates/plugin-api` and `docs/implementation/plugin-api.md`, `bot-plugins.md` (API v6, the-specialistsmod-rs#104, #117, #197); the stub plugin `crates/tsmod-test` |
+| The interface to the port | the port's `crates/plugin-api` and `docs/implementation/plugin-api.md`, `bot-plugins.md` (API v7, the-specialistsmod-rs#104, #117, #197, #290); the stub plugin `crates/tsmod-test` |
 | Real data | `data/rcbot/waypoints/ts/` (credited in its README), `data/rcbot/bot_weapons.ini` |
 
 Port behaviour from upstream's source, not from memory. When this port deliberately differs, add
@@ -25,7 +25,7 @@ it to `docs/design.md` §4; upstream bugs you find go in §5.
 ```
 crates/rcbot     the bot: #![deny(unsafe_code)], no FFI, engine access through traits
                  (nav::World, bot::BotWorld, Random, config::CommandHost). Map: docs/design.md §2
-crates/host      the tsmod_rcbot cdylib: the ONLY crate allowed unsafe (plugin API v6)
+crates/host      the tsmod_rcbot cdylib: the ONLY crate allowed unsafe (plugin API v7)
 xtask            cargo xtask build | dist | test | lint | all | e2e
 data/rcbot       shipped data
 tools/reference  the C++ reference harness (build.sh <rcbotold checkout>)

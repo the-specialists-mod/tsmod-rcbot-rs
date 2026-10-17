@@ -218,6 +218,10 @@ pub mod pflag {
     pub const PRONE: i32 = 0x200;
     /// In a stunt (dive, flip, roll, wall jump or climb, or ducked for one).
     pub const STUNTING: i32 = 0x400;
+    /// Permanent kung fu picked up this life (plugin API v7, [`PlayerState::kungfu`]).
+    pub const KUNG_FU: i32 = 0x800;
+    /// Permanent superjump picked up this life (plugin API v7).
+    pub const SUPERJUMP: i32 = 0x1000;
 }
 
 /// TS's stunt bits ([`PlayerState::stunt_bits`], the plugin API's `stunt_bits`) the bot reads.

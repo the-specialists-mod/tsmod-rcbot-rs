@@ -4,8 +4,8 @@
 **The Specialists 3.0**, as the `tsmod_rcbot` bot plugin of the
 [TS Rust port](https://github.com/the-specialists-mod/the-specialistsmod-rs). The port loads it
 through its plugin API, and `ts_bot_backend rcbot` selects it instead of the native TS bots
-(the-specialistsmod-rs#104). It needs the port's v3.0.7 or later (plugin API v6); v0.1.0 is the
-last release for v3.0.6 (plugin API v5). Progress: [#1](https://github.com/the-specialists-mod/tsmod-rcbot-rs/issues/1).
+(the-specialistsmod-rs#104). It needs the port's v3.0.8 or later (plugin API v7); v0.2.0 is the
+last release for v3.0.7 (plugin API v6), v0.1.0 for v3.0.6 (plugin API v5). Progress: [#1](https://github.com/the-specialists-mod/tsmod-rcbot-rs/issues/1).
 
 ## Status
 
@@ -17,7 +17,7 @@ last release for v3.0.6 (plugin API v5). Progress: [#1](https://github.com/the-s
 | Learning: GA, perceptrons, NN, SOM, `.rld` learned-data files (byte-compatible) | done; checked against RCBot's own code (docs/design.md §6) |
 | Chat: MegaHAL (byte-compatible brains), `bot_chat.ini`, replies | done; checked against RCBot's own code |
 | Config: `bot_config.ini`, users, profiles, reputation, menus, the `rcbot` command set and `±rcbot_force_grip` (side effects through a host trait) | done; the host runs the commands |
-| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v6 |
+| Plugin entry point and host (`ts_bot_backend rcbot`, `rcbot` commands, data in `tsmod/rcbot/`, `map_configs/ts/<map>.cfg`, RCBot's `min_bots`/`max_bots`) | done, on the port's plugin API v7 |
 | Bot core: think, tasks, waypoint following with A*, stuck handling, view and aim | done |
 | Combat: what the bot sees (a fresh line of sight before every shot), enemy choice by reputation, best weapon (of the inventory the game reports), reloads (one press per empty clip) and switching (upstream's TS reload bug fixed), empty guns dropped, cover, hearing (the port's `sound` and `weapon_fired` callbacks), turning along an unseen shooter's shot; TS 3.0's triggers (semi, burst and akimbo guns tapped at their rate), aim points (chest, head, shotgun centre) with a skill-scaled angular error, lead and timed turning, a reaction time and on-target and recoil checks before each shot, strafing at the gun's range, dodge dives, a sticky threat-scored enemy choice that answers whoever hurts it, weapons chosen by range, pre-aim and holding angles out of sight, grenades thrown and fled, power-ups used when they help, partial reloads, blades that slash instead of throwing | done |
 | Kung fu (a port addition): reads the opponent (its presses and the game's block, hit and recovery timers), defensive or offensive stance, blocks, ducks and steps out of attacks, counters, learned and evolving combos with crouch-jump, flying and wall-jump kicks, saved in `<id>.rkf`; unarmed bots take cover from distant gunmen | done |
@@ -44,7 +44,7 @@ crates/rcbot     the bot (no unsafe, no FFI)
   src/config/    bot_config.ini, users, profiles, reputation, menus, rcbot commands
   src/bot/       the bot: think, tasks, navigation, special waypoints, movement, aim, combat,
                  its weapons, events and hearing, squads, the bot camera
-crates/host      the tsmod_rcbot library: the plugin API v6 and the engine (the only crate allowed unsafe)
+crates/host      the tsmod_rcbot library: the plugin API v7 and the engine (the only crate allowed unsafe)
 data/rcbot       bot_weapons.ini (TS), waypoints/ts/ (44 maps)
 tools/reference  C++ harnesses that record RCBot's own results for the tests
 xtask            cargo xtask build | dist | test | lint | all

@@ -15,7 +15,7 @@ crates/rcbot     the bot, #![deny(unsafe_code)], no FFI. Engine queries go throu
                  nav::World (traces, point contents), bot::BotWorld (entities, PVS, time),
                  Random (RANDOM_LONG / RANDOM_FLOAT) and config::CommandHost (commands' effects).
 crates/host      the tsmod_rcbot cdylib, the only crate allowed unsafe: TSRS_PluginLoad, safe
-                 wrappers over the plugin API v6 and the engine table (api.rs), the traits on
+                 wrappers over the plugin API v7 and the engine table (api.rs), the traits on
                  them (world.rs, commands.rs), RCBot's globals in one State, the per-frame bot
                  loop and the editors' display (lib.rs, editor.rs)
 xtask            build | dist | test | lint | all | e2e
@@ -29,8 +29,10 @@ Upstream keeps its state in globals (`waypoints`, `num_waypoints`, `paths`, `Way
 branches are kept and every other mod's are removed; where a branch chose between mods
 (`gBotGlobals.IsMod(MOD_TS)`), the TS answer is written in with a comment.
 
-The host uses the port's plugin API v6 (the-specialistsmod-rs#104, #117, #197; `goldsrc-sys` and
-`ts-plugin-api` pinned to the port's v3.0.7 release). It registers the bot backend `rcbot`
+The host uses the port's plugin API v7 (the-specialistsmod-rs#104, #117, #197, #290; `goldsrc-sys`
+and `ts-plugin-api` pinned to the port's v3.0.8 release). Of v7's additions it reads the
+snapshot's `KUNG_FU` and `SUPERJUMP` player flags (`PlayerState::kungfu`, `pflag`) and
+`FrameInfo::team_scores`; it attaches no plugins and adds no listeners. It registers the bot backend `rcbot`
 (`ts_bot_backend rcbot`), the `rcbot` server command (and handles `rcbot`/`menuselect` in
 `client_command`), and the `rcbot_ver` cvar. The plugin's data directory
 (`<gamedir>/tsmod/rcbot/`) is RCBot's bot folder: `bot_weapons.ini`, `bot_config.ini`,
@@ -43,7 +45,7 @@ passes the usercmd to `run_cmd` and the bot's actions to `bot_command`, `select_
 share one world that reads each entity once a frame). The players and the frame's rules come from
 the snapshot the server builds at `StartFrame` (`players`, `frame_info`, read once a frame and
 shared by every world until the next, callbacks included; `player_info` only for a client that
-joined since), the team scores from `game_state` once a second. It hears deaths
+joined since), the team scores too (`FrameInfo::team_scores`, plugin API v7). It hears deaths
 (`player_killed`), damage (`damage`), sounds (`sound`), touches (`entity_touch`), shots
 (`weapon_fired`), pickups (`item_pickup`) and players' `say` (`client_command`), and draws the
 HUD menus (`ShowMenu`) and the bot camera with the engine's functions.
@@ -431,8 +433,8 @@ bucket search order.
   and again after each spawn (`SpawnInit` reset the clock). Under v5 the port's bot rounded and
   carried the remainder itself and sent from 9.5 ms; the skip is gone with the server's carry,
   which can't lose time to truncation.
-* **Team scores**: `m_iTeamScores` comes from `GameState::team_scores` once a second, by rules
-  team (the bot's `team`); see §5 for upstream's indexing.
+* **Team scores**: `m_iTeamScores` comes from `FrameInfo::team_scores` every frame (plugin API
+  v7; under v6 the host read `GameState::team_scores` once a second), by rules team (the bot's `team`); see §5 for upstream's indexing.
 * **The vision pass** (`UpdateVisibles`) stops at the frame's highest entity index in use
   (`FrameInfo::highest_edict`, `BotWorld::highest_entity`) instead of `maxEntities`, and drops
   what it saw above it; upstream walked every slot up to `gpGlobals->maxEntities` (usually 900 to
@@ -1144,6 +1146,8 @@ those by going through the port's own code when that code is ported.
   (`collect_search`) ending at the world FWGS and ReHLDS return for "no more" (and at a repeat)
   instead of starting over: upstream's loops stop at `FNullEnt`, the port's first ones only at
   NULL, so each search gave up to 4097 repeats.
+  The bot's `pflag` bits against the port's `player_flag` (v7's `KUNG_FU` and `SUPERJUMP`
+  included), and `PlayerState::kungfu` from the snapshot's `KUNG_FU`.
 * **`cargo xtask e2e [root...]`** (all seven `~/games` roots in parallel, about 5 min): installs
   the port (`cargo xtask install <root>` in `../rust-hlmod-the-specialists`) and
   `dist/<platform>/` over `<root>/ts/`, starts a dedicated server on ts_dojo that selects

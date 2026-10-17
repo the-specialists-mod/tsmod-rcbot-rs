@@ -1,4 +1,4 @@
-//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v6,
+//! `tsmod_rcbot`: the plugin library the TS Rust port loads (plugin API v7,
 //! the-specialistsmod-rs#104), and the only crate in this workspace allowed `unsafe` (every other
 //! crate is `#![deny(unsafe_code)]`, which `cargo xtask lint` checks).
 //!
@@ -89,10 +89,8 @@ pub struct State {
     pub(crate) sprite: i32,
     /// `m_sModelIndexFireball` (`sprites/zerogxplode.spr`, `util explo`).
     pub(crate) fireball: i32,
-    /// `m_iTeamScores`: the `TeamScore` values (`GameState::team_scores`), refreshed every second.
+    /// `m_iTeamScores`: the `TeamScore` values (`FrameInfo::team_scores`), refreshed every frame.
     pub(crate) team_scores: [i32; 4],
-    /// When the team scores are read next.
-    next_scores: f32,
     pub(crate) editor: editor::Editor,
     pub(crate) squads: Squads,
     pub(crate) botcam: BotCam,
@@ -305,7 +303,6 @@ extern "C" fn game_init() {
         sprite: 0,
         fireball: 0,
         team_scores: [0; 4],
-        next_scores: 0.0,
         editor: editor::Editor::default(),
         squads: Squads::default(),
         botcam: BotCam::default(),
@@ -360,7 +357,6 @@ unsafe extern "C" fn server_activate(map: *const c_char) {
         world::refresh_frame(a);
         s.masters.clear();
         s.masters_read = false;
-        s.next_scores = 0.0;
         s.weapons.clear();
         s.bots.clear();
         s.stats.clear();
@@ -494,12 +490,8 @@ extern "C" fn start_frame() {
     with_state(None, |s, a, e| {
         // The frame's players and rules, once for every bot and callback (plugin API v6).
         let frame = world::refresh_frame(a);
-        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages: `FrameInfo` lacks
-        // them, and only a death's fitness reads them, so `game_state` once a second.
-        if frame.time >= s.next_scores || frame.time < s.next_scores - 2.0 {
-            s.next_scores = frame.time + 1.0;
-            s.team_scores = a.game_state().team_scores;
-        }
+        // `m_iTeamScores`, which upstream keeps from the `TeamScore` messages (plugin API v7).
+        s.team_scores = frame.team_scores;
         if !s.masters_read {
             s.masters_read = true;
             let highest = if frame.highest_edict > 0 { frame.highest_edict } else { e.max_entities() - 1 };

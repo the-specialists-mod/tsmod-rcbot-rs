@@ -76,8 +76,8 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "goldsrc-sys"
-version = "3.0.7"
-source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.7#ba33099d1c294c02de78493a6c4c83cb93177e4f"
+version = "3.0.8"
+source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.8#be0dcebc99db35a9323508c387299e8015b5665c"
 dependencies = [
  "bindgen",
 ]
@@ -224,8 +224,8 @@ dependencies = [
 
 [[package]]
 name = "ts-plugin-api"
-version = "3.0.7"
-source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.7#ba33099d1c294c02de78493a6c4c83cb93177e4f"
+version = "3.0.8"
+source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v3.0.8#be0dcebc99db35a9323508c387299e8015b5665c"
 
 [[package]]
 name = "tsmod-rcbot"
