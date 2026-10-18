@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "rcbot"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "miniz_oxide",
 ]
@@ -229,7 +229,7 @@ source = "git+https://github.com/the-specialists-mod/the-specialistsmod-rs?tag=v
 
 [[package]]
 name = "tsmod-rcbot"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "goldsrc-sys",
  "rcbot",
@@ -250,4 +250,4 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.3.1"
