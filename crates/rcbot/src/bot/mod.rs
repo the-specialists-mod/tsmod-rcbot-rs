@@ -67,6 +67,10 @@ pub mod buttons {
     pub const BACK: i32 = 1 << 4;
     /// `IN_USE`.
     pub const USE: i32 = 1 << 5;
+    /// `IN_MOVELEFT`: TS's prone side roll (`HandleSlide`) reads the strafe keys, not the speed.
+    pub const MOVELEFT: i32 = 1 << 9;
+    /// `IN_MOVERIGHT`.
+    pub const MOVERIGHT: i32 = 1 << 10;
     /// `IN_ATTACK2`.
     pub const ATTACK2: i32 = 1 << 11;
     /// `IN_RELOAD`.

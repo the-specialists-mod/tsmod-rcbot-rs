@@ -2495,6 +2495,23 @@ fn dives_wait_for_the_stunt_cooldown_and_get_up_when_the_game_allows() {
 }
 
 #[test]
+fn a_prone_bot_strafes_with_the_strafe_keys_so_it_rolls() {
+    let mut rig = Rig::new(Config::default());
+    let strafe = buttons::MOVELEFT | buttons::MOVERIGHT;
+    // Standing: the side speed alone, as before.
+    rig.bot.strafe_speed = -200.0;
+    assert_eq!(rig.bot.run_player_move(1.0).buttons & strafe, 0);
+    // Prone: the key of the side it strafes to (TS's side roll), none without a side speed.
+    rig.bot.state.flags |= pflag::PRONE;
+    let cmd = rig.bot.run_player_move(1.1);
+    assert_eq!((cmd.buttons & strafe, cmd.side), (buttons::MOVELEFT, -200.0));
+    rig.bot.strafe_speed = 150.0;
+    assert_eq!(rig.bot.run_player_move(1.2).buttons & strafe, buttons::MOVERIGHT);
+    rig.bot.strafe_speed = 0.0;
+    assert_eq!(rig.bot.run_player_move(1.3).buttons & strafe, 0);
+}
+
+#[test]
 fn a_shot_from_out_of_sight_turns_the_bot_along_it_and_headshots_are_counted() {
     let mut rig = Rig::new(Config::default());
     // The shooter stands behind the bot, out of its view.

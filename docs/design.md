@@ -659,6 +659,13 @@ Navigation, movement and tactics (#1, phase 3: bots that move like experienced T
   get up as soon as the game's `prone_lock` ends (without the timers, 0.6 s after the dive); no
   dive, wall jump or squad prone is pressed while the stunt cools down (`next_stunt_at`: the press
   would be lost; a stuck bot crouch jumps instead); `DEFEND` no longer presses it.
+* **Prone strafes roll** (`movement.rs` `prone_strafe_keys`): TS 3.0 rolls a prone player
+  sideways when a strafe key is down (`HandleSlide` reads `IN_MOVELEFT` / `IN_MOVERIGHT`), and
+  the roll leaves the body lying facing the aim (`slide_f_*`); the forward move is 0 while
+  prone. Upstream sent the side speed without the keys, so a prone bot only slid at 0.3 of it,
+  lying the way it dived, which with its aim elsewhere looked like crawling forward or back. A
+  prone bot's usercmd now holds the key of the side it strafes to; standing, the keys stay off
+  (ladders read them).
 * **Task timeouts**: `SetTimeToCompleteSchedule` times out `secs` from now (upstream's `2 * now +
   secs` never came, §5.50); a `FIND_PATH` that found its path has 30 s to reach the first waypoint
   (upstream: no limit until a waypoint was touched, then 20-30 s per touch, as now). A goal A*

@@ -401,8 +401,23 @@ impl Bot {
         if self.hold_attack_time > now {
             self.primary_attack();
         }
-        let buttons = self.fire_buttons(self.button, now);
+        let mut buttons = self.fire_buttons(self.button, now);
         let (forward, side) = self.capped_speeds(now);
+        buttons |= prone_strafe_keys(self.state.prone(), side);
         BotCmd { angles: self.v_angle, forward, side, up: self.up_speed, buttons, impulse: 0 }
+    }
+}
+
+/// The strafe key a player would hold for `side` while prone (design §4): TS rolls a prone player
+/// sideways on `IN_MOVELEFT` / `IN_MOVERIGHT` (`HandleSlide`), lying facing the aim afterwards,
+/// and the forward move is 0 there. Speed alone only slides the lying body at 0.3 of it, still
+/// facing the dive. Standing, the keys stay off (ladders read them, kung fu doesn't).
+pub(crate) fn prone_strafe_keys(prone: bool, side: f32) -> i32 {
+    if !prone || side == 0.0 {
+        0
+    } else if side < 0.0 {
+        buttons::MOVELEFT
+    } else {
+        buttons::MOVERIGHT
     }
 }
